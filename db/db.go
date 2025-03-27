@@ -155,7 +155,7 @@ func (db *Database) InsertUser(ctx context.Context, username, password string) e
 	return nil
 }
 
-func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID, srcMailboxID, destMailboxID int, destMailboxName string, s3UploadFunc func(imap.UID) error) (imap.UID, error) {
+func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID, srcMailboxID int, destStorageUUID uuid.UUID, destMailboxID int, destMailboxName string, s3UploadFunc func(imap.UID) error) (imap.UID, error) {
 	tx, err := d.Pool.Begin(ctx)
 	if err != nil {
 		log.Printf("Failed to begin transaction: %v", err)
@@ -210,14 +210,14 @@ func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID
 		INSERT INTO messages
 			(mailbox_id, mailbox_name, uid, storage_uuid, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, recipients_json, text_body, text_body_tsv, created_modseq)
 		SELECT
-			$1, $2, $3, storage_uuid, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, recipients_json, text_body, text_body_tsv, nextval('messages_modseq')
+			$1, $2, $3, $4, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, recipients_json, text_body, text_body_tsv, nextval('messages_modseq')
 		FROM
 			messages
 		WHERE
-			mailbox_id = $4 AND
-			uid = $5
+			mailbox_id = $5 AND
+			uid = $6
 		RETURNING uid
-	`, destMailboxID, destMailboxName, highestUID, srcMailboxID, srcMessageUID).Scan(&newMsgUID)
+	`, destMailboxID, destMailboxName, highestUID, destStorageUUID, srcMailboxID, srcMessageUID).Scan(&newMsgUID)
 
 	// TODO: this should not be a fatal error
 	if err != nil {
