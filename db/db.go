@@ -266,6 +266,10 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		return 0, consts.ErrSerializationFailed
 	}
 
+	if options.InternalDate.IsZero() {
+		options.InternalDate = time.Now()
+	}
+
 	tx, err := d.Pool.Begin(ctx)
 	if err != nil {
 		log.Printf("Failed to begin transaction: %v", err)
