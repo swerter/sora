@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 	uid INTEGER NOT NULL,            -- The message UID in its mailbox
 	storage_uuid TEXT NOT NULL,			-- Unique object key for the message
-
+	recipients_json JSONB NOT NULL,	-- JSONB field to store recipients
 	message_id TEXT NOT NULL, 			-- The Message-ID from the message headers
 	in_reply_to TEXT,								-- The In-Reply-To header from the message
 	subject TEXT,										-- Subject of the message
@@ -90,19 +90,5 @@ CREATE INDEX IF NOT EXISTS idx_messages_created_modseq ON messages (created_mods
 CREATE INDEX IF NOT EXISTS idx_messages_updated_modseq ON messages (updated_modseq);
 CREATE INDEX IF NOT EXISTS idx_messages_expunged_modseq ON messages (expunged_modseq);
 
-CREATE INDEX IF NOT EXISTS idx_messages_text_body_tsv ON messages USING gin(text_body_tsv);
-
-CREATE TABLE IF NOT EXISTS recipients (
-	id SERIAL PRIMARY KEY,
-	message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
-	address_type TEXT NOT NULL,  -- To, Cc, Bcc, ReplyTo
-	name TEXT,  -- Name part, if available
-	email_address TEXT NOT NULL,  -- Email address
-	UNIQUE (message_id, address_type, email_address)  -- Ensure unique email addresses per message
-);
-
--- Index to speed up recipient lookups by message_id
-CREATE INDEX IF NOT EXISTS idx_recipients_message_id ON recipients (message_id);
-
--- Index to speed up recipient lookups by email (for searching by recipient)
-CREATE INDEX IF NOT EXISTS idx_recipients_email_address ON recipients (email_address);
+CREATE INDEX IF NOT EXISTS idx_messages_text_body_tsv ON messages USING GIN (text_body_tsv);
+CREATE INDEX IF NOT EXISTS idx_messages_recipients_json ON messages USING GIN (recipients_json jsonb_path_ops);

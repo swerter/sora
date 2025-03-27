@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -154,7 +155,7 @@ func (db *Database) InsertUser(ctx context.Context, username, password string) e
 	return nil
 }
 
-func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID, srcMailboxID, destMailboxID int, s3UploadFunc func(imap.UID) error) (imap.UID, error) {
+func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID, srcMailboxID, destMailboxID int, destMailboxName string, s3UploadFunc func(imap.UID) error) (imap.UID, error) {
 	tx, err := d.Pool.Begin(ctx)
 	if err != nil {
 		log.Printf("Failed to begin transaction: %v", err)
@@ -207,16 +208,16 @@ func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID
 	var newMsgUID imap.UID
 	err = tx.QueryRow(ctx, `
 		INSERT INTO messages
-			(mailbox_id, uid, storage_uuid, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, text_body, text_body_tsv, created_modseq)
+			(mailbox_id, mailbox_name, uid, storage_uuid, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, recipients_json, text_body, text_body_tsv, created_modseq)
 		SELECT
-			$1, $2, storage_uuid, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, text_body, text_body_tsv, nextval('messages_modseq')
+			$1, $2, $3, storage_uuid, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, recipients_json, text_body, text_body_tsv, nextval('messages_modseq')
 		FROM
 			messages
 		WHERE
-			mailbox_id = $3 AND
-			uid = $4
+			mailbox_id = $4 AND
+			uid = $5
 		RETURNING uid
-	`, destMailboxID, highestUID, srcMailboxID, srcMessageUID).Scan(&newMsgUID)
+	`, destMailboxID, destMailboxName, highestUID, srcMailboxID, srcMessageUID).Scan(&newMsgUID)
 
 	// TODO: this should not be a fatal error
 	if err != nil {
@@ -244,6 +245,7 @@ func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID
 
 type InsertMessageOptions struct {
 	MailboxID     int
+	MailboxName   string
 	UUIDKey       uuid.UUID
 	MessageID     string
 	Flags         []imap.Flag
@@ -292,29 +294,37 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		return 0, consts.ErrDBUpdateFailed
 	}
 
+	recipientsJSON, err := json.Marshal(options.Recipients)
+	if err != nil {
+		log.Printf("Failed to marshal recipients: %v", err)
+		return 0, consts.ErrSerializationFailed
+	}
+
 	// Convert the inReplyTo slice to a space-separated string
 	inReplyToStr := strings.Join(options.InReplyTo, " ")
 	bitwiseFlags := FlagsToBitwise(options.Flags)
 	var id int
 	err = tx.QueryRow(ctx, `
 		INSERT INTO messages
-			(mailbox_id, uid, message_id, storage_uuid, flags, internal_date, size, text_body, text_body_tsv, subject, sent_date, in_reply_to, body_structure, created_modseq)
+			(mailbox_id, mailbox_name, uid, message_id, storage_uuid, flags, internal_date, size, text_body, text_body_tsv, subject, sent_date, in_reply_to, body_structure, recipients_json, created_modseq)
 		VALUES
-			(@mailbox_id, @uid, @message_id, @storage_uuid, @flags, @internal_date, @size, @text_body, to_tsvector('simple', @text_body), @subject, @sent_date, @in_reply_to, @body_structure, nextval('messages_modseq'))
+			(@mailbox_id, @mailbox_name, @uid, @message_id, @storage_uuid, @flags, @internal_date, @size, @text_body, to_tsvector('simple', @text_body), @subject, @sent_date, @in_reply_to, @body_structure, @recipients_json, nextval('messages_modseq'))
 		RETURNING id
 	`, pgx.NamedArgs{
-		"mailbox_id":     options.MailboxID,
-		"uid":            highestUID,
-		"message_id":     options.MessageID,
-		"storage_uuid":   options.UUIDKey,
-		"flags":          bitwiseFlags,
-		"internal_date":  options.InternalDate,
-		"size":           options.Size,
-		"text_body":      options.PlaintextBody,
-		"subject":        options.Subject,
-		"sent_date":      options.SentDate,
-		"in_reply_to":    inReplyToStr,
-		"body_structure": bodyStructureData,
+		"mailbox_id":      options.MailboxID,
+		"mailbox_name":    options.MailboxName,
+		"uid":             highestUID,
+		"message_id":      options.MessageID,
+		"storage_uuid":    options.UUIDKey,
+		"flags":           bitwiseFlags,
+		"internal_date":   options.InternalDate,
+		"size":            options.Size,
+		"text_body":       options.PlaintextBody,
+		"subject":         options.Subject,
+		"sent_date":       options.SentDate,
+		"in_reply_to":     inReplyToStr,
+		"body_structure":  bodyStructureData,
+		"recipients_json": recipientsJSON,
 	}).Scan(&id)
 
 	if err != nil {
@@ -325,18 +335,6 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		}
 		log.Printf("Failed to insert message into database: %v", err)
 		return 0, consts.ErrDBInsertFailed
-	}
-
-	// Insert recipients into the database
-	for _, recipient := range options.Recipients {
-		_, err = tx.Exec(ctx, `
-				INSERT INTO recipients (message_id, address_type, name, email_address)
-				VALUES ($1, $2, $3, $4)
-			`, id, recipient.AddressType, recipient.Name, recipient.EmailAddress)
-		if err != nil {
-			log.Printf("Failed to insert recipient: %v", err)
-			return 0, consts.ErrDBInsertFailed
-		}
 	}
 
 	err = options.S3UploadFunc(options.UUIDKey, options.S3Buffer, options.Size)
@@ -387,6 +385,7 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 					flags, 
 					size, 
 					body_structure, 
+					recipient_json,
 					text_body, 
 					text_body_tsv, 
 					mailbox_id, 
@@ -405,6 +404,7 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 					flags, 
 					size, 
 					body_structure, 
+					recipient_json,
 					text_body, 
 					text_body_tsv, 
 					$2 AS mailbox_id,  -- Assign to the new mailbox
@@ -672,16 +672,17 @@ func (db *Database) ExpungeMessageUIDs(ctx context.Context, mailboxID int, uids 
 	return nil
 }
 
-// --- Recipients ---CREATE TABLE recipients (
+// --- Recipients
 func (db *Database) GetMessageEnvelope(ctx context.Context, UID imap.UID, mailboxID int) (*imap.Envelope, error) {
 	var envelope imap.Envelope
 
 	var inReplyTo string
+	var recipientsJSON []byte
 
 	var messageId int
 	err := db.Pool.QueryRow(ctx, `
         SELECT 
-            id, internal_date, subject, in_reply_to, message_id 
+            id, internal_date, subject, in_reply_to, message_id, recipients_json 
         FROM 
             messages
         WHERE 
@@ -694,6 +695,7 @@ func (db *Database) GetMessageEnvelope(ctx context.Context, UID imap.UID, mailbo
 		&envelope.Subject,
 		&inReplyTo,
 		&envelope.MessageID,
+		&recipientsJSON,
 	)
 	if err != nil {
 		log.Printf("Failed to fetch envelope fields: %v", err)
@@ -703,26 +705,17 @@ func (db *Database) GetMessageEnvelope(ctx context.Context, UID imap.UID, mailbo
 	// Split the In-Reply-To header into individual message IDs
 	envelope.InReplyTo = strings.Split(inReplyTo, " ")
 
-	// Query the recipients from the database
-	rows, err := db.Pool.Query(ctx, `
-        SELECT 
-					address_type, name, email_address
-        FROM 
-					recipients
-        WHERE 
-					message_id = $1
-    `, messageId)
-	if err != nil {
-		log.Printf("Failed to fetch recipients: %v", err)
+	var recipients []Recipient
+	if err := json.Unmarshal(recipientsJSON, &recipients); err != nil {
+		log.Printf("Failed to decode recipients JSON: %v", err)
 		return nil, err
 	}
-	defer rows.Close()
 
-	for rows.Next() {
+	for _, recipient := range recipients {
 		var addressType, name, emailAddress string
-		if err := rows.Scan(&addressType, &name, &emailAddress); err != nil {
-			return nil, fmt.Errorf("error scanning recipient row: %w", err)
-		}
+		addressType = recipient.AddressType
+		name = recipient.Name
+		emailAddress = recipient.EmailAddress
 
 		parts := strings.Split(emailAddress, "@")
 		mailboxPart, hostNamePart := parts[0], parts[1]
@@ -747,10 +740,6 @@ func (db *Database) GetMessageEnvelope(ctx context.Context, UID imap.UID, mailbo
 		default:
 			log.Printf("Warning: Unhandled address type: %s", addressType)
 		}
-	}
-
-	if err := rows.Err(); err != nil { // Check for errors from iterating over rows
-		return nil, fmt.Errorf("error iterating over recipient rows: %w", err)
 	}
 
 	return &envelope, nil
@@ -818,7 +807,7 @@ func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int, 
 		switch strings.ToLower(header.Key) {
 		case "to", "cc", "bcc", "reply-to":
 			args = append(args, strings.ToLower(header.Key), "%"+strings.ToLower(header.Value)+"%")
-			query += fmt.Sprintf(" AND id IN (SELECT message_id FROM recipients WHERE LOWER(address_type) = $%d AND LOWER(email_address) LIKE $%d)", len(args)-1, len(args))
+			query += fmt.Sprintf("AND EXISTS (SELECT 1 FROM jsonb_array_elements(messages.recipients_json) AS r WHERE LOWER(r->>'address_type') = $%d AND LOWER(r->>'email_address') = $%d)", len(args)-1, len(args))
 		}
 	}
 

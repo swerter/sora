@@ -128,6 +128,7 @@ func (s *IMAPSession) appendSingle(ctx context.Context, mbox *db.DBMailbox, mess
 
 	messageUID, err := s.server.db.InsertMessage(ctx, &db.InsertMessageOptions{
 		MailboxID:     mbox.ID,
+		MailboxName:   mbox.Name,
 		UUIDKey:       uuidKey,
 		MessageID:     messageID,
 		Flags:         options.Flags,
