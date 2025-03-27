@@ -36,10 +36,9 @@ type MessagePart struct {
 }
 
 type Recipient struct {
-	MessageID    int
-	EmailAddress string
-	AddressType  string
-	Name         string
+	EmailAddress string `json:"email"`
+	AddressType  string `json:"type"`
+	Name         string `json:"name,omitempty"`
 }
 
 // IMAP message flags as bitwise constants

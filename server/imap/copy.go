@@ -44,7 +44,7 @@ func (s *IMAPSession) Copy(seqSet imap.NumSet, mboxName string) (*imap.CopyData,
 	var destUIDs imap.UIDSet
 	for _, msg := range messages {
 		sourceUIDs.AddNum(msg.UID)
-		copiedUID, err := s.server.db.InsertMessageCopy(ctx, msg.UID, msg.MailboxID, destMailbox.ID, func(destUID imap.UID) error {
+		copiedUID, err := s.server.db.InsertMessageCopy(ctx, msg.UID, msg.MailboxID, destMailbox.ID, destMailbox.Name, func(destUID imap.UID) error {
 			// Copy message body from source mailbox to destination mailbox in S3
 			srcUUIDKey, err := uuid.Parse(msg.StorageUUID)
 			if err != nil {
