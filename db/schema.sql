@@ -60,9 +60,9 @@ CREATE TABLE IF NOT EXISTS messages (
 	--
 	mailbox_name TEXT,			   -- Store the mailbox path for restoring messages
 
-	deleted_at TIMESTAMP,			-- Soft delete column
-	flags_changed_at TIMESTAMP,			 -- Track the last time flags were changed
-	expunged_at TIMESTAMP,						 -- Track the last time the message was expunged
+	deleted_at TIMESTAMP,			  -- Soft delete column
+	flags_changed_at TIMESTAMP, -- Track the last time flags were changed
+	expunged_at TIMESTAMP,			-- Track the last time the message was expunged
 
 	created_modseq BIGINT NOT NULL,
 	updated_modseq BIGINT,
@@ -71,10 +71,14 @@ CREATE TABLE IF NOT EXISTS messages (
 
 -- Index to speed up message lookups by mailbox_id (for listing, searching)
 CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id ON messages (mailbox_id);
+
 CREATE INDEX IF NOT EXISTS idx_messages_storage_uuid ON messages (storage_uuid);
 
 -- Index to speed up message lookups by message_id
-CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages (message_id);
+CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages (LOWER(message_id));
+
+-- Index to speed up message lookups by in_reply_to
+CREATE INDEX IF NOT EXISTS idx_messages_in_reply_to ON messages (LOWER(in_reply_to));
 
 -- Index to speed up message lookups by mailbox_id and uid
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_mailbox_id_uid ON messages (mailbox_id, uid);
@@ -86,9 +90,22 @@ CREATE INDEX IF NOT EXISTS idx_messages_flags_changed_at ON messages (flags_chan
 CREATE INDEX IF NOT EXISTS idx_messages_expunged_at ON messages (expunged_at);
 CREATE INDEX IF NOT EXISTS idx_messages_deleted_at ON messages (deleted_at);
 
+-- Index for flags to speed up searches for seen messages
+CREATE INDEX IF NOT EXISTS idx_messages_flag_seen ON messages ((flags & 1)) WHERE (flags & 1) != 0;
+
+-- Modseq index for fast lookups
 CREATE INDEX IF NOT EXISTS idx_messages_created_modseq ON messages (created_modseq);
 CREATE INDEX IF NOT EXISTS idx_messages_updated_modseq ON messages (updated_modseq);
 CREATE INDEX IF NOT EXISTS idx_messages_expunged_modseq ON messages (expunged_modseq);
 
+-- Index for faster searches on the subject field
+-- This index uses the pg_trgm extension for trigram similarity searches
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_messages_subject_trgm ON messages USING gin (LOWER(subject) gin_trgm_ops);
+
+-- Index for full-text search on the text_body field
 CREATE INDEX IF NOT EXISTS idx_messages_text_body_tsv ON messages USING GIN (text_body_tsv);
+
+-- Index recipients_json for faster searches on recipients
+-- This index uses the jsonb_path_ops for efficient querying
 CREATE INDEX IF NOT EXISTS idx_messages_recipients_json ON messages USING GIN (recipients_json jsonb_path_ops);

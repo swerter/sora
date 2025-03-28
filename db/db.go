@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"maps"
+
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/google/uuid"
@@ -745,119 +747,214 @@ func (db *Database) GetMessageEnvelope(ctx context.Context, UID imap.UID, mailbo
 	return &envelope, nil
 }
 
-func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int, numKind imapserver.NumKind, criteria *imap.SearchCriteria) ([]Message, error) {
+// buildSearchCriteria builds the SQL WHERE clause for the search criteria
+func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPrefix string, paramCounter *int) (string, pgx.NamedArgs) {
+	var conditions []string
+	args := pgx.NamedArgs{}
 
-	// Start building the query using a common table expression (CTE) to calculate sequence numbers
-	baseQuery := `
-		WITH message_seqs AS (
-			SELECT
-				*,
-				ROW_NUMBER() OVER (ORDER BY id) AS seqnum
-			FROM
-				messages
-			WHERE
-				mailbox_id = $1 AND
-				expunged_at IS NULL
-		)
-	`
-	args := []interface{}{mailboxID}
+	nextParam := func() string {
+		*paramCounter++
+		return fmt.Sprintf("%s%d", paramPrefix, *paramCounter)
+	}
 
-	// Start building the main query based on the CTE
-	query := "SELECT uid FROM message_seqs WHERE 1=1"
-
-	// Handle sequence number or UID search
+	// For SeqNum
 	for _, seqSet := range criteria.SeqNum {
-		query += " AND "
-		query, args = selectNumSet(seqSet, query, args)
-	}
-	for _, uidSet := range criteria.UID {
-		query += " AND "
-		query, args = selectNumSet(uidSet, query, args)
+		seqCond, seqArgs := buildNumSetCondition(seqSet, "seqnum", paramPrefix, paramCounter)
+		maps.Copy(args, seqArgs)
+		conditions = append(conditions, seqCond)
 	}
 
-	// Handle date filters
+	// For UID
+	for _, uidSet := range criteria.UID {
+		uidCond, uidArgs := buildNumSetCondition(uidSet, "uid", paramPrefix, paramCounter)
+		maps.Copy(args, uidArgs)
+		conditions = append(conditions, uidCond)
+	}
+
+	// Date filters
 	if !criteria.Since.IsZero() {
-		args = append(args, criteria.Since)
-		query += fmt.Sprintf(" AND internal_date >= $%d", len(args))
+		param := nextParam()
+		args[param] = criteria.Since
+		conditions = append(conditions, fmt.Sprintf("internal_date >= @%s", param))
 	}
 	if !criteria.Before.IsZero() {
-		args = append(args, criteria.Before)
-		query += fmt.Sprintf(" AND internal_date <= $%d", len(args))
+		param := nextParam()
+		args[param] = criteria.Before
+		conditions = append(conditions, fmt.Sprintf("internal_date <= @%s", param))
 	}
 	if !criteria.SentSince.IsZero() {
-		args = append(args, criteria.SentSince)
-		query += fmt.Sprintf(" AND sent_date >= $%d", len(args))
+		param := nextParam()
+		args[param] = criteria.SentSince
+		conditions = append(conditions, fmt.Sprintf("sent_date >= @%s", param))
 	}
 	if !criteria.SentBefore.IsZero() {
-		args = append(args, criteria.SentBefore)
-		query += fmt.Sprintf(" AND sent_date <= $%d", len(args))
+		param := nextParam()
+		args[param] = criteria.SentBefore
+		conditions = append(conditions, fmt.Sprintf("sent_date <= @%s", param))
 	}
 
-	// Handle subject search from the `messages` table
+	// Message size
+	if criteria.Larger > 0 {
+		param := nextParam()
+		args[param] = criteria.Larger
+		conditions = append(conditions, fmt.Sprintf("size > @%s", param))
+	}
+	if criteria.Smaller > 0 {
+		param := nextParam()
+		args[param] = criteria.Smaller
+		conditions = append(conditions, fmt.Sprintf("size < @%s", param))
+	}
+
+	// Body full-text search
+	for _, bodyCriteria := range criteria.Body {
+		param := nextParam()
+		args[param] = bodyCriteria
+		conditions = append(conditions, fmt.Sprintf("text_body_tsv @@ plainto_tsquery('simple', @%s)", param))
+	}
+
+	// Flags
+	for _, flag := range criteria.Flag {
+		param := nextParam()
+		args[param] = FlagToBitwise(flag)
+		conditions = append(conditions, fmt.Sprintf("(flags & @%s) != 0", param))
+	}
+	for _, flag := range criteria.NotFlag {
+		param := nextParam()
+		args[param] = FlagToBitwise(flag)
+		conditions = append(conditions, fmt.Sprintf("(flags & @%s) = 0", param))
+	}
+
+	// Header conditions
 	for _, header := range criteria.Header {
 		switch strings.ToLower(header.Key) {
 		case "subject":
-			args = append(args, "%"+strings.ToLower(header.Value)+"%")
-			query += fmt.Sprintf(" AND LOWER(subject) LIKE $%d", len(args))
-		}
-	}
-
-	// Handle recipient search from the `recipients` table
-	for _, header := range criteria.Header {
-		switch strings.ToLower(header.Key) {
+			param := nextParam()
+			args[param] = "%" + strings.ToLower(header.Value) + "%"
+			conditions = append(conditions, fmt.Sprintf("LOWER(subject) LIKE @%s", param))
+		case "message-id":
+			param := nextParam()
+			args[param] = strings.ToLower(header.Value)
+			conditions = append(conditions, fmt.Sprintf("LOWER(message_id) = @%s", param))
+		case "in-reply-to":
+			param := nextParam()
+			args[param] = strings.ToLower(header.Value)
+			conditions = append(conditions, fmt.Sprintf("LOWER(in_reply_to) = @%s", param))
 		case "from", "to", "cc", "bcc", "reply-to":
-			args = append(args, strings.ToLower(header.Key), strings.ToLower(header.Value))
-			query += fmt.Sprintf("AND EXISTS (SELECT 1 FROM jsonb_array_elements(message_seqs.recipients_json) AS r WHERE LOWER(r->>'type') = $%d AND LOWER(r->>'email') = $%d)", len(args)-1, len(args))
+			recipientJSONParam := nextParam()
+			recipientValue := fmt.Sprintf(`[{"type": "%s", "email": "%s"}]`, strings.ToLower(header.Key), strings.ToLower(header.Value))
+			args[recipientJSONParam] = recipientValue
+			conditions = append(conditions, fmt.Sprintf(`recipients_json @> @%s::jsonb`, recipientJSONParam))
 		}
 	}
 
-	for _, bodyCriteria := range criteria.Body {
-		args = append(args, bodyCriteria)
-		query += fmt.Sprintf(" AND text_body_tsv @@ plainto_tsquery('simple', $%d)", len(args))
+	// Recursive NOT
+	for _, notCriteria := range criteria.Not {
+		subCond, subArgs := db.buildSearchCriteria(&notCriteria, paramPrefix, paramCounter)
+		for k, v := range subArgs {
+			args[k] = v
+		}
+		conditions = append(conditions, fmt.Sprintf("NOT (%s)", subCond))
 	}
 
-	// Handle flags
-	for _, flag := range criteria.Flag {
-		args = append(args, FlagToBitwise(flag)) // Convert the flag to its bitwise value
-		query += fmt.Sprintf(" AND (flags & $%d) != 0", len(args))
-	}
-	for _, flag := range criteria.NotFlag {
-		args = append(args, FlagToBitwise(flag)) // Convert the flag to its bitwise value
-		query += fmt.Sprintf(" AND (flags & $%d) = 0", len(args))
+	// Recursive OR
+	for _, orPair := range criteria.Or {
+		leftCond, leftArgs := db.buildSearchCriteria(&orPair[0], paramPrefix, paramCounter)
+		rightCond, rightArgs := db.buildSearchCriteria(&orPair[1], paramPrefix, paramCounter)
+
+		maps.Copy(args, leftArgs)
+		maps.Copy(args, rightArgs)
+
+		conditions = append(conditions, fmt.Sprintf("(%s OR %s)", leftCond, rightCond))
 	}
 
-	// Handle message size
-	if criteria.Larger > 0 {
-		args = append(args, criteria.Larger)
-		query += fmt.Sprintf(" AND size > $%d", len(args))
-	}
-	if criteria.Smaller > 0 {
-		args = append(args, criteria.Smaller)
-		query += fmt.Sprintf(" AND size < $%d", len(args))
+	finalCondition := "1=1"
+	if len(conditions) > 0 {
+		finalCondition = strings.Join(conditions, " AND ")
 	}
 
-	// Finalize the query
-	query += " ORDER BY uid"
+	return finalCondition, args
+}
 
-	rows, err := db.Pool.Query(ctx, baseQuery+query, args...)
+func buildNumSetCondition(numSet imap.NumSet, columnName string, paramPrefix string, paramCounter *int) (string, pgx.NamedArgs) {
+	args := pgx.NamedArgs{}
+	var conditions []string
+
+	nextParam := func() string {
+		*paramCounter++
+		return fmt.Sprintf("%s%d", paramPrefix, *paramCounter)
+	}
+
+	switch s := numSet.(type) {
+	case imap.SeqSet:
+		for _, r := range s {
+			if r.Start == r.Stop {
+				param := nextParam()
+				args[param] = r.Start
+				conditions = append(conditions, fmt.Sprintf("%s = @%s", columnName, param))
+			} else {
+				startParam := nextParam()
+				stopParam := nextParam()
+				args[startParam] = r.Start
+				args[stopParam] = r.Stop
+				conditions = append(conditions, fmt.Sprintf("%s BETWEEN @%s AND @%s", columnName, startParam, stopParam))
+			}
+		}
+	case imap.UIDSet:
+		for _, r := range s {
+			if r.Start == r.Stop {
+				param := nextParam()
+				args[param] = r.Start
+				conditions = append(conditions, fmt.Sprintf("%s = @%s", columnName, param))
+			} else {
+				startParam := nextParam()
+				stopParam := nextParam()
+				args[startParam] = r.Start
+				args[stopParam] = r.Stop
+				conditions = append(conditions, fmt.Sprintf("%s BETWEEN @%s AND @%s", columnName, startParam, stopParam))
+			}
+		}
+	default:
+		panic("unsupported NumSet type")
+	}
+
+	finalCondition := strings.Join(conditions, " OR ")
+	if len(conditions) > 1 {
+		finalCondition = "(" + finalCondition + ")"
+	}
+
+	return finalCondition, args
+}
+
+func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int, numKind imapserver.NumKind, criteria *imap.SearchCriteria) ([]Message, error) {
+	baseQuery := `
+	WITH message_seqs AS (
+		SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seqnum
+		FROM messages
+		WHERE mailbox_id = @mailboxID AND expunged_at IS NULL
+	)`
+
+	paramCounter := 0
+	whereCondition, whereArgs := db.buildSearchCriteria(criteria, "p", &paramCounter)
+	whereArgs["mailboxID"] = mailboxID
+
+	query := fmt.Sprintf(" SELECT uid FROM message_seqs WHERE %s ORDER BY uid", whereCondition)
+
+	rows, err := db.Pool.Query(ctx, baseQuery+query, whereArgs)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var messages []Message
-
 	for rows.Next() {
 		var message Message
-		err := rows.Scan(&message.UID)
-		if err != nil {
+		if err := rows.Scan(&message.UID); err != nil {
 			return nil, err
 		}
 		messages = append(messages, message)
 	}
 
-	// Check if there was any error during iteration
-	if err = rows.Err(); err != nil {
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
