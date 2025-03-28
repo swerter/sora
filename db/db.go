@@ -805,15 +805,15 @@ func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int, 
 	// Handle recipient search from the `recipients` table
 	for _, header := range criteria.Header {
 		switch strings.ToLower(header.Key) {
-		case "to", "cc", "bcc", "reply-to":
-			args = append(args, strings.ToLower(header.Key), "%"+strings.ToLower(header.Value)+"%")
-			query += fmt.Sprintf("AND EXISTS (SELECT 1 FROM jsonb_array_elements(messages.recipients_json) AS r WHERE LOWER(r->>'address_type') = $%d AND LOWER(r->>'email_address') = $%d)", len(args)-1, len(args))
+		case "from", "to", "cc", "bcc", "reply-to":
+			args = append(args, strings.ToLower(header.Key), strings.ToLower(header.Value))
+			query += fmt.Sprintf("AND EXISTS (SELECT 1 FROM jsonb_array_elements(message_seqs.recipients_json) AS r WHERE LOWER(r->>'type') = $%d AND LOWER(r->>'email') = $%d)", len(args)-1, len(args))
 		}
 	}
 
 	for _, bodyCriteria := range criteria.Body {
 		args = append(args, bodyCriteria)
-		query += fmt.Sprintf(" AND text_body_tsv @@ plainto_tsquery($%d)", len(args))
+		query += fmt.Sprintf(" AND text_body_tsv @@ plainto_tsquery('simple', $%d)", len(args))
 	}
 
 	// Handle flags
