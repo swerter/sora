@@ -41,7 +41,7 @@ func NewS3Storage(endpoint, accessKeyID, secretAccessKey, bucketName string, use
 }
 
 func (s *S3Storage) SaveMessage(key string, body io.Reader, size int64) error {
-	_, err := s.Client.PutObject(context.Background(), s.BucketName, key, body, size, minio.PutObjectOptions{})
+	_, err := s.Client.PutObject(context.Background(), s.BucketName, key, body, size, minio.PutObjectOptions{SendContentMd5: true})
 	return err
 }
 
@@ -60,7 +60,7 @@ func (s *S3Storage) DeleteMessage(key string) error {
 // StoreMessagePart uploads the message part to the S3-compatible storage using an io.Reader for binary data
 func (s *S3Storage) SaveMessagePart(path string, partContent io.Reader, size int64) error {
 	// Upload the message part to the S3-compatible storage as a stream
-	_, err := s.Client.PutObject(context.Background(), s.BucketName, path, partContent, size, minio.PutObjectOptions{})
+	_, err := s.Client.PutObject(context.Background(), s.BucketName, path, partContent, size, minio.PutObjectOptions{SendContentMd5: true})
 	if err != nil {
 		return fmt.Errorf("failed to upload message part to S3: %v", err)
 	}
