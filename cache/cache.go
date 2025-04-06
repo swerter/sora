@@ -23,7 +23,7 @@ const DATA_DIR = "data"
 const INDEX_DB = "cache_index.db"
 const CACHE_PURGE_TICK = 1 * time.Minute
 
-const BATCH_PURGE_SIZE = 100
+const BATCH_PURGE_SIZE = 1000
 
 type Cache struct {
 	basePath     string
@@ -61,7 +61,7 @@ func New(basePath string, maxSizeBytes int64, sourceDb *db.Database) (*Cache, er
 	}
 
 	if err := db.Ping(); err != nil {
-		log.Printf("WARNING: Cache DB ping failed: %v", err)
+		log.Printf("[CACHE] WARNING: DB ping failed: %v", err)
 	}
 	return &Cache{
 		basePath:     basePath,
@@ -206,14 +206,12 @@ func (c *Cache) SyncFromDisk() error {
 		return fmt.Errorf("failed to walk cache directory: %w", err)
 	}
 
-	// Now do tracking
 	for _, path := range filePaths {
 		c.mu.Lock()
 		_ = c.trackFile(path)
 		c.mu.Unlock()
 	}
 
-	// Only now clean stale entries
 	if err := c.RemoveStaleDBEntries(); err != nil {
 		return fmt.Errorf("failed to remove stale DB entries: %w", err)
 	}
@@ -241,20 +239,20 @@ func (c *Cache) StartPurgeLoop(ctx context.Context) {
 }
 
 func (c *Cache) runPurgeCycle(ctx context.Context) {
-	log.Println("Running cache purge cycle")
+	log.Println("[CACHE] running cache purge cycle")
 	if err := c.PurgeIfNeeded(ctx); err != nil {
-		log.Printf("Cache purge error: %v\n", err)
+		log.Printf("[CACHE] purge error: %v\n", err)
 	}
 	if err := c.RemoveStaleDBEntries(); err != nil {
-		log.Printf("Cache stale file cleanup error: %v\n", err)
+		log.Printf("[CACHE] stale file cleanup error: %v\n", err)
 	}
 	if err := c.PurgeOrphanedUUIDs(ctx); err != nil {
-		log.Printf("Cache orphan UUID cleanup error: %v\n", err)
+		log.Printf("[CACHE] orphan UUID cleanup error: %v\n", err)
 	}
 }
 
 func (c *Cache) cleanupStaleDirectories() error {
-	log.Println("Cleaning up stale directories in cache")
+	log.Println("[CACHE] cleaning up stale directories in cache")
 	dataDir := filepath.Join(c.basePath, DATA_DIR)
 	return filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -276,7 +274,7 @@ func (c *Cache) cleanupStaleDirectories() error {
 }
 
 func (c *Cache) PurgeOrphanedUUIDs(ctx context.Context) error {
-	log.Println("Purging orphaned UUIDs from cache")
+	log.Println("[CACHE] purging orphaned UUIDs from cache")
 	rows, err := c.db.Query(`SELECT path FROM cache_index`)
 	if err != nil {
 		return err
@@ -312,13 +310,13 @@ func (c *Cache) PurgeOrphanedUUIDs(ctx context.Context) error {
 	}
 
 	if purged > 0 {
-		log.Printf("PurgeOrphanedUUIDs: removed %d orphaned cache entries\n", purged)
+		log.Printf("[CACHE] removed %d orphaned cache entries\n", purged)
 	}
 	return nil
 }
 
 func (c *Cache) purgeBatch(ctx context.Context, uuids []uuid.UUID, paths []string) int {
-	log.Println("purging batch of", len(uuids), "UUIDs")
+	log.Println("[CACHE] purging batch of", len(uuids), "UUIDs")
 	dataDir := filepath.Join(c.basePath, DATA_DIR)
 	existing, err := c.sourceDB.FindExistingUUIDs(ctx, uuids)
 	if err != nil {
@@ -379,7 +377,7 @@ func (c *Cache) RemoveStaleDBEntries() error {
 	}
 
 	if removed > 0 {
-		log.Printf("RemoveStaleDBEntries: removed %d entries\n", removed)
+		log.Printf("[CACHE] removed %d stale entries\n", removed)
 	}
 
 	return nil

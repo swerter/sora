@@ -54,19 +54,19 @@ func (w *UploadWorker) Start(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				log.Println("Upload worker stopped")
+				log.Println("[UPLOADER] worker stopped")
 				return
 			case <-ticker.C:
-				log.Println("Upload worker timer tick -----------------")
+				log.Println("[UPLOADER] timer tick")
 				if err := w.processPendingUploads(ctx); err != nil {
 					select {
 					case w.errCh <- err:
 					default:
-						log.Printf("Upload worker error (no listener): %v", err)
+						log.Printf("[UPLOADER[] worker error (no listener): %v", err)
 					}
 				}
 			case <-w.notifyCh:
-				log.Println("Upload worker notified -----------------")
+				log.Println("[UPLOADER] worker notified")
 				_ = w.processPendingUploads(ctx)
 			}
 		}
@@ -99,7 +99,7 @@ func (w *UploadWorker) processPendingUploads(ctx context.Context) error {
 		for _, upload := range uploads {
 			select {
 			case <-ctx.Done():
-				log.Println("Upload context cancelled")
+				log.Println("[UPLOADER] context cancelled")
 				return nil
 			case sem <- struct{}{}:
 				wg.Add(1)
@@ -116,44 +116,39 @@ func (w *UploadWorker) processPendingUploads(ctx context.Context) error {
 }
 
 func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.PendingUpload) {
-	log.Printf("Retrying S3 upload for message %d (%s)", upload.MessageID, upload.UUID)
+	log.Printf("[UPLOADER] uploading message %d (%s)", upload.MessageID, upload.UUID)
 
 	data, err := os.ReadFile(upload.FilePath)
 	if err != nil {
 		w.db.MarkUploadAttempt(ctx, upload.ID, false)
-		log.Printf("Could not read file %s: %v", upload.FilePath, err)
+		log.Printf("[UPLOADER] could not read file %s: %v", upload.FilePath, err)
 		return
 	}
 
 	err = w.s3.SaveMessage(upload.S3Path, bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		w.db.MarkUploadAttempt(ctx, upload.ID, false)
-		log.Printf("S3 upload failed for %s: %v", upload.S3Path, err)
-		return
-	}
-
-	if upload.Size == 0 {
-		log.Fatal("Warning: upload size is 0")
+		log.Printf("[UPLOADER] upload failed for %s: %v", upload.S3Path, err)
 		return
 	}
 
 	if upload.Size <= cache.MAX_MESSAGE {
 		if err := w.cache.MoveIn(upload.FilePath, upload.DomainName, upload.LocalPart, upload.UUID); err != nil {
-			log.Printf("Failed to move uploaded message %d to cache: %v", upload.MessageID, err)
+			log.Printf("[UPLOADER] failed to move uploaded message %d to cache: %v", upload.MessageID, err)
 		} else {
-			log.Printf("Moved message %d to cache after upload", upload.MessageID)
+			log.Printf("[UPLOADER] moved message %d to cache after upload", upload.MessageID)
 		}
 	} else {
 		if err := w.RemoveLocalFile(upload.FilePath); err != nil {
-			log.Printf("Warning: uploaded but could not delete file %s: %v", upload.FilePath, err)
+			log.Printf("[UPLOADER]- Warning: uploaded but could not delete file %s: %v", upload.FilePath, err)
 		}
 	}
 
 	err = w.db.CompleteS3Upload(ctx, upload.MessageID, upload.ID)
 	if err != nil {
-		log.Printf("Warning: failed to finalize S3 upload for message %d: %v", upload.MessageID, err)
+		log.Printf("[UPLOADER] - Warning: failed to finalize S3 upload for message %d: %v", upload.MessageID, err)
 	} else {
-		log.Printf("Upload finalized for message %d", upload.MessageID)
+		log.Printf("[UPLOADER] upload completed for message %d", upload.MessageID)
 	}
 }
 
@@ -174,7 +169,7 @@ func (w *UploadWorker) StoreLocally(domain, localPart string, uuid uuid.UUID, da
 
 func (w *UploadWorker) RemoveLocalFile(path string) error {
 	if err := os.Remove(path); err != nil {
-		log.Printf("Warning: uploaded but could not delete file %s: %v", path, err)
+		log.Printf("[UPLOADER] - Warning: uploaded but could not delete file %s: %v", path, err)
 	} else {
 		stopAt, _ := filepath.Abs(w.tempPath)
 		removeEmptyParents(path, stopAt)
