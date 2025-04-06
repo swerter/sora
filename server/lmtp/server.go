@@ -8,6 +8,7 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/google/uuid"
 	"github.com/migadu/sora/db"
+	"github.com/migadu/sora/server/uploader"
 	"github.com/migadu/sora/storage"
 )
 
@@ -16,15 +17,17 @@ type LMTPServerBackend struct {
 	hostname string
 	db       *db.Database
 	s3       *storage.S3Storage
+	uploader *uploader.UploadWorker
 	server   *smtp.Server
 }
 
-func New(hostname, addr string, s3 *storage.S3Storage, db *db.Database, debug bool, errChan chan error) *smtp.Server {
+func New(hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWorker *uploader.UploadWorker, debug bool, errChan chan error) *smtp.Server {
 	backend := &LMTPServerBackend{
 		addr:     addr,
 		hostname: hostname,
 		db:       db,
 		s3:       s3,
+		uploader: uploadWorker,
 	}
 	s := smtp.NewServer(backend)
 	s.Addr = addr

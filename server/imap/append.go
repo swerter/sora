@@ -7,26 +7,22 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"time"
+	"os"
 
-	"github.com/cenkalti/backoff/v4"
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
-	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/mail"
 	"github.com/google/uuid"
 	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/helpers"
 	"github.com/migadu/sora/server"
+
+	_ "github.com/emersion/go-message/charset"
 )
 
 func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *imap.AppendOptions) (*imap.AppendData, error) {
-	var result *imap.AppendData
-	var err error
-
 	ctx := context.Background()
-
 	mailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), mboxName)
 	if err != nil {
 		if err == consts.ErrMailboxNotFound {
@@ -45,62 +41,15 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	if err != nil {
 		return nil, s.internalError("failed to read message: %v", err)
 	}
+	messageBytes := buf.Bytes()
 
-	parseReader := bytes.NewReader(buf.Bytes())
-
-	messageContent, err := server.ParseMessage(parseReader)
+	messageContent, err := server.ParseMessage(bytes.NewReader(messageBytes))
 	if err != nil {
 		return nil, s.internalError("failed to parse message: %v", err)
 	}
 
-	// Define the append operation that will be retried
-	operation := func() error {
-		// Create a new copy of the buffer for each attempt
-		appendBuf := bytes.NewBuffer(buf.Bytes())
-		result, err = s.appendSingle(ctx, mailbox, messageContent, appendBuf, options)
-		if err != nil {
-			if err == consts.ErrInternalError ||
-				err == consts.ErrMalformedMessage {
-				return backoff.Permanent(&backoff.PermanentError{Err: err})
-			}
-			if err == consts.ErrMessageExists {
-				log.Printf("Message already exists: %v, ignoring", err)
-				return nil
-			}
-			log.Printf("Append operation failed: %v", err)
-			return err
-		}
-		return nil
-	}
-
-	// TODO: Make this configurable
-	// Set up exponential backoff
-	expBackoff := backoff.NewExponentialBackOff()
-	expBackoff.InitialInterval = 500 * time.Millisecond
-	expBackoff.MaxInterval = 10 * time.Second
-	expBackoff.MaxElapsedTime = 1 * time.Minute
-
-	// Run the operation with retries
-	if err := backoff.Retry(operation, expBackoff); err != nil {
-		if errors.Is(err, backoff.Permanent(&backoff.PermanentError{Err: err})) {
-			return nil, &imap.Error{
-				Type: imap.StatusResponseTypeNo,
-				Code: imap.ResponseCodeAlreadyExists,
-				Text: fmt.Sprintf("message already exists: %v", err),
-			}
-		}
-		// If retries fail, return the last error
-		return nil, s.internalError("failed to append message: %v", err)
-	}
-
-	// If successful, return the AppendData
-	return result, nil
-}
-
-// Actual logic for appending a single message to the mailbox
-func (s *IMAPSession) appendSingle(ctx context.Context, mbox *db.DBMailbox, messageContent *message.Entity, buf *bytes.Buffer, options *imap.AppendOptions) (*imap.AppendData, error) {
-	bufSize := int64(buf.Len())
-	s3UploadBuf := bytes.NewBuffer(buf.Bytes())
+	// Generate a new UUID for the message
+	uuid := uuid.New()
 
 	// Parse message headers (this does not consume the body)
 	mailHeader := mail.Header{Header: messageContent.Header}
@@ -118,46 +67,63 @@ func (s *IMAPSession) appendSingle(ctx context.Context, mbox *db.DBMailbox, mess
 	plaintextBody, err := helpers.ExtractPlaintextBody(messageContent)
 	if err != nil {
 		log.Printf("Failed to extract plaintext body: %v", err)
-		return nil, consts.ErrMalformedMessage
+		// Continue with the append operation even if plaintext body extraction fails,
+		// it will default to an empty string if not present
 	}
 
-	// log.Println("Plaintext body:", *plaintextBody)
-	recipients := db.ExtractRecipients(messageContent.Header)
-	// Generate a new UUID for the message
-	uuidKey := uuid.New()
+	recipients := helpers.ExtractRecipients(messageContent.Header)
 
-	messageUID, err := s.server.db.InsertMessage(ctx, &db.InsertMessageOptions{
-		MailboxID:     mbox.ID,
-		MailboxName:   mbox.Name,
-		UUIDKey:       uuidKey,
-		MessageID:     messageID,
-		Flags:         options.Flags,
-		InternalDate:  options.Time,
-		Size:          bufSize,
-		Subject:       subject,
-		PlaintextBody: plaintextBody,
-		SentDate:      sentDate,
-		InReplyTo:     inReplyTo,
-		S3Buffer:      s3UploadBuf,
-		BodyStructure: &bodyStructure,
-		Recipients:    recipients,
-		S3UploadFunc: func(uid uuid.UUID, s3Buf *bytes.Buffer, s3BufSize int64) error {
-			s3DestKey := server.S3Key(s.Domain(), s.LocalPart(), uid)
-			return s.server.s3.SaveMessage(s3DestKey, s3Buf, s3BufSize)
-		},
-	})
+	filePath, err := s.server.uploader.StoreLocally(s.Domain(), s.LocalPart(), uuid, messageBytes)
 	if err != nil {
-		if err == consts.ErrDBUniqueViolation {
-			// Message already exists, continue with the next message
-			return nil, consts.ErrMessageExists
+		return nil, s.internalError("failed to save message to disk: %v", err)
+	}
+
+	// The S3 key is generated based on the domain and local part of the email address
+	// and the UUID key of the message
+	s3Key := server.S3Key(s.Domain(), s.LocalPart(), uuid)
+	size := int64(len(messageBytes))
+
+	_, messageUID, err := s.server.db.InsertMessage(ctx,
+		&db.InsertMessageOptions{
+			UserID:        s.UserID(),
+			MailboxID:     mailbox.ID,
+			MailboxName:   mailbox.Name,
+			UUID:          uuid,
+			MessageID:     messageID,
+			Flags:         options.Flags,
+			InternalDate:  options.Time,
+			Size:          size,
+			Subject:       subject,
+			PlaintextBody: plaintextBody,
+			SentDate:      sentDate,
+			InReplyTo:     inReplyTo,
+			BodyStructure: &bodyStructure,
+			Recipients:    recipients,
+		},
+		db.PendingUpload{
+			FilePath:    *filePath,
+			S3Path:      s3Key,
+			Size:        size,
+			MailboxName: mailbox.Name,
+			DomainName:  s.Domain(),
+			LocalPart:   s.LocalPart(),
+		})
+	if err != nil {
+		_ = os.Remove(*filePath) // cleanup file on failure
+		if errors.Is(err, consts.ErrDBUniqueViolation) {
+			return nil, &imap.Error{
+				Type: imap.StatusResponseTypeNo,
+				Code: imap.ResponseCodeAlreadyExists,
+				Text: "message already exists",
+			}
 		}
-		return nil, consts.ErrInternalError
+		return nil, s.internalError("failed to insert message metadata: %v", err)
 	}
 
-	appendData := &imap.AppendData{
+	s.server.uploader.NotifyUploadQueued()
+
+	return &imap.AppendData{
 		UID:         imap.UID(messageUID),
-		UIDValidity: mbox.UIDValidity,
-	}
-
-	return appendData, nil
+		UIDValidity: mailbox.UIDValidity,
+	}, nil
 }

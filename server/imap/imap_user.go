@@ -12,13 +12,13 @@ type IMAPUser struct {
 	// prevUidValidity uint32
 }
 
-func NewIMAPUser(address server.Address, userID int) *IMAPUser {
+func NewIMAPUser(address server.Address, userID int64) *IMAPUser {
 	return &IMAPUser{
 		User: *server.NewUser(address, userID),
 	}
 }
 
-func (u *IMAPUser) UserID() int {
+func (u *IMAPUser) UserID() int64 {
 	return u.User.UserID()
 }
 

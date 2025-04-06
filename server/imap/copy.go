@@ -5,9 +5,7 @@ import (
 	"fmt"
 
 	"github.com/emersion/go-imap/v2"
-	"github.com/google/uuid"
 	"github.com/migadu/sora/consts"
-	"github.com/migadu/sora/server"
 )
 
 func (s *IMAPSession) Copy(seqSet imap.NumSet, mboxName string) (*imap.CopyData, error) {
@@ -44,21 +42,7 @@ func (s *IMAPSession) Copy(seqSet imap.NumSet, mboxName string) (*imap.CopyData,
 	var destUIDs imap.UIDSet
 	for _, msg := range messages {
 		sourceUIDs.AddNum(msg.UID)
-		destStorageUUID := uuid.New()
-		copiedUID, err := s.server.db.InsertMessageCopy(ctx, msg.UID, msg.MailboxID, destStorageUUID, destMailbox.ID, destMailbox.Name, func(destUID imap.UID) error {
-			// Copy message body from source mailbox to destination mailbox in S3
-			srcUUIDKey, err := uuid.Parse(msg.StorageUUID)
-			if err != nil {
-				return s.internalError("failed to parse message UUID: %v", err)
-			}
-			sourceS3Key := server.S3Key(s.Domain(), s.LocalPart(), srcUUIDKey)
-			destS3Key := server.S3Key(s.Domain(), s.LocalPart(), destStorageUUID)
-			err = s.server.s3.CopyMessage(sourceS3Key, destS3Key)
-			if err != nil {
-				return s.internalError("failed to copy message body in S3: %v", err)
-			}
-			return nil
-		})
+		copiedUID, err := s.server.db.InsertMessageCopy(ctx, msg.UID, msg.MailboxID, destMailbox.ID, destMailbox.Name)
 		if err != nil {
 			return nil, s.internalError("failed to insert copied message: %v", err)
 		}

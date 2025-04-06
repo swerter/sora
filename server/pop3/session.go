@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/server"
@@ -218,14 +217,7 @@ func (s *POP3Session) handleConnection() {
 				continue
 			}
 
-			s3UUIDKey, err := uuid.Parse(msg.StorageUUID)
-			if err != nil {
-				s.Log("RETR error: %v", err)
-				writer.WriteString("-ERR Internal server error\r\n")
-				writer.Flush()
-				return
-			}
-			s3Key := server.S3Key(s.Domain(), s.LocalPart(), s3UUIDKey)
+			s3Key := server.S3Key(s.Domain(), s.LocalPart(), msg.UUID)
 
 			log.Printf("Fetching message body for UID %d", msg.UID)
 			bodyReader, err := s.server.s3.GetMessage(s3Key)

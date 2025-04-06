@@ -5,11 +5,17 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/migadu/sora/cache"
+	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
+	"github.com/migadu/sora/server/cleaner"
 	"github.com/migadu/sora/server/imap"
 	"github.com/migadu/sora/server/lmtp"
 	"github.com/migadu/sora/server/pop3"
+	"github.com/migadu/sora/server/uploader"
 	"github.com/migadu/sora/storage"
 )
 
@@ -36,6 +42,9 @@ func main() {
 	lmtpAddr := flag.String("lmtpaddr", ":24", "LMTP server address")
 	startPop3 := flag.Bool("pop3", true, "Start the POP3 server")
 	pop3Addr := flag.String("pop3addr", ":110", "POP3 server address")
+	uploaderTempPath := flag.String("uploaderpath", "/tmp/sora/uploads", "Directory for pending uploads")
+	cachePath := flag.String("cachedir", "/tmp/sora/cache", "Directory for cached files")
+	maxCacheSize := flag.Int64("maxcachesize", 1024*1024*1024, "Maximum cache size in bytes (default: 1GB)")
 
 	// Parse the command-line flags
 	flag.Parse()
@@ -56,8 +65,19 @@ func main() {
 		log.Fatalf("Failed to initialize S3 storage at endpoint %s: %v", *s3Endpoint, err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle SIGINT and SIGTERM for graceful shutdown
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-signalChan
+		log.Printf("Received signal: %s, shutting down...", sig)
+		cancel()
+	}()
+
 	// Initialize the database connection
-	ctx := context.Background()
 	log.Printf("Connecting to database at %s:%s as user %s, using database %s", *dbHost, *dbPort, *dbUser, *dbName)
 	database, err := db.NewDatabase(ctx, *dbHost, *dbPort, *dbUser, *dbPassword, *dbName)
 	if err != nil {
@@ -79,48 +99,98 @@ func main() {
 
 	errChan := make(chan error, 1)
 
+	// Initialize cache
+	cache, err := cache.New(*cachePath, *maxCacheSize, database)
+	if err != nil {
+		log.Fatalf("Failed to initialize cache: %v", err)
+	}
+	if err := cache.SyncFromDisk(); err != nil {
+		log.Fatalf("Failed to sync cache from disk: %v", err)
+	}
+	cache.StartPurgeLoop(ctx)
+
+	// Initialize the S3 cleanup worker
+	cleanupWorker := cleaner.New(database, s3storage, consts.CLEANUP_INTERVAL, consts.CLEANUP_GRACE_PERIOD)
+	cleanupWorker.Start(ctx)
+
+	// Start the upload worker
+	uploadWorker, err := uploader.New(ctx, *uploaderTempPath, database, s3storage, cache, errChan)
+	if err != nil {
+		log.Fatalf("Failed to create upload worker: %v", err)
+	}
+	uploadWorker.Start(ctx)
+
 	// Start LMTP server
 	if *startLmtp {
-		go startLMTPServer(hostname, *lmtpAddr, s3storage, database, *debug, errChan)
+		go startLMTPServer(ctx, hostname, *lmtpAddr, s3storage, database, uploadWorker, *debug, errChan)
 	}
 
 	// Start IMAP server
 	if *startImap {
-		go startIMAPServer(hostname, *imapAddr, s3storage, database, *insecureAuth, *debug, errChan)
+		go startIMAPServer(ctx, hostname, *imapAddr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan)
 	}
 
 	// Start POP3 server
 	if *startPop3 {
-		go startPOP3Server(hostname, *pop3Addr, s3storage, database, *insecureAuth, *debug, errChan)
+		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, *insecureAuth, *debug, errChan)
 	}
 
 	// Wait for any errors from the servers
-	if err := <-errChan; err != nil {
+	select {
+	case <-ctx.Done():
+		log.Println("Context canceled. Shutting down.")
+	case err := <-errChan:
 		log.Fatalf("Server error: %v", err)
 	}
 }
 
-func startIMAPServer(hostname, addr string, s3storage *storage.S3Storage, database *db.Database, insecureAuth bool, debug bool, errChan chan error) {
-	s, err := imap.New(hostname, addr, s3storage, database, insecureAuth, debug)
+func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error) {
+	s, err := imap.New(hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug)
 	if err != nil {
-		log.Fatalf("Failed to start IMAP server: %v", err)
+		errChan <- err
+		return
 	}
-	defer s.Close()
-	if err := s.Serve(addr); err != nil {
+
+	go func() {
+		<-ctx.Done()
+		log.Println("Shutting down IMAP server...")
+		s.Close()
+	}()
+
+	if err := s.Serve(addr); err != nil && ctx.Err() == nil {
 		errChan <- err
 	}
 }
 
-func startLMTPServer(hostname, addr string, s3storage *storage.S3Storage, database *db.Database, debug bool, errChan chan error) {
-	s := lmtp.New(hostname, addr, s3storage, database, debug, errChan)
-	defer s.Close()
+func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, debug bool, errChan chan error) {
+	s := lmtp.New(hostname, addr, s3storage, database, uploadWorker, debug, errChan)
+
+	go func() {
+		<-ctx.Done()
+		log.Println("Shutting down LMTP server...")
+		s.Close()
+	}()
+
+	// block forever or until error is pushed into errChan by LMTP itself
+	select {
+	case <-ctx.Done():
+	case err := <-errChan:
+		log.Printf("LMTP server exited: %v", err)
+	}
 }
 
-func startPOP3Server(hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, insecureAuth bool, debug bool, errChan chan error) {
+func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, insecureAuth bool, debug bool, errChan chan error) {
 	s, err := pop3.New(hostname, addr, s3storage, database, insecureAuth, debug)
 	if err != nil {
-		log.Fatalf("Failed to start POP3 server: %v", err)
+		errChan <- err
+		return
 	}
-	defer s.Close()
+
+	go func() {
+		<-ctx.Done()
+		log.Println("Shutting down POP3 server...")
+		s.Close()
+	}()
+
 	s.Start(errChan)
 }

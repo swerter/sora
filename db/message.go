@@ -1,19 +1,20 @@
 package db
 
 import (
-	"net/mail"
 	"strings"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
-	"github.com/emersion/go-message"
+	"github.com/google/uuid"
 )
 
 // Message struct to represent an email message
 type Message struct {
-	UID            imap.UID
-	StorageUUID    string    // UUID of the message in S3
-	MailboxID      int       // ID of the mailbox the message belongs to
+	UserID         int64     // ID of the user who owns the message
+	UID            imap.UID  // Unique identifier for the message
+	UUID           uuid.UUID // UUID of the message in S3
+	MailboxID      int64     // ID of the mailbox the message belongs to
+	S3Uploaded     bool      // Indicates if the message is uploaded to S3
 	Seq            uint32    // Sequence number of the message in the mailbox
 	BitwiseFlags   int       // Bitwise flags for the message (e.g., \Seen, \Flagged)
 	FlagsChangedAt time.Time // Time when the flags were last changed
@@ -28,17 +29,11 @@ type Message struct {
 
 // MessagePart represents a part of an email message (e.g., body, attachments)
 type MessagePart struct {
-	MessageID  int    // Reference to the message ID
+	MessageID  int64  // Reference to the message ID
 	PartNumber int    // Part number (e.g., 1 for body, 2 for attachments)
 	Size       int    // Size of the part in bytes
 	S3Key      string // S3 key to reference the part's storage location
 	Type       string // MIME type of the part (e.g., "text/plain", "text/html", "application/pdf")
-}
-
-type Recipient struct {
-	EmailAddress string `json:"email"`
-	AddressType  string `json:"type"`
-	Name         string `json:"name,omitempty"`
 }
 
 // IMAP message flags as bitwise constants
@@ -108,40 +103,4 @@ func BitwiseToFlags(bitwiseFlags int) []imap.Flag {
 	// }
 
 	return flags
-}
-
-func ExtractRecipients(header message.Header) []Recipient {
-	recipients := make([]Recipient, 0)
-	uniquePairs := make(map[string]struct{})
-
-	extractAddresses := func(key string) {
-		values := header.Values(key)
-		for _, value := range values {
-			addresses, err := mail.ParseAddressList(value)
-			if err == nil {
-				for _, addr := range addresses {
-					addressType := strings.ToLower(key)
-					uniqueKey := addr.Address + "|" + addressType
-
-					if _, exists := uniquePairs[uniqueKey]; !exists {
-						recipient := Recipient{
-							EmailAddress: addr.Address,
-							AddressType:  addressType,
-							Name:         addr.Name,
-						}
-						recipients = append(recipients, recipient)
-						uniquePairs[uniqueKey] = struct{}{}
-					}
-				}
-			}
-		}
-	}
-
-	extractAddresses("To")
-	extractAddresses("Cc")
-	extractAddresses("Bcc")
-	extractAddresses("From")
-	extractAddresses("Reply-To")
-
-	return recipients
 }

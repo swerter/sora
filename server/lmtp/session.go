@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"time"
 
 	"github.com/emersion/go-message/mail"
@@ -73,15 +74,15 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		return s.internalError("failed to read message: %v", err)
 	}
 
-	bufSize := int64(buf.Len())
-	s3UploadBuf := bytes.NewBuffer(buf.Bytes())
-	parseBuf := bytes.NewReader(buf.Bytes())
+	messageBytes := buf.Bytes()
 
-	messageContent, err := server.ParseMessage(parseBuf)
+	messageContent, err := server.ParseMessage(bytes.NewReader(messageBytes))
 	if err != nil {
-		// TODO: End the session?
 		return s.internalError("failed to parse message: %v", err)
 	}
+
+	// Generate a new UUID for the message
+	uuid := uuid.New()
 
 	// Parse message headers (this does not consume the body)
 	mailHeader := mail.Header{Header: messageContent.Header}
@@ -99,44 +100,59 @@ func (s *LMTPSession) Data(r io.Reader) error {
 	plaintextBody, err := helpers.ExtractPlaintextBody(messageContent)
 	if err != nil {
 		log.Printf("Failed to extract plaintext body: %v", err)
-		return &smtp.SMTPError{
-			Code:         554,
-			EnhancedCode: smtp.EnhancedCode{5, 6, 0}, // TODO: Check the correct code
-			Message:      "Malformed message",
-		}
+		// return &smtp.SMTPError{
+		// 	Code:         554,
+		// 	EnhancedCode: smtp.EnhancedCode{5, 6, 0}, // TODO: Check the correct code
+		// 	Message:      "Malformed message",
+		// }
 	}
 
-	recipients := db.ExtractRecipients(messageContent.Header)
-	uuidKey := uuid.New()
+	recipients := helpers.ExtractRecipients(messageContent.Header)
+
+	filePath, err := s.backend.uploader.StoreLocally(s.Domain(), s.LocalPart(), uuid, messageBytes)
+	if err != nil {
+		return s.internalError("failed to save message to disk: %v", err)
+	}
+
+	ctx := context.Background()
 
 	// TODO: SIEVE filtering
-	// Assume the message goes always to the INBOX
-	mbox, err := s.backend.db.GetMailboxByName(context.Background(), s.UserID(), consts.MAILBOX_INBOX)
+	// TODO: Assume the message goes always to the INBOX for now
+	mailbox, err := s.backend.db.GetMailboxByName(ctx, s.UserID(), consts.MAILBOX_INBOX)
 	if err != nil {
 		return s.internalError("failed to get mailbox: %v", err)
 	}
 
-	// Save the message to the database
-	messageUID, err := s.backend.db.InsertMessage(context.Background(), &db.InsertMessageOptions{
-		MailboxID:     mbox.ID,
-		UUIDKey:       uuidKey,
-		MessageID:     messageID,
-		InternalDate:  time.Now(),
-		Size:          bufSize,
-		Subject:       subject,
-		PlaintextBody: plaintextBody,
-		SentDate:      sentDate,
-		InReplyTo:     inReplyTo,
-		S3Buffer:      s3UploadBuf,
-		BodyStructure: &bodyStructure,
-		Recipients:    recipients,
-		S3UploadFunc: func(uid uuid.UUID, s3Buf *bytes.Buffer, s3BufSize int64) error {
-			// Save the message to S3
-			s3DestKey := server.S3Key(s.Domain(), s.LocalPart(), uid)
-			return s.backend.s3.SaveMessage(s3DestKey, s3Buf, s3BufSize)
+	// The S3 key is generated based on the domain and local part of the email address
+	// and the UUID key of the message
+	s3Key := server.S3Key(s.Domain(), s.LocalPart(), uuid)
+
+	_, messageUID, err := s.backend.db.InsertMessage(ctx,
+		&db.InsertMessageOptions{
+			UserID:        s.UserID(),
+			MailboxID:     mailbox.ID,
+			MailboxName:   mailbox.Name,
+			UUID:          uuid,
+			MessageID:     messageID,
+			InternalDate:  time.Now(),
+			Size:          int64(len(messageBytes)),
+			Subject:       subject,
+			PlaintextBody: plaintextBody,
+			SentDate:      sentDate,
+			InReplyTo:     inReplyTo,
+			BodyStructure: &bodyStructure,
+			Recipients:    recipients,
 		},
-	})
+		db.PendingUpload{
+			FilePath:    *filePath,
+			S3Path:      s3Key,
+			Size:        int64(len(messageBytes)),
+			MailboxName: mailbox.Name,
+			DomainName:  s.Domain(),
+			LocalPart:   s.LocalPart(),
+		})
 	if err != nil {
+		_ = os.Remove(*filePath) // cleanup file on failure
 		if err == consts.ErrDBUniqueViolation {
 			// Message already exists, continue with the next message
 			return &smtp.SMTPError{
@@ -147,6 +163,8 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		}
 		return s.internalError("failed to save message: %v", err)
 	}
+
+	s.backend.uploader.NotifyUploadQueued()
 
 	s.Log("Message saved with UID %d", messageUID)
 	return nil

@@ -15,7 +15,7 @@ import (
 
 // DBMailbox represents the database structure of a mailbox
 type DBMailbox struct {
-	ID          int
+	ID          int64
 	Name        string // Full path
 	UIDValidity uint32
 	Subscribed  bool
@@ -23,10 +23,10 @@ type DBMailbox struct {
 	// Recent        int
 	// Unseen        int
 	HasChildren bool
-	ParentID    *int // Nullable parent ID for top-level mailboxes
+	ParentID    *int64 // Nullable parent ID for top-level mailboxes
 }
 
-func NewDBMailbox(mboxId int, name string, uidValidity uint32, parentID *int, subscribed, hasChildren bool) DBMailbox {
+func NewDBMailbox(mboxId int64, name string, uidValidity uint32, parentID *int64, subscribed, hasChildren bool) DBMailbox {
 	return DBMailbox{
 		ID:          mboxId,
 		Name:        name,
@@ -37,7 +37,7 @@ func NewDBMailbox(mboxId int, name string, uidValidity uint32, parentID *int, su
 	}
 }
 
-func (db *Database) GetMailboxes(ctx context.Context, userID int, subscribed bool) ([]*DBMailbox, error) {
+func (db *Database) GetMailboxes(ctx context.Context, userID int64, subscribed bool) ([]*DBMailbox, error) {
 	query := `
 		SELECT 
 			id, 
@@ -65,8 +65,8 @@ func (db *Database) GetMailboxes(ctx context.Context, userID int, subscribed boo
 	// Collect the mailboxes
 	var mailboxes []*DBMailbox
 	for rows.Next() {
-		var mailboxID int
-		var parentID *int
+		var mailboxID int64
+		var parentID *int64
 
 		var dbParentID sql.NullInt64
 
@@ -81,7 +81,7 @@ func (db *Database) GetMailboxes(ctx context.Context, userID int, subscribed boo
 		}
 
 		if dbParentID.Valid {
-			i := int(dbParentID.Int64)
+			i := dbParentID.Int64
 			parentID = &i
 		}
 		mailbox := NewDBMailbox(mailboxID, mailboxName, uidValidity, parentID, subscribed, hasChildren)
@@ -97,8 +97,8 @@ func (db *Database) GetMailboxes(ctx context.Context, userID int, subscribed boo
 }
 
 // GetMailbox fetches the mailbox
-func (db *Database) GetMailbox(ctx context.Context, mailboxID int) (*DBMailbox, error) {
-	var dbParentID sql.NullInt32
+func (db *Database) GetMailbox(ctx context.Context, mailboxID int64) (*DBMailbox, error) {
+	var dbParentID sql.NullInt64
 	var mailboxName string
 	var hasChildren bool
 	var uidValidity uint32
@@ -123,9 +123,9 @@ func (db *Database) GetMailbox(ctx context.Context, mailboxID int) (*DBMailbox, 
 		return nil, err
 	}
 
-	var parentID *int
+	var parentID *int64
 	if dbParentID.Valid {
-		i := int(dbParentID.Int32)
+		i := dbParentID.Int64
 		parentID = &i
 	}
 
@@ -134,7 +134,7 @@ func (db *Database) GetMailbox(ctx context.Context, mailboxID int) (*DBMailbox, 
 }
 
 // GetMailboxByFullPath fetches the mailbox for a specific user by full path, working recursively
-func (db *Database) GetMailboxByName(ctx context.Context, userID int, name string) (*DBMailbox, error) {
+func (db *Database) GetMailboxByName(ctx context.Context, userID int64, name string) (*DBMailbox, error) {
 	var mailbox DBMailbox
 
 	err := db.Pool.QueryRow(ctx, `
@@ -156,7 +156,7 @@ func (db *Database) GetMailboxByName(ctx context.Context, userID int, name strin
 	return &mailbox, nil
 }
 
-func (db *Database) CreateMailbox(ctx context.Context, userID int, name string, parentID *int) error {
+func (db *Database) CreateMailbox(ctx context.Context, userID int64, name string, parentID *int64) error {
 	// Try to insert the mailbox into the database
 	_, err := db.Pool.Exec(ctx, `
 		INSERT INTO mailboxes (user_id, name, parent_id, uid_validity, subscribed)
@@ -187,7 +187,7 @@ func (db *Database) CreateMailbox(ctx context.Context, userID int, name string, 
 }
 
 // DeleteMailbox deletes a mailbox for a specific user by id
-func (db *Database) DeleteMailbox(ctx context.Context, mailboxID int) error {
+func (db *Database) DeleteMailbox(ctx context.Context, mailboxID int64) error {
 	//
 	// TODO: Implement delayed S3 deletion of messages
 	//
@@ -238,7 +238,7 @@ func (db *Database) DeleteMailbox(ctx context.Context, mailboxID int) error {
 	return nil
 }
 
-func (db *Database) CreateDefaultMailboxes(ctx context.Context, userId int) error {
+func (db *Database) CreateDefaultMailboxes(ctx context.Context, userId int64) error {
 	for _, mailboxName := range consts.DefaultMailboxes {
 		_, err := db.GetMailboxByName(ctx, userId, mailboxName)
 		if err != nil {
@@ -259,7 +259,7 @@ func (db *Database) CreateDefaultMailboxes(ctx context.Context, userId int) erro
 	return nil
 }
 
-func (d *Database) GetMailboxUnseenCount(ctx context.Context, mailboxID int) (int, error) {
+func (d *Database) GetMailboxUnseenCount(ctx context.Context, mailboxID int64) (int, error) {
 	var count int
 	err := d.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE mailbox_id = $1 AND (flags & $2) = 0 AND expunged_at IS NULL", mailboxID, FlagSeen).Scan(&count)
 	if err != nil {
@@ -268,7 +268,7 @@ func (d *Database) GetMailboxUnseenCount(ctx context.Context, mailboxID int) (in
 	return count, nil
 }
 
-func (d *Database) GetMailboxRecentCount(ctx context.Context, mailboxID int) (int, error) {
+func (d *Database) GetMailboxRecentCount(ctx context.Context, mailboxID int64) (int, error) {
 	var count int
 	err := d.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE mailbox_id = $1 AND (flags & $2) = 0 AND expunged_at IS NULL", mailboxID, FlagRecent).Scan(&count)
 	if err != nil {
@@ -277,7 +277,7 @@ func (d *Database) GetMailboxRecentCount(ctx context.Context, mailboxID int) (in
 	return count, nil
 }
 
-func (d *Database) GetMailboxMessageCountAndSizeSum(ctx context.Context, mailboxID int) (int, int64, error) {
+func (d *Database) GetMailboxMessageCountAndSizeSum(ctx context.Context, mailboxID int64) (int, int64, error) {
 	var count int
 	var size int64
 	err := d.Pool.QueryRow(ctx, "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM messages WHERE mailbox_id = $1 AND expunged_at IS NULL", mailboxID).Scan(&count, &size)
@@ -287,8 +287,8 @@ func (d *Database) GetMailboxMessageCountAndSizeSum(ctx context.Context, mailbox
 	return count, size, nil
 }
 
-func (d *Database) GetMailboxNextUID(ctx context.Context, mailboxID int) (int, error) {
-	var uidNext int
+func (d *Database) GetMailboxNextUID(ctx context.Context, mailboxID int64) (int64, error) {
+	var uidNext int64
 	// Query to get the maximum UID or return 1 if there are no messages
 	err := d.Pool.QueryRow(ctx, "SELECT COALESCE(MAX(id), 0) FROM messages WHERE mailbox_id = $1 AND expunged_at IS NULL", mailboxID).Scan(&uidNext)
 	if err != nil {
@@ -297,7 +297,7 @@ func (d *Database) GetMailboxNextUID(ctx context.Context, mailboxID int) (int, e
 	return uidNext + 1, nil
 }
 
-func (d *Database) GetMailboxHighestModSeq(ctx context.Context, mailboxID int) (uint64, error) {
+func (d *Database) GetMailboxHighestModSeq(ctx context.Context, mailboxID int64) (uint64, error) {
 	var highestModSeq uint64
 	err := d.Pool.QueryRow(ctx, `
 		SELECT COALESCE(MAX(GREATEST(created_modseq, updated_modseq, expunged_modseq)), 0)
@@ -311,7 +311,7 @@ func (d *Database) GetMailboxHighestModSeq(ctx context.Context, mailboxID int) (
 }
 
 // SetSubscribed updates the subscription status of a mailbox, but ignores unsubscribing for root folders.
-func (db *Database) SetMailboxSubscribed(ctx context.Context, mailboxID int, subscribed bool) error {
+func (db *Database) SetMailboxSubscribed(ctx context.Context, mailboxID int64, subscribed bool) error {
 	// Update the subscription status only if the mailbox is not a root folder
 	mailbox, err := db.GetMailbox(ctx, mailboxID)
 	if err != nil {
@@ -337,7 +337,7 @@ func (db *Database) SetMailboxSubscribed(ctx context.Context, mailboxID int, sub
 	return nil
 }
 
-func (db *Database) RenameMailbox(ctx context.Context, mailboxID int, userID int, newName string) error {
+func (db *Database) RenameMailbox(ctx context.Context, mailboxID int64, userID int64, newName string) error {
 	if newName == "" {
 		return consts.ErrMailboxInvalidName
 	}
@@ -375,7 +375,7 @@ func (db *Database) RenameMailbox(ctx context.Context, mailboxID int, userID int
 	}
 
 	// Get the parent mailbox ID
-	var parentMailboxID *int
+	var parentMailboxID *int64
 
 	if parentPath != "" {
 		parentMailbox, err := db.GetMailboxByName(ctx, userID, parentPath)
@@ -428,7 +428,7 @@ func (db *Database) RenameMailbox(ctx context.Context, mailboxID int, userID int
 func (db *Database) updateParentPathOnMailboxChildren(
 	ctx context.Context,
 	tx pgx.Tx,
-	parentMailboxID int,
+	parentMailboxID int64,
 	newParentPath string,
 ) error {
 	rows, err := tx.Query(ctx, `
@@ -450,13 +450,13 @@ func (db *Database) updateParentPathOnMailboxChildren(
 
 	// First, gather all child info in-memory
 	var children []struct {
-		id          int
+		id          int64
 		name        string
 		hasChildren bool
 	}
 
 	for rows.Next() {
-		var childMailboxID int
+		var childMailboxID int64
 		var childMailboxName string
 		var hasChildren bool
 		if err := rows.Scan(&childMailboxID, &childMailboxName, &hasChildren); err != nil {
@@ -464,7 +464,7 @@ func (db *Database) updateParentPathOnMailboxChildren(
 		}
 
 		children = append(children, struct {
-			id          int
+			id          int64
 			name        string
 			hasChildren bool
 		}{

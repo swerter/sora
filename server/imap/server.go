@@ -10,7 +10,9 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/google/uuid"
+	"github.com/migadu/sora/cache"
 	"github.com/migadu/sora/db"
+	"github.com/migadu/sora/server/uploader"
 	"github.com/migadu/sora/storage"
 )
 
@@ -20,15 +22,19 @@ type IMAPServer struct {
 	hostname string
 	s3       *storage.S3Storage
 	server   *imapserver.Server
+	uploader *uploader.UploadWorker
+	cache    *cache.Cache
 	caps     imap.CapSet
 }
 
-func New(hostname, imapAddr string, storage *storage.S3Storage, database *db.Database, insecureAuth bool, debug bool) (*IMAPServer, error) {
+func New(hostname, imapAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool) (*IMAPServer, error) {
 	s := &IMAPServer{
 		hostname: hostname,
 		addr:     imapAddr,
 		db:       database,
 		s3:       storage,
+		uploader: uploadWorker,
+		cache:    cache,
 		caps: imap.CapSet{
 			imap.CapIMAP4rev1: struct{}{},
 			// imap.CapIMAP4rev2:   struct{}{},

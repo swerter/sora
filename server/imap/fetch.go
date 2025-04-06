@@ -9,7 +9,6 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
-	"github.com/google/uuid"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/server"
 )
@@ -43,6 +42,11 @@ func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, o
 		return err
 	}
 
+	if !msg.S3Uploaded {
+		log.Printf("UID %d is not yet uploaded, returning flags only", msg.UID)
+		return m.Close() // No body/envelope, but valid message record
+	}
+
 	if options.Envelope {
 		if err := s.writeEnvelope(m, msg.UID, msg.MailboxID); err != nil {
 			return err
@@ -56,23 +60,12 @@ func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, o
 	}
 
 	if len(options.BodySection) > 0 || len(options.BinarySection) > 0 || len(options.BinarySectionSize) > 0 {
-		s3UUIDKey, err := uuid.Parse(msg.StorageUUID)
+		var bodyData []byte
+		var err error
+		bodyData, err = s.getMessageBody(msg)
 		if err != nil {
-			return s.internalError("failed to parse message UUID: %v", err)
-		}
-		s3Key := server.S3Key(s.Domain(), s.LocalPart(), s3UUIDKey)
-
-		log.Printf("Fetching message body for UID %d", msg.UID)
-		bodyReader, err := s.server.s3.GetMessage(s3Key)
-		if err != nil {
-			return s.internalError("failed to retrieve message body for UID %d from S3: %v", msg.UID, err)
-		}
-		defer bodyReader.Close()
-		log.Printf("Retrieved message body for UID %d", msg.UID)
-
-		bodyData, err := io.ReadAll(bodyReader)
-		if err != nil {
-			return s.internalError("failed to read message body for UID %d: %v", msg.UID, err)
+			log.Printf("Skipping UID %d: %v", msg.UID, err)
+			return nil // fallback to FLAGS-only
 		}
 
 		if len(options.BodySection) > 0 {
@@ -121,7 +114,7 @@ func (s *IMAPSession) writeBasicMessageData(m *imapserver.FetchResponseWriter, m
 }
 
 // Fetch helper to write the envelope for a message
-func (s *IMAPSession) writeEnvelope(m *imapserver.FetchResponseWriter, messageUID imap.UID, mailboxID int) error {
+func (s *IMAPSession) writeEnvelope(m *imapserver.FetchResponseWriter, messageUID imap.UID, mailboxID int64) error {
 	ctx := context.Background()
 	envelope, err := s.server.db.GetMessageEnvelope(ctx, messageUID, mailboxID)
 	if err != nil {
@@ -132,7 +125,7 @@ func (s *IMAPSession) writeEnvelope(m *imapserver.FetchResponseWriter, messageUI
 }
 
 // Fetch helper to write the body structure for a message
-func (s *IMAPSession) writeBodyStructure(m *imapserver.FetchResponseWriter, messageUID imap.UID, mailboxID int) error {
+func (s *IMAPSession) writeBodyStructure(m *imapserver.FetchResponseWriter, messageUID imap.UID, mailboxID int64) error {
 	ctx := context.Background()
 	bodyStructure, err := s.server.db.GetMessageBodyStructure(ctx, messageUID, mailboxID)
 	if err != nil {
@@ -183,4 +176,41 @@ func (s *IMAPSession) handleBodySections(w *imapserver.FetchResponseWriter, body
 		}
 	}
 	return nil
+}
+
+func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
+	if msg.S3Uploaded {
+		// Try cache first
+		data, err := s.server.cache.Get(s.Domain(), s.LocalPart(), msg.UUID)
+		if err == nil && data != nil {
+			log.Printf("[CACHE] Hit for UID %d", msg.UID)
+			return data, nil
+		}
+
+		// Fallback to S3
+		s3Key := server.S3Key(s.Domain(), s.LocalPart(), msg.UUID)
+		log.Printf("[CACHE] Miss. Fetching UID %d from S3 (%s)", msg.UID, s3Key)
+		reader, err := s.server.s3.GetMessage(s3Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve message UID %d from S3: %v", msg.UID, err)
+		}
+		defer reader.Close()
+		data, err = io.ReadAll(reader)
+		if err != nil {
+			return nil, err
+		}
+		_ = s.server.cache.Put(s.Domain(), s.LocalPart(), msg.UUID, data)
+		return data, nil
+	}
+
+	// If not uploaded to S3, fetch from local disk
+	log.Printf("Fetching not yet uploaded message UID %d from disk", msg.UID)
+	data, err := s.server.uploader.GetLocalFile(s.Domain(), s.LocalPart(), msg.UUID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve message UID %d from disk: %v", msg.UID, err)
+	}
+	if data == nil {
+		return nil, fmt.Errorf("message UID %d not found on disk", msg.UID)
+	}
+	return data, nil
 }

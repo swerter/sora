@@ -19,7 +19,7 @@ func (s *IMAPSession) Create(name string, options *imap.CreateOptions) error {
 	// Split the mailbox name by the delimiter to check if it's nested
 	parts := strings.Split(name, string(consts.MailboxDelimiter))
 
-	var parentMailboxID *int
+	var parentMailboxID *int64
 
 	// Check if this is a nested mailbox (i.e., it has a parent)
 	if len(parts) > 1 {
