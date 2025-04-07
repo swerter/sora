@@ -14,6 +14,7 @@ import (
 	"github.com/migadu/sora/server/cleaner"
 	"github.com/migadu/sora/server/imap"
 	"github.com/migadu/sora/server/lmtp"
+	"github.com/migadu/sora/server/managesieve"
 	"github.com/migadu/sora/server/pop3"
 	"github.com/migadu/sora/server/uploader"
 	"github.com/migadu/sora/storage"
@@ -45,6 +46,9 @@ func main() {
 	uploaderTempPath := flag.String("uploaderpath", "/tmp/sora/uploads", "Directory for pending uploads")
 	cachePath := flag.String("cachedir", "/tmp/sora/cache", "Directory for cached files")
 	maxCacheSize := flag.Int64("maxcachesize", 1024*1024*1024, "Maximum cache size in bytes (default: 1GB)")
+
+	startManageSieve := flag.Bool("managesieve", true, "Start the ManageSieve server")
+	managesieveAddr := flag.String("managesieveaddr", ":4190", "ManageSieve server address")
 
 	// Parse the command-line flags
 	flag.Parse()
@@ -79,7 +83,7 @@ func main() {
 
 	// Initialize the database connection
 	log.Printf("Connecting to database at %s:%s as user %s, using database %s", *dbHost, *dbPort, *dbUser, *dbName)
-	database, err := db.NewDatabase(ctx, *dbHost, *dbPort, *dbUser, *dbPassword, *dbName)
+	database, err := db.NewDatabase(ctx, *dbHost, *dbPort, *dbUser, *dbPassword, *dbName, *debug)
 	if err != nil {
 		log.Fatalf("Failed to connect to the database: %v", err)
 	}
@@ -133,6 +137,11 @@ func main() {
 	// Start POP3 server
 	if *startPop3 {
 		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, *insecureAuth, *debug, errChan)
+	}
+
+	// Start ManageSieve server
+	if *startManageSieve {
+		go startManageSieveServer(ctx, hostname, *managesieveAddr, database, *insecureAuth, *debug, errChan)
 	}
 
 	// Wait for any errors from the servers
@@ -189,6 +198,22 @@ func startPOP3Server(ctx context.Context, hostname string, addr string, s3storag
 	go func() {
 		<-ctx.Done()
 		log.Println("Shutting down POP3 server...")
+		s.Close()
+	}()
+
+	s.Start(errChan)
+}
+
+func startManageSieveServer(ctx context.Context, hostname string, addr string, database *db.Database, insecureAuth bool, debug bool, errChan chan error) {
+	s, err := managesieve.New(hostname, addr, database, insecureAuth, debug)
+	if err != nil {
+		errChan <- err
+		return
+	}
+
+	go func() {
+		<-ctx.Done()
+		log.Println("Shutting down ManageSieve server...")
 		s.Close()
 	}()
 

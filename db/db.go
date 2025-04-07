@@ -72,7 +72,7 @@ type MailboxPoll struct {
 }
 
 // NewDatabase initializes a new SQL database connection
-func NewDatabase(ctx context.Context, host, port, user, password, dbname string) (*Database, error) {
+func NewDatabase(ctx context.Context, host, port, user, password, dbname string, debug bool) (*Database, error) {
 	// Construct the connection string
 	connString := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
 		user, password, host, port, dbname)
@@ -87,7 +87,9 @@ func NewDatabase(ctx context.Context, host, port, user, password, dbname string)
 	}
 
 	// Set up custom tracer for query logging
-	config.ConnConfig.Tracer = &CustomTracer{}
+	if debug {
+		config.ConnConfig.Tracer = &CustomTracer{}
+	}
 
 	// Create a connection pool
 	dbPool, err := pgxpool.NewWithConfig(ctx, config)

@@ -150,3 +150,17 @@ CREATE INDEX IF NOT EXISTS idx_pending_uploads_message_id ON pending_uploads (me
 
 -- Index on uuid if you use it in your S3 key mapping / deduplication
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_uploads_uuid ON pending_uploads (uuid);
+
+--
+-- SIEVE scripts
+--
+CREATE TABLE IF NOT EXISTS sieve_scripts (
+	id BIGSERIAL PRIMARY KEY,
+	user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+	active BOOLEAN NOT NULL DEFAULT TRUE,
+	name TEXT NOT NULL,
+	script TEXT NOT NULL
+);
+
+-- Index to speed up sieve script lookups by user_id
+CREATE INDEX IF NOT EXISTS idx_sieve_scripts_user_id ON sieve_scripts (user_id);
