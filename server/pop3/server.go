@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/migadu/sora/cache"
 	"github.com/migadu/sora/db"
+	"github.com/migadu/sora/server/uploader"
 	"github.com/migadu/sora/storage"
 )
 
@@ -19,14 +21,18 @@ type POP3Server struct {
 	hostname string
 	db       *db.Database
 	s3       *storage.S3Storage
+	uploader *uploader.UploadWorker
+	cache    *cache.Cache
 }
 
-func New(hostname, popAddr string, storage *storage.S3Storage, database *db.Database, insecureAuth bool, debug bool) (*POP3Server, error) {
+func New(hostname, popAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool) (*POP3Server, error) {
 	return &POP3Server{
 		hostname: hostname,
 		addr:     popAddr,
 		db:       database,
 		s3:       storage,
+		uploader: uploadWorker,
+		cache:    cache,
 	}, nil
 }
 

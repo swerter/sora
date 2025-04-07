@@ -18,13 +18,14 @@ import (
 
 type POP3Session struct {
 	server.Session
-	server        *POP3Server
-	conn          *net.Conn    // Connection to the client
-	*server.User               // User associated with the session
-	authenticated bool         // Flag to indicate if the user has been authenticated
-	messages      []db.Message // List of messages in the mailbox as returned by the LIST command
-	deleted       map[int]bool // Map of message IDs marked for deletion
-	errorsCount   int          // Number of errors encountered during the session
+	server         *POP3Server
+	conn           *net.Conn    // Connection to the client
+	*server.User                // User associated with the session
+	authenticated  bool         // Flag to indicate if the user has been authenticated
+	messages       []db.Message // List of messages in the mailbox as returned by the LIST command
+	deleted        map[int]bool // Map of message IDs marked for deletion
+	inboxMailboxID int64        // POP3 suppots only INBOX
+	errorsCount    int          // Number of errors encountered during the session
 }
 
 func (s *POP3Session) handleConnection() {
@@ -36,6 +37,8 @@ func (s *POP3Session) handleConnection() {
 	writer.Flush()
 
 	s.Log("connected")
+
+	ctx := context.Background()
 
 	for {
 		// Set a read deadline for the connection
@@ -79,7 +82,7 @@ func (s *POP3Session) handleConnection() {
 				continue
 			}
 
-			userID, err := s.server.db.GetUserIDByAddress(context.Background(), address.FullAddress())
+			userID, err := s.server.db.GetUserIDByAddress(ctx, address.FullAddress())
 			if err != nil {
 				if err == consts.ErrUserNotFound {
 					if s.handleClientError(writer, fmt.Sprintf("-ERR %s\r\n", err.Error())) {
@@ -94,6 +97,22 @@ func (s *POP3Session) handleConnection() {
 				continue
 			}
 
+			inboxMailboxID, err := s.server.db.GetMailboxByName(ctx, userID, consts.MAILBOX_INBOX)
+			if err != nil {
+				if err == consts.ErrMailboxNotFound {
+					if s.handleClientError(writer, fmt.Sprintf("-ERR %s\r\n", err.Error())) {
+						// Close the connection if too many errors are encountered
+						return
+					}
+					continue
+				}
+				s.Log("USER error: %v", err)
+				writer.WriteString("-ERR Internal server error\r\n")
+				writer.Flush()
+				continue
+			}
+
+			s.inboxMailboxID = inboxMailboxID.ID
 			s.User = server.NewUser(address, userID)
 			writer.WriteString("+OK User accepted\r\n")
 
@@ -106,8 +125,6 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			s.Log("authentication attempt")
-			ctx := context.Background()
-
 			err := s.server.db.Authenticate(ctx, s.UserID(), parts[1])
 			if err != nil {
 				if s.handleClientError(writer, "-ERR Authentication failed\r\n") {
@@ -123,7 +140,7 @@ func (s *POP3Session) handleConnection() {
 
 		// --------------------------------------------------------------------------------------------
 		case "STAT":
-			messagesCount, size, err := s.server.db.GetMailboxMessageCountAndSizeSum(context.Background(), s.UserID())
+			messagesCount, size, err := s.server.db.GetMailboxMessageCountAndSizeSum(ctx, s.inboxMailboxID)
 			if err != nil {
 				s.Log("STAT error: %v", err)
 				writer.WriteString("-ERR Internal server error\r\n")
@@ -142,7 +159,7 @@ func (s *POP3Session) handleConnection() {
 				continue
 			}
 
-			s.messages, err = s.server.db.ListMessages(context.Background(), s.UserID())
+			s.messages, err = s.server.db.ListMessages(ctx, s.inboxMailboxID)
 			if err != nil {
 				s.Log("LIST error: %v", err)
 				writer.WriteString("-ERR Internal server error\r\n")
@@ -191,7 +208,7 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			if s.messages == nil {
-				s.messages, err = s.server.db.ListMessages(context.Background(), s.UserID())
+				s.messages, err = s.server.db.ListMessages(ctx, s.inboxMailboxID)
 				if err != nil {
 					s.Log("RETR error: %v", err)
 					writer.WriteString("-ERR Internal server error\r\n")
@@ -217,26 +234,15 @@ func (s *POP3Session) handleConnection() {
 				continue
 			}
 
-			s3Key := server.S3Key(s.Domain(), s.LocalPart(), msg.UUID)
-
 			log.Printf("Fetching message body for UID %d", msg.UID)
-			bodyReader, err := s.server.s3.GetMessage(s3Key)
+			bodyData, err := s.getMessageBody(&msg)
 			if err != nil {
 				s.Log("RETR error: %v", err)
 				writer.WriteString("-ERR Internal server error\r\n")
 				writer.Flush()
 				continue
 			}
-			defer bodyReader.Close()
 			s.Log("retrieved message body for UID %d", msg.UID)
-
-			bodyData, err := io.ReadAll(bodyReader)
-			if err != nil {
-				s.Log("RETR error: %v", err)
-				writer.WriteString("-ERR Internal server error\r\n")
-				writer.Flush()
-				continue
-			}
 
 			writer.WriteString(fmt.Sprintf("+OK %d octets\r\n", msg.Size))
 			writer.WriteString(string(bodyData))
@@ -280,7 +286,7 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			if s.messages == nil {
-				s.messages, err = s.server.db.ListMessages(context.Background(), s.UserID())
+				s.messages, err = s.server.db.ListMessages(ctx, s.inboxMailboxID)
 				if err != nil {
 					s.Log("DELE error: %v", err)
 					writer.WriteString("-ERR Internal server error\r\n")
@@ -319,7 +325,7 @@ func (s *POP3Session) handleConnection() {
 				if deleted {
 					s.Log("expunging message %d", i)
 					msg := s.messages[i]
-					err := s.server.db.ExpungeMessageUIDs(context.Background(), s.UserID(), msg.UID)
+					err := s.server.db.ExpungeMessageUIDs(ctx, s.inboxMailboxID, msg.UID)
 					if err != nil {
 						s.Log("error expunging message %d: %v", i, err)
 					}
@@ -363,4 +369,41 @@ func (s *POP3Session) Close() error {
 		s.authenticated = false
 	}
 	return nil
+}
+
+func (s *POP3Session) getMessageBody(msg *db.Message) ([]byte, error) {
+	if msg.S3Uploaded {
+		// Try cache first
+		data, err := s.server.cache.Get(s.Domain(), s.LocalPart(), msg.UUID)
+		if err == nil && data != nil {
+			log.Printf("[CACHE] Hit for UID %d", msg.UID)
+			return data, nil
+		}
+
+		// Fallback to S3
+		s3Key := server.S3Key(s.Domain(), s.LocalPart(), msg.UUID)
+		log.Printf("[CACHE] Miss. Fetching UID %d from S3 (%s)", msg.UID, s3Key)
+		reader, err := s.server.s3.GetMessage(s3Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve message UID %d from S3: %v", msg.UID, err)
+		}
+		defer reader.Close()
+		data, err = io.ReadAll(reader)
+		if err != nil {
+			return nil, err
+		}
+		_ = s.server.cache.Put(s.Domain(), s.LocalPart(), msg.UUID, data)
+		return data, nil
+	}
+
+	// If not uploaded to S3, fetch from local disk
+	log.Printf("Fetching not yet uploaded message UID %d from disk", msg.UID)
+	data, err := s.server.uploader.GetLocalFile(s.Domain(), s.LocalPart(), msg.UUID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve message UID %d from disk: %v", msg.UID, err)
+	}
+	if data == nil {
+		return nil, fmt.Errorf("message UID %d not found on disk", msg.UID)
+	}
+	return data, nil
 }
