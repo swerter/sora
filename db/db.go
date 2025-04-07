@@ -765,7 +765,7 @@ func (db *Database) GetMessageEnvelope(ctx context.Context, UID imap.UID, mailbo
 }
 
 // buildSearchCriteria builds the SQL WHERE clause for the search criteria
-func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPrefix string, paramCounter *int) (string, pgx.NamedArgs) {
+func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, numKind imapserver.NumKind, paramPrefix string, paramCounter *int) (string, pgx.NamedArgs) {
 	var conditions []string
 	args := pgx.NamedArgs{}
 
@@ -774,18 +774,20 @@ func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPref
 		return fmt.Sprintf("%s%d", paramPrefix, *paramCounter)
 	}
 
-	// For SeqNum
-	for _, seqSet := range criteria.SeqNum {
-		seqCond, seqArgs := buildNumSetCondition(seqSet, "seqnum", paramPrefix, paramCounter)
-		maps.Copy(args, seqArgs)
-		conditions = append(conditions, seqCond)
-	}
-
-	// For UID
-	for _, uidSet := range criteria.UID {
-		uidCond, uidArgs := buildNumSetCondition(uidSet, "uid", paramPrefix, paramCounter)
-		maps.Copy(args, uidArgs)
-		conditions = append(conditions, uidCond)
+	if numKind == imapserver.NumKindSeq {
+		// For SeqNum
+		for _, seqSet := range criteria.SeqNum {
+			seqCond, seqArgs := buildNumSetCondition(seqSet, "seqnum", paramPrefix, paramCounter)
+			maps.Copy(args, seqArgs)
+			conditions = append(conditions, seqCond)
+		}
+	} else {
+		// For UID
+		for _, uidSet := range criteria.UID {
+			uidCond, uidArgs := buildNumSetCondition(uidSet, "uid", paramPrefix, paramCounter)
+			maps.Copy(args, uidArgs)
+			conditions = append(conditions, uidCond)
+		}
 	}
 
 	// Date filters
@@ -866,7 +868,7 @@ func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPref
 
 	// Recursive NOT
 	for _, notCriteria := range criteria.Not {
-		subCond, subArgs := db.buildSearchCriteria(&notCriteria, paramPrefix, paramCounter)
+		subCond, subArgs := db.buildSearchCriteria(&notCriteria, numKind, paramPrefix, paramCounter)
 		for k, v := range subArgs {
 			args[k] = v
 		}
@@ -875,8 +877,8 @@ func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPref
 
 	// Recursive OR
 	for _, orPair := range criteria.Or {
-		leftCond, leftArgs := db.buildSearchCriteria(&orPair[0], paramPrefix, paramCounter)
-		rightCond, rightArgs := db.buildSearchCriteria(&orPair[1], paramPrefix, paramCounter)
+		leftCond, leftArgs := db.buildSearchCriteria(&orPair[0], numKind, paramPrefix, paramCounter)
+		rightCond, rightArgs := db.buildSearchCriteria(&orPair[1], numKind, paramPrefix, paramCounter)
 
 		maps.Copy(args, leftArgs)
 		maps.Copy(args, rightArgs)
@@ -951,20 +953,29 @@ func buildNumSetCondition(numSet imap.NumSet, columnName string, paramPrefix str
 }
 
 func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64, numKind imapserver.NumKind, criteria *imap.SearchCriteria) ([]Message, error) {
-	baseQuery := `
-	WITH message_seqs AS (
-		SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seqnum
-		FROM messages
-		WHERE mailbox_id = @mailboxID AND expunged_at IS NULL
-	)`
-
 	paramCounter := 0
-	whereCondition, whereArgs := db.buildSearchCriteria(criteria, "p", &paramCounter)
+	whereCondition, whereArgs := db.buildSearchCriteria(criteria, numKind, "p", &paramCounter)
 	whereArgs["mailboxID"] = mailboxID
 
-	query := fmt.Sprintf(" SELECT uid FROM message_seqs WHERE %s ORDER BY uid", whereCondition)
+	var query string
+	if numKind == imapserver.NumKindSeq {
+		query = fmt.Sprintf(`
+			WITH message_seqs AS (
+				SELECT uid, ROW_NUMBER() OVER (ORDER BY id) AS seqnum
+				FROM messages
+				WHERE mailbox_id = @mailboxID AND expunged_at IS NULL
+			)
+			SELECT uid FROM message_seqs WHERE %s ORDER BY uid
+		`, whereCondition)
+	} else {
+		query = fmt.Sprintf(`
+			SELECT uid FROM messages
+			WHERE mailbox_id = @mailboxID AND expunged_at IS NULL AND %s
+			ORDER BY uid
+		`, whereCondition)
+	}
 
-	rows, err := db.Pool.Query(ctx, baseQuery+query, whereArgs)
+	rows, err := db.Pool.Query(ctx, query, whereArgs)
 	if err != nil {
 		return nil, err
 	}
