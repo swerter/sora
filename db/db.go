@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sort"
 	"strings"
 	"time"
 
@@ -31,16 +30,6 @@ var schema string
 // Database holds the SQL connection
 type Database struct {
 	Pool *pgxpool.Pool
-}
-
-// sortedKeys returns the keys of a map in sorted order
-func sortedKeys(m pgx.NamedArgs) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // containsFlag checks if a slice of flags contains a specific flag
@@ -269,7 +258,7 @@ type InsertMessageOptions struct {
 	Recipients    []helpers.Recipient
 }
 
-func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOptions, upload PendingUpload) (messageID int64, uid int64, err error) {
+func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOptions, upload PendingUpload) (int64, int64, error) {
 	bodyStructureData, err := helpers.SerializeBodyStructureGob(options.BodyStructure)
 	if err != nil {
 		log.Printf("Failed to serialize BodyStructure: %v", err)
@@ -288,14 +277,15 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 	defer tx.Rollback(ctx)
 
 	// Lock mailbox and get current UID
-	err = tx.QueryRow(ctx, `SELECT highest_uid FROM mailboxes WHERE id = $1 FOR UPDATE;`, options.MailboxID).Scan(&uid)
+	var highestUID int64
+	err = tx.QueryRow(ctx, `SELECT highest_uid FROM mailboxes WHERE id = $1 FOR UPDATE;`, options.MailboxID).Scan(&highestUID)
 	if err != nil {
 		log.Printf("Failed to fetch highest UID: %v", err)
 		return 0, 0, consts.ErrDBQueryFailed
 	}
 
 	// Bump UID
-	err = tx.QueryRow(ctx, `UPDATE mailboxes SET highest_uid = highest_uid + 1 WHERE id = $1 RETURNING highest_uid`, options.MailboxID).Scan(&uid)
+	err = tx.QueryRow(ctx, `UPDATE mailboxes SET highest_uid = highest_uid + 1 WHERE id = $1 RETURNING highest_uid`, options.MailboxID).Scan(&highestUID)
 	if err != nil {
 		log.Printf("Failed to update highest UID: %v", err)
 		return 0, 0, consts.ErrDBUpdateFailed
@@ -309,6 +299,8 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 
 	inReplyToStr := strings.Join(options.InReplyTo, " ")
 	bitwiseFlags := FlagsToBitwise(options.Flags)
+
+	var messageRowId int64
 
 	plaintextBody := ""
 	if options.PlaintextBody != nil {
@@ -331,7 +323,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		"user_id":         options.UserID,
 		"mailbox_id":      options.MailboxID,
 		"mailbox_name":    options.MailboxName,
-		"uid":             uid,
+		"uid":             highestUID,
 		"message_id":      saneMessageID,
 		"uuid":            options.UUID,
 		"flags":           bitwiseFlags,
@@ -343,7 +335,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		"in_reply_to":     saneInReplyToStr,
 		"body_structure":  bodyStructureData,
 		"recipients_json": recipientsJSON,
-	}).Scan(&messageID)
+	}).Scan(&messageRowId)
 
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
@@ -357,7 +349,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 	_, err = tx.Exec(ctx, `
 	INSERT INTO pending_uploads (message_id, uuid, file_path, s3_path, size, mailbox_name, domain_name, local_part)
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		messageID,
+		messageRowId,
 		options.UUID,
 		upload.FilePath,
 		upload.S3Path,
@@ -372,7 +364,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		return 0, 0, consts.ErrDBCommitTransactionFailed
 	}
 
-	return messageID, uid, nil
+	return messageRowId, highestUID, nil
 }
 
 func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailboxID, destMailboxID int64) (map[int64]int64, error) {
@@ -851,24 +843,22 @@ func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPref
 
 	// Header conditions
 	for _, header := range criteria.Header {
-		lowerValue := strings.ToLower(header.Value)
-		lowerKey := strings.ToLower(header.Key)
-		switch lowerKey {
+		switch strings.ToLower(header.Key) {
 		case "subject":
 			param := nextParam()
-			args[param] = "%" + lowerValue + "%"
+			args[param] = "%" + strings.ToLower(header.Value) + "%"
 			conditions = append(conditions, fmt.Sprintf("LOWER(subject) LIKE @%s", param))
 		case "message-id":
 			param := nextParam()
-			args[param] = lowerValue
+			args[param] = strings.ToLower(header.Value)
 			conditions = append(conditions, fmt.Sprintf("LOWER(message_id) = @%s", param))
 		case "in-reply-to":
 			param := nextParam()
-			args[param] = lowerValue
+			args[param] = strings.ToLower(header.Value)
 			conditions = append(conditions, fmt.Sprintf("LOWER(in_reply_to) = @%s", param))
 		case "from", "to", "cc", "bcc", "reply-to":
 			recipientJSONParam := nextParam()
-			recipientValue := fmt.Sprintf(`[{"type": "%s", "email": "%s"}]`, lowerKey, lowerValue)
+			recipientValue := fmt.Sprintf(`[{"type": "%s", "email": "%s"}]`, strings.ToLower(header.Key), strings.ToLower(header.Value))
 			args[recipientJSONParam] = recipientValue
 			conditions = append(conditions, fmt.Sprintf(`recipients_json @> @%s::jsonb`, recipientJSONParam))
 		}
@@ -914,6 +904,10 @@ func buildNumSetCondition(numSet imap.NumSet, columnName string, paramPrefix str
 	switch s := numSet.(type) {
 	case imap.SeqSet:
 		for _, r := range s {
+			if r.Start > r.Stop {
+				log.Printf("Invalid SeqSet range: %d > %d", r.Start, r.Stop)
+				continue // skip invalid range
+			}
 			if r.Start == r.Stop {
 				param := nextParam()
 				args[param] = r.Start
@@ -928,6 +922,10 @@ func buildNumSetCondition(numSet imap.NumSet, columnName string, paramPrefix str
 		}
 	case imap.UIDSet:
 		for _, r := range s {
+			if r.Start > r.Stop {
+				log.Printf("Invalid UIDSet range: %d > %d", r.Start, r.Stop)
+				continue // skip invalid range
+			}
 			if r.Start == r.Stop {
 				param := nextParam()
 				args[param] = r.Start
@@ -955,25 +953,18 @@ func buildNumSetCondition(numSet imap.NumSet, columnName string, paramPrefix str
 func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64, numKind imapserver.NumKind, criteria *imap.SearchCriteria) ([]Message, error) {
 	baseQuery := `
 	WITH message_seqs AS (
-		SELECT uid, ROW_NUMBER() OVER (ORDER BY uid) AS seqnum
+		SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seqnum
 		FROM messages
 		WHERE mailbox_id = @mailboxID AND expunged_at IS NULL
-	)
-	SELECT * FROM message_seqs`
+	)`
 
 	paramCounter := 0
 	whereCondition, whereArgs := db.buildSearchCriteria(criteria, "p", &paramCounter)
 	whereArgs["mailboxID"] = mailboxID
 
-	query := fmt.Sprintf(" WHERE %s ORDER BY uid", whereCondition)
+	query := fmt.Sprintf(" SELECT uid FROM message_seqs WHERE %s ORDER BY uid", whereCondition)
 
-	// Convert NamedArgs to positional arguments
-	positionalArgs := make([]interface{}, 0, len(whereArgs))
-	for _, key := range sortedKeys(whereArgs) {
-		positionalArgs = append(positionalArgs, whereArgs[key])
-	}
-
-	rows, err := db.Pool.Query(ctx, baseQuery+query, positionalArgs...)
+	rows, err := db.Pool.Query(ctx, baseQuery+query, whereArgs)
 	if err != nil {
 		return nil, err
 	}

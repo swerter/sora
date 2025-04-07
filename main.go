@@ -136,7 +136,7 @@ func main() {
 
 	// Start POP3 server
 	if *startPop3 {
-		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, *insecureAuth, *debug, errChan)
+		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan)
 	}
 
 	// Start ManageSieve server
@@ -188,8 +188,8 @@ func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *stor
 	}
 }
 
-func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, insecureAuth bool, debug bool, errChan chan error) {
-	s, err := pop3.New(hostname, addr, s3storage, database, insecureAuth, debug)
+func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error) {
+	s, err := pop3.New(hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug)
 	if err != nil {
 		errChan <- err
 		return

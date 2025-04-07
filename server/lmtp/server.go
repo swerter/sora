@@ -8,6 +8,7 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/google/uuid"
 	"github.com/migadu/sora/db"
+	"github.com/migadu/sora/server/sieveengine"
 	"github.com/migadu/sora/server/uploader"
 	"github.com/migadu/sora/storage"
 )
@@ -18,6 +19,7 @@ type LMTPServerBackend struct {
 	db       *db.Database
 	s3       *storage.S3Storage
 	uploader *uploader.UploadWorker
+	sieve    sieveengine.Executor
 	server   *smtp.Server
 }
 

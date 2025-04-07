@@ -18,6 +18,7 @@ import (
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/helpers"
 	"github.com/migadu/sora/server"
+	"github.com/migadu/sora/server/sieveengine"
 )
 
 type LMTPSession struct {
@@ -100,11 +101,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 	plaintextBody, err := helpers.ExtractPlaintextBody(messageContent)
 	if err != nil {
 		log.Printf("Failed to extract plaintext body: %v", err)
-		// return &smtp.SMTPError{
-		// 	Code:         554,
-		// 	EnhancedCode: smtp.EnhancedCode{5, 6, 0}, // TODO: Check the correct code
-		// 	Message:      "Malformed message",
-		// }
+		// The plaintext body is needed only for indexing, so we can ignore the error
 	}
 
 	recipients := helpers.ExtractRecipients(messageContent.Header)
@@ -116,11 +113,43 @@ func (s *LMTPSession) Data(r io.Reader) error {
 
 	ctx := context.Background()
 
-	// TODO: SIEVE filtering
-	// TODO: Assume the message goes always to the INBOX for now
-	mailbox, err := s.backend.db.GetMailboxByName(ctx, s.UserID(), consts.MAILBOX_INBOX)
+	sieveCtx := sieveengine.Context{
+		EnvelopeFrom: s.sender.FullAddress(),
+		EnvelopeTo:   s.User.Address.FullAddress(),
+		Header:       messageContent.Header.Map(),
+		Body:         *plaintextBody,
+	}
+
+	result, err := s.backend.sieve.Evaluate(sieveCtx)
 	if err != nil {
-		return s.internalError("failed to get mailbox: %v", err)
+		s.Log("[LMTP] SIEVE evaluation error: %v", err)
+		// fallback: default to INBOX
+		result = sieveengine.Result{Action: sieveengine.ActionKeep}
+	}
+
+	var mailboxName string
+	switch result.Action {
+	case sieveengine.ActionDiscard:
+		s.Log("[LMTP] Message discarded by SIEVE")
+		return nil
+	case sieveengine.ActionFileInto:
+		mailboxName = result.Mailbox
+	default:
+		mailboxName = consts.MAILBOX_INBOX
+	}
+
+	// Try to get the mailbox by name, if it fails, fallback to INBOX
+	mailbox, err := s.backend.db.GetMailboxByName(ctx, s.UserID(), mailboxName)
+	if err != nil {
+		if err == consts.ErrMailboxNotFound {
+			s.Log("Mailbox '%s' not found, falling back to INBOX", mailboxName)
+			mailbox, err = s.backend.db.GetMailboxByName(ctx, s.UserID(), consts.MAILBOX_INBOX)
+			if err != nil {
+				return s.internalError("failed to get INBOX mailbox: %v", err)
+			}
+		} else {
+			return s.internalError("failed to get mailbox '%s': %v", mailboxName, err)
+		}
 	}
 
 	// The S3 key is generated based on the domain and local part of the email address
