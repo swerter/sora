@@ -258,6 +258,9 @@ type InsertMessageOptions struct {
 	Recipients    []helpers.Recipient
 }
 
+// TODO: Drop plaintext body from the database after indexing
+// TODO: Add created/modified timestamps
+// TODO: Split passwords into a separate table
 func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOptions, upload PendingUpload) (int64, int64, error) {
 	bodyStructureData, err := helpers.SerializeBodyStructureGob(options.BodyStructure)
 	if err != nil {
@@ -297,7 +300,13 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		return 0, 0, consts.ErrSerializationFailed
 	}
 
-	inReplyToStr := strings.Join(options.InReplyTo, " ")
+	var inReplyTo interface{} = nil
+	if len(options.InReplyTo) > 0 {
+		inReplyToStr := strings.Join(options.InReplyTo, " ")
+		inReplyToStr = helpers.SanitizeUTF8(inReplyToStr)
+		inReplyTo = inReplyToStr
+	}
+
 	bitwiseFlags := FlagsToBitwise(options.Flags)
 
 	var messageRowId int64
@@ -310,7 +319,6 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 	// Sanitize inputs
 	saneSubject := helpers.SanitizeUTF8(options.Subject)
 	saneMessageID := helpers.SanitizeUTF8(options.MessageID)
-	saneInReplyToStr := helpers.SanitizeUTF8(inReplyToStr)
 	sanePlaintextBody := helpers.SanitizeUTF8(plaintextBody)
 
 	err = tx.QueryRow(ctx, `
@@ -327,12 +335,12 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		"message_id":      saneMessageID,
 		"uuid":            options.UUID,
 		"flags":           bitwiseFlags,
-		"internal_date":   options.InternalDate,
+		"internal_date":   options.InternalDate.UTC(),
 		"size":            options.Size,
 		"text_body":       sanePlaintextBody,
 		"subject":         saneSubject,
 		"sent_date":       options.SentDate,
-		"in_reply_to":     saneInReplyToStr,
+		"in_reply_to":     inReplyTo,
 		"body_structure":  bodyStructureData,
 		"recipients_json": recipientsJSON,
 	}).Scan(&messageRowId)
@@ -346,7 +354,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		return 0, 0, consts.ErrDBInsertFailed
 	}
 
-	_, err = tx.Exec(ctx, `
+	tx.Exec(ctx, `
 	INSERT INTO pending_uploads (message_id, uuid, file_path, s3_path, size, mailbox_name, domain_name, local_part)
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		messageRowId,
@@ -493,50 +501,76 @@ func (db *Database) GetMessageBodyStructure(ctx context.Context, messageUID imap
 	return helpers.DeserializeBodyStructureGob(bodyStructureBytes)
 }
 
-func selectNumSet(numSet imap.NumSet, query string, args []interface{}) (string, []interface{}) {
-	query += "(false"
-	switch set := numSet.(type) {
+func selectNumSet(numSet imap.NumSet, kind imapserver.NumKind, query string, args []interface{}) (string, []interface{}) {
+	var conditions []string
+
+	column := "seqnum"
+	switch numSet.(type) {
 	case imap.SeqSet:
-		for _, seqRange := range set {
-			query += " OR (true"
-			if seqRange.Start != 0 {
-				args = append(args, seqRange.Start)
-				query += fmt.Sprintf(" AND seqnum >= $%d", len(args))
-			}
-			if seqRange.Stop != 0 {
-				args = append(args, seqRange.Stop)
-				query += fmt.Sprintf(" AND seqnum <= $%d", len(args))
-			}
-			query += ")"
+		if kind != imapserver.NumKindSeq {
+			panic("expected sequence numbers for SeqSet")
 		}
 	case imap.UIDSet:
-		for _, uidRange := range set {
-			query += " OR (true"
-			if uidRange.Start != 0 {
-				args = append(args, uint32(uidRange.Start))
-				query += fmt.Sprintf(" AND uid >= $%d", len(args))
-			}
-			if uidRange.Stop != 0 {
-				args = append(args, uint32(uidRange.Stop))
-				query += fmt.Sprintf(" AND uid <= $%d", len(args))
-			}
-			query += ")"
+		if kind != imapserver.NumKindUID {
+			panic("expected UIDs for UIDSet")
 		}
+		column = "uid"
 	default:
-		panic("unsupported NumSet type") // unreachable
+		panic("unsupported NumSet type")
 	}
-	query += ")"
+
+	switch s := numSet.(type) {
+	case imap.SeqSet:
+		for _, r := range s {
+			if r.Stop != 0 && r.Start > r.Stop {
+				continue
+			}
+			var conds []string
+			if r.Start > 0 {
+				args = append(args, r.Start)
+				conds = append(conds, fmt.Sprintf("%s >= $%d", column, len(args)))
+			}
+			if r.Stop > 0 {
+				args = append(args, r.Stop)
+				conds = append(conds, fmt.Sprintf("%s <= $%d", column, len(args)))
+			}
+			conditions = append(conditions, "("+strings.Join(conds, " AND ")+")")
+		}
+	case imap.UIDSet:
+		for _, r := range s {
+			if r.Stop != 0 && r.Start > r.Stop {
+				continue
+			}
+			var conds []string
+			if r.Start > 0 {
+				args = append(args, uint32(r.Start))
+				conds = append(conds, fmt.Sprintf("%s >= $%d", column, len(args)))
+			}
+			if r.Stop > 0 {
+				args = append(args, uint32(r.Stop))
+				conds = append(conds, fmt.Sprintf("%s <= $%d", column, len(args)))
+			}
+			conditions = append(conditions, "("+strings.Join(conds, " AND ")+")")
+		}
+	}
+
+	if len(conditions) > 0 {
+		query += strings.Join(conditions, " OR ")
+	} else {
+		query += "false"
+	}
+
 	return query, args
 }
 
 // GetMessagesBySeqSet fetches messages from the database based on the NumSet and mailbox ID.
 // This works for both sequence numbers (SeqSet) and UIDs (UIDSet).
-func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, numSet imap.NumSet) ([]Message, error) {
+func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, numKind imapserver.NumKind, numSet imap.NumSet) ([]Message, error) {
 	var messages []Message
 
 	query := `
 		SELECT * FROM (
-			SELECT user_id, uid, mailbox_id, uuid, s3_uploaded, flags, internal_date, size, body_structure,
+			SELECT user_id, uid, mailbox_id, uuid, s3_uploaded, flags, internal_date, size, body_structure, created_modseq, updated_modseq, expunged_modseq,
 				row_number() OVER (ORDER BY id) AS seqnum
 			FROM messages
 			WHERE
@@ -544,9 +578,9 @@ func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, nu
 				expunged_at IS NULL
 		) AS sub WHERE
 	`
-	args := []interface{}{mailboxID}
+	args := []any{mailboxID}
 
-	query, args = selectNumSet(numSet, query, args)
+	query, args = selectNumSet(numSet, numKind, query, args)
 
 	// Execute the query
 	rows, err := db.Pool.Query(ctx, query, args...)
@@ -559,7 +593,8 @@ func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, nu
 	for rows.Next() {
 		var msg Message
 		var bodyStructureBytes []byte
-		if err := rows.Scan(&msg.UserID, &msg.UID, &msg.MailboxID, &msg.UUID, &msg.S3Uploaded, &msg.BitwiseFlags, &msg.InternalDate, &msg.Size, &bodyStructureBytes, &msg.Seq); err != nil {
+		if err := rows.Scan(&msg.UserID, &msg.UID, &msg.MailboxID, &msg.UUID, &msg.S3Uploaded, &msg.BitwiseFlags, &msg.InternalDate, &msg.Size, &bodyStructureBytes,
+			&msg.CreatedModSeq, &msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.Seq); err != nil {
 			return nil, fmt.Errorf("failed to scan message: %v", err)
 		}
 		bodyStructure, err := helpers.DeserializeBodyStructureGob(bodyStructureBytes)
@@ -695,7 +730,7 @@ func (db *Database) ExpungeMessageUIDs(ctx context.Context, mailboxID int64, uid
 func (db *Database) GetMessageEnvelope(ctx context.Context, UID imap.UID, mailboxID int64) (*imap.Envelope, error) {
 	var envelope imap.Envelope
 
-	var inReplyTo string
+	var inReplyTo *string
 	var recipientsJSON []byte
 
 	var messageId int64
@@ -722,7 +757,9 @@ func (db *Database) GetMessageEnvelope(ctx context.Context, UID imap.UID, mailbo
 	}
 
 	// Split the In-Reply-To header into individual message IDs
-	envelope.InReplyTo = strings.Split(inReplyTo, " ")
+	if inReplyTo != nil {
+		envelope.InReplyTo = strings.Split(*inReplyTo, " ")
+	}
 
 	var recipients []helpers.Recipient
 	if err := json.Unmarshal(recipientsJSON, &recipients); err != nil {
@@ -961,7 +998,7 @@ func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64
 	if numKind == imapserver.NumKindSeq {
 		query = fmt.Sprintf(`
 			WITH message_seqs AS (
-				SELECT uid, ROW_NUMBER() OVER (ORDER BY id) AS seqnum
+				SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seqnum
 				FROM messages
 				WHERE mailbox_id = @mailboxID AND expunged_at IS NULL
 			)
@@ -1112,7 +1149,7 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 
 	query := `
 			SELECT 
-				uid, size, uuid, s3_uploaded
+				uid, size, created_modseq, updated_modseq, expunged_modseq, uuid, s3_uploaded
 			FROM 
 				messages
 			WHERE 
@@ -1127,7 +1164,7 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 
 	for rows.Next() {
 		var msg Message
-		if err := rows.Scan(&msg.UID, &msg.Size, &msg.UUID, &msg.S3Uploaded); err != nil {
+		if err := rows.Scan(&msg.UID, &msg.Size, &msg.CreatedModSeq, &msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.UUID, &msg.S3Uploaded); err != nil {
 			return nil, fmt.Errorf("failed to scan message: %v", err)
 		}
 		messages = append(messages, msg)

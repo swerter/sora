@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS mailboxes (
 );
 
 -- Index for faster mailbox lookups by user_id and case insensitive name
-CREATE INDEX IF NOT EXISTS idx_mailboxes_lower_name_parent_id ON mailboxes (user_id, LOWER(name), parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mailboxes_lower_name_parent_id ON mailboxes (user_id, name, parent_id);
 
 -- Partial unique index for top-level mailboxes
 CREATE UNIQUE INDEX IF NOT EXISTS unique_top_level_mailbox_name ON mailboxes (user_id, name)
@@ -47,8 +47,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	message_id TEXT NOT NULL, 			    -- The Message-ID from the message headers
 	in_reply_to TEXT,								    -- The In-Reply-To header from the message
 	subject TEXT,										    -- Subject of the message
-	sent_date TIMESTAMP NOT NULL,		    -- The date the message was sent
-	internal_date TIMESTAMP NOT NULL,   -- The date the message was received
+	sent_date TIMESTAMPTZ NOT NULL,		    -- The date the message was sent
+	internal_date TIMESTAMPTZ NOT NULL,   -- The date the message was received
 	flags INTEGER NOT NULL,					    -- Bitwise flags for the message (e.g., \Seen, \Flagged)
 	size INTEGER NOT NULL,					    -- Size of the message in bytes
 	body_structure BYTEA NOT NULL,      -- Serialized BodyStructure of the message

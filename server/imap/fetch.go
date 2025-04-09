@@ -13,12 +13,11 @@ import (
 	"github.com/migadu/sora/server"
 )
 
-func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, seqSet imap.NumSet, options *imap.FetchOptions) error {
+func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, seqSet imap.NumSet, numKind imapserver.NumKind, options *imap.FetchOptions) error {
 	ctx := context.Background()
-
 	seqSet = s.mailbox.decodeNumSet(seqSet)
 
-	messages, err := s.server.db.GetMessagesBySeqSet(ctx, s.mailbox.ID, seqSet)
+	messages, err := s.server.db.GetMessagesBySeqSet(ctx, s.mailbox.ID, numKind, seqSet)
 	if err != nil {
 		return s.internalError("failed to retrieve messages: %v", err)
 	}
@@ -87,7 +86,9 @@ func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, o
 		}
 	}
 
-	// TODO: Fetch ModSeq (if CONDSTORE is supported)
+	if options.ModSeq {
+		m.WriteModSeq(uint64(msg.CreatedModSeq))
+	}
 
 	if err := m.Close(); err != nil {
 		return fmt.Errorf("failed to end message for UID %d: %v", msg.UID, err)
@@ -105,7 +106,7 @@ func (s *IMAPSession) writeBasicMessageData(m *imapserver.FetchResponseWriter, m
 		m.WriteUID(msg.UID)
 	}
 	if options.InternalDate {
-		m.WriteInternalDate(msg.InternalDate)
+		m.WriteInternalDate(msg.InternalDate.UTC())
 	}
 	if options.RFC822Size {
 		m.WriteRFC822Size(int64(msg.Size))

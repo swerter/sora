@@ -8,7 +8,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapserver"
 )
 
-func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest string) error {
+func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, numKind imapserver.NumKind, dest string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -34,7 +34,7 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 	}
 
 	// Get messages by sequence or UID set (based on NumKind, which is SeqNum or UID)
-	messages, err := s.server.db.GetMessagesBySeqSet(ctx, s.mailbox.ID, numSet)
+	messages, err := s.server.db.GetMessagesBySeqSet(ctx, s.mailbox.ID, numKind, numSet)
 	if err != nil {
 		return s.internalError("failed to retrieve messages: %v", err)
 	}

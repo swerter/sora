@@ -8,7 +8,7 @@ import (
 )
 
 // Update flags for messages in the selected mailbox
-func (s *IMAPSession) Store(w *imapserver.FetchWriter, seqSet imap.NumSet, flags *imap.StoreFlags, options *imap.StoreOptions) error {
+func (s *IMAPSession) Store(w *imapserver.FetchWriter, seqSet imap.NumSet, numKind imapserver.NumKind, flags *imap.StoreFlags, options *imap.StoreOptions) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -24,7 +24,7 @@ func (s *IMAPSession) Store(w *imapserver.FetchWriter, seqSet imap.NumSet, flags
 	seqSet = s.mailbox.decodeNumSet(seqSet)
 
 	ctx := context.Background()
-	messages, err := s.server.db.GetMessagesBySeqSet(ctx, s.mailbox.ID, seqSet)
+	messages, err := s.server.db.GetMessagesBySeqSet(ctx, s.mailbox.ID, numKind, seqSet)
 	if err != nil {
 		return s.internalError("failed to retrieve messages: %v", err)
 	}

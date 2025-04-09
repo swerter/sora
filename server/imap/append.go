@@ -58,6 +58,10 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	sentDate, _ := mailHeader.Date()
 	inReplyTo, _ := mailHeader.MsgIDList("In-Reply-To")
 
+	if len(inReplyTo) == 0 {
+		inReplyTo = nil
+	}
+
 	if sentDate.IsZero() {
 		sentDate = options.Time
 	}

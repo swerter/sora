@@ -5,10 +5,11 @@ import (
 	"fmt"
 
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/migadu/sora/consts"
 )
 
-func (s *IMAPSession) Copy(seqSet imap.NumSet, mboxName string) (*imap.CopyData, error) {
+func (s *IMAPSession) Copy(seqSet imap.NumSet, numKind imapserver.NumKind, mboxName string) (*imap.CopyData, error) {
 	if s.mailbox == nil {
 		s.Log("Copy failed: no mailbox selected")
 		return nil, &imap.Error{
@@ -33,7 +34,7 @@ func (s *IMAPSession) Copy(seqSet imap.NumSet, mboxName string) (*imap.CopyData,
 		return nil, s.internalError("failed to fetch destination mailbox '%s': %v", mboxName, err)
 	}
 
-	messages, err := s.server.db.GetMessagesBySeqSet(ctx, s.mailbox.ID, seqSet)
+	messages, err := s.server.db.GetMessagesBySeqSet(ctx, s.mailbox.ID, numKind, seqSet)
 	if err != nil {
 		return nil, s.internalError("failed to retrieve messages for copy: %v", err)
 	}
