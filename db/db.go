@@ -15,7 +15,6 @@ import (
 	"maps"
 
 	"github.com/emersion/go-imap/v2"
-	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -952,7 +951,7 @@ func buildNumSetCondition(numSet imap.NumSet, columnName string, paramPrefix str
 	return finalCondition, args
 }
 
-func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64, numKind imapserver.NumKind, criteria *imap.SearchCriteria) ([]Message, error) {
+func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64, criteria *imap.SearchCriteria) ([]Message, error) {
 	baseQuery := `
 	WITH message_seqs AS (
 		SELECT uid, ROW_NUMBER() OVER (ORDER BY uid) AS seqnum

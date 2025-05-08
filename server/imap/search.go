@@ -10,7 +10,7 @@ import (
 func (s *IMAPSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCriteria, options *imap.SearchOptions) (*imap.SearchData, error) {
 	ctx := context.Background()
 
-	messages, err := s.server.db.GetMessagesWithCriteria(ctx, s.mailbox.ID, numKind, criteria)
+	messages, err := s.server.db.GetMessagesWithCriteria(ctx, s.mailbox.ID, criteria)
 	if err != nil {
 		return nil, s.internalError("failed to search messages: %v", err)
 	}
