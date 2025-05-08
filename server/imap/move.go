@@ -12,15 +12,6 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// Ensure a mailbox is selected
-	if s.mailbox == nil {
-		return &imap.Error{
-			Type: imap.StatusResponseTypeNo,
-			Code: imap.ResponseCodeNonExistent,
-			Text: "no mailbox selected",
-		}
-	}
-
 	ctx := context.Background()
 
 	// Find the destination mailbox by its name
