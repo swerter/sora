@@ -68,7 +68,7 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 
 	// Expunge messages in the source mailbox (optional)
 	for _, seqNum := range seqNums {
-		if err := w.WriteExpunge(seqNum); err != nil {
+		if err := w.WriteExpunge(s.mailbox.sessionTracker.EncodeSeqNum(seqNum)); err != nil {
 			return s.internalError("failed to write EXPUNGE: %v", err)
 		}
 	}
