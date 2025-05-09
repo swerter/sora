@@ -772,7 +772,7 @@ func (db *Database) GetMessageEnvelope(ctx context.Context, UID imap.UID, mailbo
 }
 
 // buildSearchCriteria builds the SQL WHERE clause for the search criteria
-func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPrefix string, paramCounter *int) (string, pgx.NamedArgs) {
+func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPrefix string, paramCounter *int) (string, pgx.NamedArgs, error) {
 	var conditions []string
 	args := pgx.NamedArgs{}
 
@@ -835,6 +835,12 @@ func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPref
 		args[param] = bodyCriteria
 		conditions = append(conditions, fmt.Sprintf("text_body_tsv @@ plainto_tsquery('simple', @%s)", param))
 	}
+	if len(criteria.Text) > 0 {
+		return "", nil, &imap.Error{
+			Type: imap.StatusResponseTypeNo,
+			Text: "SEARCH criteria TEXT is not supported",
+		}
+	}
 
 	// Flags
 	for _, flag := range criteria.Flag {
@@ -870,12 +876,20 @@ func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPref
 			recipientValue := fmt.Sprintf(`[{"type": "%s", "email": "%s"}]`, lowerKey, lowerValue)
 			args[recipientJSONParam] = recipientValue
 			conditions = append(conditions, fmt.Sprintf(`recipients_json @> @%s::jsonb`, recipientJSONParam))
+		default:
+			return "", nil, &imap.Error{
+				Type: imap.StatusResponseTypeNo,
+				Text: "SEARCH criteria generic HEADER is not supported",
+			}
 		}
 	}
 
 	// Recursive NOT
 	for _, notCriteria := range criteria.Not {
-		subCond, subArgs := db.buildSearchCriteria(&notCriteria, paramPrefix, paramCounter)
+		subCond, subArgs, err := db.buildSearchCriteria(&notCriteria, paramPrefix, paramCounter)
+		if err != nil {
+			return "", nil, err
+		}
 		for k, v := range subArgs {
 			args[k] = v
 		}
@@ -884,8 +898,14 @@ func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPref
 
 	// Recursive OR
 	for _, orPair := range criteria.Or {
-		leftCond, leftArgs := db.buildSearchCriteria(&orPair[0], paramPrefix, paramCounter)
-		rightCond, rightArgs := db.buildSearchCriteria(&orPair[1], paramPrefix, paramCounter)
+		leftCond, leftArgs, err := db.buildSearchCriteria(&orPair[0], paramPrefix, paramCounter)
+		if err != nil {
+			return "", nil, err
+		}
+		rightCond, rightArgs, err := db.buildSearchCriteria(&orPair[1], paramPrefix, paramCounter)
+		if err != nil {
+			return "", nil, err
+		}
 
 		maps.Copy(args, leftArgs)
 		maps.Copy(args, rightArgs)
@@ -898,7 +918,7 @@ func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPref
 		finalCondition = strings.Join(conditions, " AND ")
 	}
 
-	return finalCondition, args
+	return finalCondition, args, nil
 }
 
 func buildNumSetCondition(numSet imap.NumSet, columnName string, paramPrefix string, paramCounter *int) (string, pgx.NamedArgs) {
@@ -961,7 +981,10 @@ func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64
 	SELECT * FROM message_seqs`
 
 	paramCounter := 0
-	whereCondition, whereArgs := db.buildSearchCriteria(criteria, "p", &paramCounter)
+	whereCondition, whereArgs, err := db.buildSearchCriteria(criteria, "p", &paramCounter)
+	if err != nil {
+		return nil, err
+	}
 	whereArgs["mailboxID"] = mailboxID
 
 	query := fmt.Sprintf(" WHERE %s ORDER BY uid", whereCondition)
