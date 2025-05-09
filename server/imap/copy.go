@@ -20,6 +20,8 @@ func (s *IMAPSession) Copy(seqSet imap.NumSet, mboxName string) (*imap.CopyData,
 
 	ctx := context.Background()
 
+	seqSet = s.mailbox.decodeNumSet(seqSet)
+
 	destMailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), mboxName)
 	if err != nil {
 		if err == consts.ErrMailboxNotFound {

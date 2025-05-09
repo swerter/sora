@@ -12,16 +12,9 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// Ensure a mailbox is selected
-	if s.mailbox == nil {
-		return &imap.Error{
-			Type: imap.StatusResponseTypeNo,
-			Code: imap.ResponseCodeNonExistent,
-			Text: "no mailbox selected",
-		}
-	}
-
 	ctx := context.Background()
+
+	numSet = s.mailbox.decodeNumSet(numSet)
 
 	// Find the destination mailbox by its name
 	destMailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), dest)
@@ -75,7 +68,7 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 
 	// Expunge messages in the source mailbox (optional)
 	for _, seqNum := range seqNums {
-		if err := w.WriteExpunge(seqNum); err != nil {
+		if err := w.WriteExpunge(s.mailbox.sessionTracker.EncodeSeqNum(seqNum)); err != nil {
 			return s.internalError("failed to write EXPUNGE: %v", err)
 		}
 	}
