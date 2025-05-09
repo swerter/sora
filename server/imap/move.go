@@ -14,6 +14,8 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 
 	ctx := context.Background()
 
+	numSet = s.mailbox.decodeNumSet(numSet)
+
 	// Find the destination mailbox by its name
 	destMailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), dest)
 	if err != nil {
