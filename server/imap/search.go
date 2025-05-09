@@ -10,6 +10,8 @@ import (
 func (s *IMAPSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCriteria, options *imap.SearchOptions) (*imap.SearchData, error) {
 	ctx := context.Background()
 
+	criteria = s.decodeSearchCriteria(criteria)
+
 	messages, err := s.server.db.GetMessagesWithCriteria(ctx, s.mailbox.ID, criteria)
 	if err != nil {
 		return nil, s.internalError("failed to search messages: %v", err)
@@ -41,4 +43,26 @@ func (s *IMAPSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 	searchData.Count = uint32(len(messages))
 
 	return searchData, nil
+}
+
+func (s *IMAPSession) decodeSearchCriteria(criteria *imap.SearchCriteria) *imap.SearchCriteria {
+	decoded := *criteria // make a shallow copy
+
+	decoded.SeqNum = make([]imap.SeqSet, len(criteria.SeqNum))
+	for i, seqSet := range criteria.SeqNum {
+		decoded.SeqNum[i] = s.mailbox.decodeNumSet(seqSet).(imap.SeqSet)
+	}
+
+	decoded.Not = make([]imap.SearchCriteria, len(criteria.Not))
+	for i, not := range criteria.Not {
+		decoded.Not[i] = *s.decodeSearchCriteria(&not)
+	}
+	decoded.Or = make([][2]imap.SearchCriteria, len(criteria.Or))
+	for i := range criteria.Or {
+		for j := range criteria.Or[i] {
+			decoded.Or[i][j] = *s.decodeSearchCriteria(&criteria.Or[i][j])
+		}
+	}
+
+	return &decoded
 }
