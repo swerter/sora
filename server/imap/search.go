@@ -15,13 +15,25 @@ func (s *IMAPSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 		return nil, s.internalError("failed to search messages: %v", err)
 	}
 
-	var uids imap.UIDSet
+	var (
+		uids    imap.UIDSet
+		seqNums imap.SeqSet
+	)
 	for _, msg := range messages {
-		uids.AddNum(msg.UID) // Collect the message UIDs
+		uids.AddNum(msg.UID)
+		seqNums.AddNum(s.mailbox.sessionTracker.EncodeSeqNum(msg.Seq))
+	}
+
+	var all imap.NumSet
+	switch numKind {
+	case imapserver.NumKindUID:
+		all = uids
+	case imapserver.NumKindSeq:
+		all = seqNums
 	}
 
 	searchData := &imap.SearchData{
-		All:   uids,
+		All:   all,
 		UID:   numKind == imapserver.NumKindUID, // Set UID flag if searching by UID
 		Count: uint32(len(uids)),                // Set the count of matching messages
 	}
