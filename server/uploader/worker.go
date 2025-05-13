@@ -132,7 +132,7 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 		return
 	}
 
-	if upload.Size <= cache.MAX_MESSAGE {
+	if upload.Size <= cache.MAX_MESSAGE_SIZE {
 		if err := w.cache.MoveIn(upload.FilePath, upload.DomainName, upload.LocalPart, upload.UUID); err != nil {
 			log.Printf("[UPLOADER] failed to move uploaded message %d to cache: %v", upload.MessageID, err)
 		} else {
