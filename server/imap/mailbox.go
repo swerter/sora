@@ -2,6 +2,7 @@ package imap
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
