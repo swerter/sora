@@ -25,6 +25,9 @@ type Message struct {
 	MessageID      string    // Unique Message-ID from the message headers
 	TextBody       string    // Text body of the message
 	BodyStructure  imap.BodyStructure
+	CreatedModSeq  int64
+	UpdatedModSeq  *int64
+	ExpungedModSeq *int64
 }
 
 // MessagePart represents a part of an email message (e.g., body, attachments)

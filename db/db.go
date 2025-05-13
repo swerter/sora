@@ -286,15 +286,17 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 	}
 	defer tx.Rollback(ctx)
 
+	var highestUID int64
+
 	// Lock mailbox and get current UID
-	err = tx.QueryRow(ctx, `SELECT highest_uid FROM mailboxes WHERE id = $1 FOR UPDATE;`, options.MailboxID).Scan(&uid)
+	err = tx.QueryRow(ctx, `SELECT highest_uid FROM mailboxes WHERE id = $1 FOR UPDATE;`, options.MailboxID).Scan(&highestUID)
 	if err != nil {
 		log.Printf("Failed to fetch highest UID: %v", err)
 		return 0, 0, consts.ErrDBQueryFailed
 	}
 
 	// Bump UID
-	err = tx.QueryRow(ctx, `UPDATE mailboxes SET highest_uid = highest_uid + 1 WHERE id = $1 RETURNING highest_uid`, options.MailboxID).Scan(&uid)
+	err = tx.QueryRow(ctx, `UPDATE mailboxes SET highest_uid = highest_uid + 1 WHERE id = $1 RETURNING highest_uid`, options.MailboxID).Scan(&highestUID)
 	if err != nil {
 		log.Printf("Failed to update highest UID: %v", err)
 		return 0, 0, consts.ErrDBUpdateFailed
@@ -308,6 +310,8 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 
 	inReplyToStr := strings.Join(options.InReplyTo, " ")
 	bitwiseFlags := FlagsToBitwise(options.Flags)
+
+	var messageRowId int64
 
 	plaintextBody := ""
 	if options.PlaintextBody != nil {
@@ -330,7 +334,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		"user_id":         options.UserID,
 		"mailbox_id":      options.MailboxID,
 		"mailbox_name":    options.MailboxName,
-		"uid":             uid,
+		"uid":             highestUID,
 		"message_id":      saneMessageID,
 		"uuid":            options.UUID,
 		"flags":           bitwiseFlags,
@@ -342,7 +346,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		"in_reply_to":     saneInReplyToStr,
 		"body_structure":  bodyStructureData,
 		"recipients_json": recipientsJSON,
-	}).Scan(&messageID)
+	}).Scan(&messageRowId)
 
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
@@ -356,7 +360,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 	_, err = tx.Exec(ctx, `
 	INSERT INTO pending_uploads (message_id, uuid, file_path, s3_path, size, mailbox_name, domain_name, local_part)
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		messageID,
+		messageRowId,
 		options.UUID,
 		upload.FilePath,
 		upload.S3Path,
@@ -371,7 +375,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		return 0, 0, consts.ErrDBCommitTransactionFailed
 	}
 
-	return messageID, uid, nil
+	return messageRowId, highestUID, nil
 }
 
 func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailboxID, destMailboxID int64) (map[int64]int64, error) {
@@ -544,6 +548,7 @@ func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, nu
 	query := `
 		SELECT * FROM (
 			SELECT user_id, uid, mailbox_id, uuid, s3_uploaded, flags, internal_date, size, body_structure,
+				created_modseq, updated_modseq, expunged_modseq,
 				row_number() OVER (ORDER BY id) AS seqnum
 			FROM messages
 			WHERE
@@ -551,7 +556,7 @@ func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, nu
 				expunged_at IS NULL
 		) AS sub WHERE
 	`
-	args := []interface{}{mailboxID}
+	args := []any{mailboxID}
 
 	query, args = selectNumSet(numSet, query, args)
 
@@ -566,7 +571,9 @@ func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, nu
 	for rows.Next() {
 		var msg Message
 		var bodyStructureBytes []byte
-		if err := rows.Scan(&msg.UserID, &msg.UID, &msg.MailboxID, &msg.UUID, &msg.S3Uploaded, &msg.BitwiseFlags, &msg.InternalDate, &msg.Size, &bodyStructureBytes, &msg.Seq); err != nil {
+		if err := rows.Scan(&msg.UserID, &msg.UID, &msg.MailboxID, &msg.UUID, &msg.S3Uploaded,
+			&msg.BitwiseFlags, &msg.InternalDate, &msg.Size, &bodyStructureBytes, &msg.CreatedModSeq,
+			&msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.Seq); err != nil {
 			return nil, fmt.Errorf("failed to scan message: %v", err)
 		}
 		bodyStructure, err := helpers.DeserializeBodyStructureGob(bodyStructureBytes)
@@ -1132,7 +1139,7 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 
 	query := `
 			SELECT 
-				uid, size, uuid, s3_uploaded
+				uid, size, created_modseq, updated_modseq, expunged_modseq, uuid, s3_uploaded
 			FROM 
 				messages
 			WHERE 
@@ -1147,7 +1154,7 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 
 	for rows.Next() {
 		var msg Message
-		if err := rows.Scan(&msg.UID, &msg.Size, &msg.UUID, &msg.S3Uploaded); err != nil {
+		if err := rows.Scan(&msg.UID, &msg.Size, &msg.CreatedModSeq, &msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.UUID, &msg.S3Uploaded); err != nil {
 			return nil, fmt.Errorf("failed to scan message: %v", err)
 		}
 		messages = append(messages, msg)
