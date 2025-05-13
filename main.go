@@ -45,7 +45,7 @@ func main() {
 	pop3Addr := flag.String("pop3addr", ":110", "POP3 server address")
 	uploaderTempPath := flag.String("uploaderpath", "/tmp/sora/uploads", "Directory for pending uploads")
 	cachePath := flag.String("cachedir", "/tmp/sora/cache", "Directory for cached files")
-	maxCacheSize := flag.Int64("maxcachesize", 1024*1024*1024, "Maximum cache size in bytes (default: 1GB)")
+	maxCacheSize := flag.Int64("maxcachesize", 100*1024*1024, "Maximum cache size in bytes (default: 100MB)")
 
 	startManageSieve := flag.Bool("managesieve", true, "Start the ManageSieve server")
 	managesieveAddr := flag.String("managesieveaddr", ":4190", "ManageSieve server address")
