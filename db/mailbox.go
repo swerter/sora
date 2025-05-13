@@ -259,22 +259,35 @@ func (db *Database) CreateDefaultMailboxes(ctx context.Context, userId int64) er
 	return nil
 }
 
-func (d *Database) GetMailboxUnseenCount(ctx context.Context, mailboxID int64) (int, error) {
-	var count int
-	err := d.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE mailbox_id = $1 AND (flags & $2) = 0 AND expunged_at IS NULL", mailboxID, FlagSeen).Scan(&count)
-	if err != nil {
-		return 0, err
-	}
-	return count, nil
+type MailboxSummary struct {
+	UIDNext       int64
+	NumMessages   int
+	TotalSize     int64
+	HighestModSeq uint64
+	RecentCount   int
+	UnseenCount   int
 }
 
-func (d *Database) GetMailboxRecentCount(ctx context.Context, mailboxID int64) (int, error) {
-	var count int
-	err := d.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE mailbox_id = $1 AND (flags & $2) = 0 AND expunged_at IS NULL", mailboxID, FlagRecent).Scan(&count)
+func (d *Database) GetMailboxSummary(ctx context.Context, mailboxID int64) (*MailboxSummary, error) {
+	const query = `
+		SELECT
+			COALESCE(MAX(uid), 0) + 1 AS uid_next,
+			COUNT(*) AS num_messages,
+			COALESCE(SUM(size), 0) AS total_size,
+			COALESCE(MAX(GREATEST(created_modseq, updated_modseq, expunged_modseq)), 0) AS highest_modseq,
+			COUNT(*) FILTER (WHERE (flags & $2) = 0) AS recent_count,
+			COUNT(*) FILTER (WHERE (flags & $3) = 0) AS unseen_count
+		FROM messages
+		WHERE mailbox_id = $1 AND expunged_at IS NULL;
+	`
+	row := d.Pool.QueryRow(ctx, query, mailboxID, FlagRecent, FlagSeen)
+
+	var s MailboxSummary
+	err := row.Scan(&s.UIDNext, &s.NumMessages, &s.TotalSize, &s.HighestModSeq, &s.RecentCount, &s.UnseenCount)
 	if err != nil {
-		return 0, err
+		return nil, fmt.Errorf("GetMailboxSummary: %w", err)
 	}
-	return count, nil
+	return &s, nil
 }
 
 func (d *Database) GetMailboxMessageCountAndSizeSum(ctx context.Context, mailboxID int64) (int, int64, error) {
@@ -285,29 +298,6 @@ func (d *Database) GetMailboxMessageCountAndSizeSum(ctx context.Context, mailbox
 		return 0, 0, err
 	}
 	return count, size, nil
-}
-
-func (d *Database) GetMailboxNextUID(ctx context.Context, mailboxID int64) (int64, error) {
-	var uidNext int64
-	// Query to get the maximum UID or return 1 if there are no messages
-	err := d.Pool.QueryRow(ctx, "SELECT COALESCE(MAX(id), 0) FROM messages WHERE mailbox_id = $1 AND expunged_at IS NULL", mailboxID).Scan(&uidNext)
-	if err != nil {
-		return 0, fmt.Errorf("failed to fetch next UID: %v", err)
-	}
-	return uidNext + 1, nil
-}
-
-func (d *Database) GetMailboxHighestModSeq(ctx context.Context, mailboxID int64) (uint64, error) {
-	var highestModSeq uint64
-	err := d.Pool.QueryRow(ctx, `
-		SELECT COALESCE(MAX(GREATEST(created_modseq, updated_modseq, expunged_modseq)), 0)
-		FROM messages
-		WHERE mailbox_id = $1
-	`, mailboxID).Scan(&highestModSeq)
-	if err != nil {
-		return 0, fmt.Errorf("failed to fetch highest modseq: %v", err)
-	}
-	return highestModSeq, nil
 }
 
 // SetSubscribed updates the subscription status of a mailbox, but ignores unsubscribing for root folders.
