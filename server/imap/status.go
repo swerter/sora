@@ -10,6 +10,7 @@ import (
 
 func (s *IMAPSession) Status(mboxName string, options *imap.StatusOptions) (*imap.StatusData, error) {
 	ctx := context.Background()
+
 	mailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), mboxName)
 	if err != nil {
 		if err == consts.ErrMailboxNotFound {
@@ -22,38 +23,30 @@ func (s *IMAPSession) Status(mboxName string, options *imap.StatusOptions) (*ima
 		return nil, s.internalError("failed to fetch mailbox '%s': %v", mboxName, err)
 	}
 
+	summary, err := s.server.db.GetMailboxSummary(ctx, mailbox.ID)
+	if err != nil {
+		return nil, s.internalError("failed to get mailbox summary for '%s': %v", mboxName, err)
+	}
+
 	statusData := &imap.StatusData{
-		Mailbox: mailbox.Name,
+		Mailbox:     mailbox.Name,
+		UIDValidity: mailbox.UIDValidity,
 	}
 
 	if options.NumMessages {
-		messageCount, _, err := s.server.db.GetMailboxMessageCountAndSizeSum(ctx, mailbox.ID)
-		if err != nil {
-			return nil, s.internalError("failed to get message count for mailbox '%s': %v", mboxName, err)
-		}
-		numMessages := uint32(messageCount)
-		statusData.NumMessages = &numMessages
+		num := uint32(summary.NumMessages)
+		statusData.NumMessages = &num
 	}
-
 	if options.UIDNext {
-		uidNext, err := s.server.db.GetMailboxNextUID(ctx, mailbox.ID)
-		if err != nil {
-			return nil, s.internalError("failed to get next UID for mailbox '%s': %v", mboxName, err)
-		}
-		statusData.UIDNext = imap.UID(uidNext)
+		statusData.UIDNext = imap.UID(summary.UIDNext)
 	}
-
-	if options.UIDValidity {
-		statusData.UIDValidity = mailbox.UIDValidity
+	if options.NumRecent {
+		num := uint32(summary.RecentCount)
+		statusData.NumRecent = &num
 	}
-
 	if options.NumUnseen {
-		unseenCount, err := s.server.db.GetMailboxUnseenCount(ctx, mailbox.ID)
-		if err != nil {
-			return nil, s.internalError("failed to get unseen message count for mailbox '%s': %v", mboxName, err)
-		}
-		numUnseen := uint32(unseenCount)
-		statusData.NumUnseen = &numUnseen
+		num := uint32(summary.UnseenCount)
+		statusData.NumUnseen = &num
 	}
 
 	return statusData, nil

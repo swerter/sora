@@ -28,29 +28,21 @@ func (s *IMAPSession) Select(mboxName string, options *imap.SelectOptions) (*ima
 		return nil, s.internalError("failed to fetch mailbox '%s': %v", mboxName, err)
 	}
 
-	messagesCount, _, err := s.server.db.GetMailboxMessageCountAndSizeSum(ctx, mailbox.ID)
+	summary, err := s.server.db.GetMailboxSummary(ctx, mailbox.ID)
 	if err != nil {
-		return nil, s.internalError("failed to get message count for mailbox '%s': %v", mboxName, err)
+		return nil, s.internalError("failed to get mailbox summary for '%s': %v", mboxName, err)
 	}
 
-	uidNext, err := s.server.db.GetMailboxNextUID(ctx, mailbox.ID)
-	if err != nil {
-		return nil, s.internalError("failed to get next UID for mailbox '%s': %v", mboxName, err)
-	}
-
-	highestModSeq, err := s.server.db.GetMailboxHighestModSeq(ctx, mailbox.ID)
-	if err != nil {
-		return nil, s.internalError("failed to get highest modseq for mailbox '%s': %v", mboxName, err)
-	}
-
-	s.mailbox = NewMailbox(mailbox, uint32(messagesCount), highestModSeq)
+	s.mailbox = NewMailbox(mailbox, uint32(summary.NumMessages), summary.HighestModSeq)
 
 	selectData := &imap.SelectData{
 		Flags:       s.mailbox.PermittedFlags(),
-		NumMessages: uint32(messagesCount),
-		UIDNext:     imap.UID(uidNext),
+		NumMessages: s.mailbox.numMessages,
+		UIDNext:     imap.UID(summary.UIDNext),
 		UIDValidity: mailbox.UIDValidity,
+		NumRecent:   uint32(summary.RecentCount),
 	}
+
 	s.Log("Mailbox selected: %s", mboxName)
 	return selectData, nil
 }

@@ -37,23 +37,23 @@ CREATE TABLE IF NOT EXISTS messages (
 	-- Unique message ID, also the UID of messages in a mailbox
 	id BIGSERIAL PRIMARY KEY,       
 
-  -- The user who owns the message
+    -- The user who owns the message
 	user_id BIGINT REFERENCES users(id) ON DELETE NO ACTION, 
 
 	uid BIGINT NOT NULL,                -- The message UID in its mailbox
-	uuid UUID NOT NULL,			            -- Unique object key for the message
+	uuid UUID NOT NULL,			        -- Unique object key for the message
 	s3_uploaded BOOLEAN DEFAULT FALSE,	-- Flag to indicate if the message was uploaded to S3
 	recipients_json JSONB NOT NULL,	    -- JSONB field to store recipients
-	message_id TEXT NOT NULL, 			    -- The Message-ID from the message headers
-	in_reply_to TEXT,								    -- The In-Reply-To header from the message
-	subject TEXT,										    -- Subject of the message
-	sent_date TIMESTAMP NOT NULL,		    -- The date the message was sent
-	internal_date TIMESTAMP NOT NULL,   -- The date the message was received
-	flags INTEGER NOT NULL,					    -- Bitwise flags for the message (e.g., \Seen, \Flagged)
-	size INTEGER NOT NULL,					    -- Size of the message in bytes
+	message_id TEXT NOT NULL, 		    -- The Message-ID from the message headers
+	in_reply_to TEXT,					-- The In-Reply-To header from the message
+	subject TEXT,						-- Subject of the message
+	sent_date TIMESTAMPTZ NOT NULL,		-- The date the message was sent
+	internal_date TIMESTAMPTZ NOT NULL, -- The date the message was received
+	flags INTEGER NOT NULL,				-- Bitwise flags for the message (e.g., \Seen, \Flagged)
+	size INTEGER NOT NULL,				-- Size of the message in bytes
 	body_structure BYTEA NOT NULL,      -- Serialized BodyStructure of the message
-	text_body TEXT NOT NULL, 			      -- Text body of the message
-	text_body_tsv tsvector,					    -- Full-text search index for text_body
+	text_body TEXT NOT NULL, 			-- Text body of the message
+	text_body_tsv tsvector,				-- Full-text search index for text_body
 
 	--
 	-- Keep messages if mailbox is deleted by nullifying the mailbox_id

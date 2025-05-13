@@ -72,11 +72,11 @@ func (db *Database) GetMailboxes(ctx context.Context, userID int64, subscribed b
 
 		var mailboxName string
 		var hasChildren bool
-		var uidValidity uint32
+		var uidValidityInt64 int64
 
 		var subscribed bool
 
-		if err := rows.Scan(&mailboxID, &mailboxName, &uidValidity, &dbParentID, &subscribed, &hasChildren); err != nil {
+		if err := rows.Scan(&mailboxID, &mailboxName, &uidValidityInt64, &dbParentID, &subscribed, &hasChildren); err != nil {
 			return nil, err
 		}
 
@@ -84,7 +84,7 @@ func (db *Database) GetMailboxes(ctx context.Context, userID int64, subscribed b
 			i := dbParentID.Int64
 			parentID = &i
 		}
-		mailbox := NewDBMailbox(mailboxID, mailboxName, uidValidity, parentID, subscribed, hasChildren)
+		mailbox := NewDBMailbox(mailboxID, mailboxName, uint32(uidValidityInt64), parentID, subscribed, hasChildren)
 		mailboxes = append(mailboxes, &mailbox)
 	}
 
@@ -101,7 +101,7 @@ func (db *Database) GetMailbox(ctx context.Context, mailboxID int64) (*DBMailbox
 	var dbParentID sql.NullInt64
 	var mailboxName string
 	var hasChildren bool
-	var uidValidity uint32
+	var uidValidityInt64 int64
 	var subscribed bool
 
 	err := db.Pool.QueryRow(ctx, `
@@ -114,7 +114,7 @@ func (db *Database) GetMailbox(ctx context.Context, mailboxID int64) (*DBMailbox
 			) AS has_children
 		FROM mailboxes m
 		WHERE id = $1
-	`, mailboxID).Scan(&mailboxID, &mailboxName, &uidValidity, &dbParentID, &subscribed, &hasChildren)
+	`, mailboxID).Scan(&mailboxID, &mailboxName, &uidValidityInt64, &dbParentID, &subscribed, &hasChildren)
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -129,7 +129,7 @@ func (db *Database) GetMailbox(ctx context.Context, mailboxID int64) (*DBMailbox
 		parentID = &i
 	}
 
-	mailbox := NewDBMailbox(mailboxID, mailboxName, uidValidity, parentID, subscribed, hasChildren)
+	mailbox := NewDBMailbox(mailboxID, mailboxName, uint32(uidValidityInt64), parentID, subscribed, hasChildren)
 	return &mailbox, nil
 }
 
@@ -137,13 +137,14 @@ func (db *Database) GetMailbox(ctx context.Context, mailboxID int64) (*DBMailbox
 func (db *Database) GetMailboxByName(ctx context.Context, userID int64, name string) (*DBMailbox, error) {
 	var mailbox DBMailbox
 
+	var uidValidityInt64 int64
 	err := db.Pool.QueryRow(ctx, `
 		SELECT
 			id, name, uid_validity, parent_id, subscribed,
 			EXISTS (SELECT 1 FROM mailboxes AS child WHERE child.parent_id = m.id) AS has_children
 		FROM mailboxes m
 		WHERE user_id = $1 AND LOWER(name) = $2
-	`, userID, strings.ToLower(name)).Scan(&mailbox.ID, &mailbox.Name, &mailbox.UIDValidity, &mailbox.ParentID, &mailbox.Subscribed, &mailbox.HasChildren)
+	`, userID, strings.ToLower(name)).Scan(&mailbox.ID, &mailbox.Name, &uidValidityInt64, &mailbox.ParentID, &mailbox.Subscribed, &mailbox.HasChildren)
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -153,15 +154,18 @@ func (db *Database) GetMailboxByName(ctx context.Context, userID int64, name str
 		return nil, consts.ErrInternalError
 	}
 
+	mailbox.UIDValidity = uint32(uidValidityInt64)
 	return &mailbox, nil
 }
 
 func (db *Database) CreateMailbox(ctx context.Context, userID int64, name string, parentID *int64) error {
+	// Avoid low uid_validity which may cause issues with some IMAP clients
+	uidValidity := uint32(time.Now().Unix())
 	// Try to insert the mailbox into the database
 	_, err := db.Pool.Exec(ctx, `
 		INSERT INTO mailboxes (user_id, name, parent_id, uid_validity, subscribed)
 		VALUES ($1, $2, $3, $4, $5)
-	`, userID, name, parentID, 1, true)
+	`, userID, name, parentID, int64(uidValidity), true)
 
 	// Handle errors, including unique constraint and foreign key violations
 	if err != nil {
@@ -177,6 +181,32 @@ func (db *Database) CreateMailbox(ctx context.Context, userID int64, name string
 					return consts.ErrDBNotFound
 				} else if pgErr.ConstraintName == "mailboxes_parent_id_fkey" {
 					log.Printf("Parent mailbox does not exist")
+					return consts.ErrDBNotFound
+				}
+			}
+		}
+		return fmt.Errorf("failed to create mailbox: %v", err)
+	}
+	return nil
+}
+
+func (db *Database) CreateDefaultMailbox(ctx context.Context, userID int64, name string, parentID *int64) error {
+	uidValidity := uint32(time.Now().Unix())
+	// Try to insert the mailbox into the database
+	_, err := db.Pool.Exec(ctx, `
+		INSERT INTO mailboxes (user_id, name, parent_id, uid_validity, subscribed)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (user_id, name, parent_id) DO NOTHING
+	`, userID, name, parentID, int64(uidValidity), true)
+
+	// Handle errors, including unique constraint and foreign key violations
+	if err != nil {
+		// Use pgx/v5's pgconn.PgError for error handling
+		if pgErr, ok := err.(*pgconn.PgError); ok {
+			switch pgErr.Code {
+			case "23503": // Foreign key violation
+				if pgErr.ConstraintName == "mailboxes_user_id_fkey" {
+					log.Printf("User with ID %d does not exist", userID)
 					return consts.ErrDBNotFound
 				}
 			}
@@ -243,7 +273,7 @@ func (db *Database) CreateDefaultMailboxes(ctx context.Context, userId int64) er
 		_, err := db.GetMailboxByName(ctx, userId, mailboxName)
 		if err != nil {
 			if err == consts.ErrMailboxNotFound {
-				err := db.CreateMailbox(ctx, userId, mailboxName, nil)
+				err := db.CreateDefaultMailbox(ctx, userId, mailboxName, nil)
 				if err != nil {
 					log.Printf("Failed to create mailbox %s for user %d: %v\n", mailboxName, userId, err)
 					return consts.ErrInternalError
@@ -259,22 +289,35 @@ func (db *Database) CreateDefaultMailboxes(ctx context.Context, userId int64) er
 	return nil
 }
 
-func (d *Database) GetMailboxUnseenCount(ctx context.Context, mailboxID int64) (int, error) {
-	var count int
-	err := d.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE mailbox_id = $1 AND (flags & $2) = 0 AND expunged_at IS NULL", mailboxID, FlagSeen).Scan(&count)
-	if err != nil {
-		return 0, err
-	}
-	return count, nil
+type MailboxSummary struct {
+	UIDNext       int64
+	NumMessages   int
+	TotalSize     int64
+	HighestModSeq uint64
+	RecentCount   int
+	UnseenCount   int
 }
 
-func (d *Database) GetMailboxRecentCount(ctx context.Context, mailboxID int64) (int, error) {
-	var count int
-	err := d.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE mailbox_id = $1 AND (flags & $2) = 0 AND expunged_at IS NULL", mailboxID, FlagRecent).Scan(&count)
+func (d *Database) GetMailboxSummary(ctx context.Context, mailboxID int64) (*MailboxSummary, error) {
+	const query = `
+		SELECT
+			COALESCE(MAX(uid), 0) + 1 AS uid_next,
+			COUNT(*) AS num_messages,
+			COALESCE(SUM(size), 0) AS total_size,
+			COALESCE(MAX(GREATEST(created_modseq, updated_modseq, expunged_modseq)), 0) AS highest_modseq,
+			COUNT(*) FILTER (WHERE (flags & $2) = 0) AS recent_count,
+			COUNT(*) FILTER (WHERE (flags & $3) = 0) AS unseen_count
+		FROM messages
+		WHERE mailbox_id = $1 AND expunged_at IS NULL;
+	`
+	row := d.Pool.QueryRow(ctx, query, mailboxID, FlagRecent, FlagSeen)
+
+	var s MailboxSummary
+	err := row.Scan(&s.UIDNext, &s.NumMessages, &s.TotalSize, &s.HighestModSeq, &s.RecentCount, &s.UnseenCount)
 	if err != nil {
-		return 0, err
+		return nil, fmt.Errorf("GetMailboxSummary: %w", err)
 	}
-	return count, nil
+	return &s, nil
 }
 
 func (d *Database) GetMailboxMessageCountAndSizeSum(ctx context.Context, mailboxID int64) (int, int64, error) {
@@ -285,29 +328,6 @@ func (d *Database) GetMailboxMessageCountAndSizeSum(ctx context.Context, mailbox
 		return 0, 0, err
 	}
 	return count, size, nil
-}
-
-func (d *Database) GetMailboxNextUID(ctx context.Context, mailboxID int64) (int64, error) {
-	var uidNext int64
-	// Query to get the maximum UID or return 1 if there are no messages
-	err := d.Pool.QueryRow(ctx, "SELECT COALESCE(MAX(id), 0) FROM messages WHERE mailbox_id = $1 AND expunged_at IS NULL", mailboxID).Scan(&uidNext)
-	if err != nil {
-		return 0, fmt.Errorf("failed to fetch next UID: %v", err)
-	}
-	return uidNext + 1, nil
-}
-
-func (d *Database) GetMailboxHighestModSeq(ctx context.Context, mailboxID int64) (uint64, error) {
-	var highestModSeq uint64
-	err := d.Pool.QueryRow(ctx, `
-		SELECT COALESCE(MAX(GREATEST(created_modseq, updated_modseq, expunged_modseq)), 0)
-		FROM messages
-		WHERE mailbox_id = $1
-	`, mailboxID).Scan(&highestModSeq)
-	if err != nil {
-		return 0, fmt.Errorf("failed to fetch highest modseq: %v", err)
-	}
-	return highestModSeq, nil
 }
 
 // SetSubscribed updates the subscription status of a mailbox, but ignores unsubscribing for root folders.

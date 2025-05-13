@@ -105,7 +105,7 @@ func (s *IMAPSession) writeBasicMessageData(m *imapserver.FetchResponseWriter, m
 		m.WriteUID(msg.UID)
 	}
 	if options.InternalDate {
-		m.WriteInternalDate(msg.InternalDate)
+		m.WriteInternalDate(msg.InternalDate.UTC())
 	}
 	if options.RFC822Size {
 		m.WriteRFC822Size(int64(msg.Size))
