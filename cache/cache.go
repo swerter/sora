@@ -144,9 +144,14 @@ func (c *Cache) PurgeIfNeeded(ctx context.Context) error {
 	var totalSize int64
 	row := c.db.QueryRow(`SELECT SUM(size) FROM cache_index`)
 	_ = row.Scan(&totalSize)
+
+	log.Println("[CACHE] total size:", totalSize)
 	if totalSize <= c.maxSizeBytes {
+		log.Printf("[CACHE] size: %d bytes, within limit: %d bytes\n", totalSize, c.maxSizeBytes)
 		return nil
 	}
+
+	log.Printf("[CACHE] size: %d bytes, exceeds limit: %d bytes\n", totalSize, c.maxSizeBytes)
 
 	rows, err := c.db.Query(`SELECT path, size FROM cache_index ORDER BY mod_time ASC`)
 	if err != nil {
@@ -310,7 +315,7 @@ func (c *Cache) PurgeOrphanedUUIDs(ctx context.Context) error {
 	}
 
 	if purged > 0 {
-		log.Printf("[CACHE] removed %d orphaned cache entries\n", purged)
+		log.Printf("[CACHE] removed %d orphaned entries\n", purged)
 	}
 	return nil
 }
