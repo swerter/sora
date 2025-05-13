@@ -56,5 +56,14 @@ func (s *IMAPSession) Status(mboxName string, options *imap.StatusOptions) (*ima
 		statusData.NumUnseen = &numUnseen
 	}
 
+	if options.NumRecent {
+		recentCount, err := s.server.db.GetMailboxRecentCount(ctx, mailbox.ID)
+		if err != nil {
+			return nil, s.internalError("failed to get recent message count for mailbox '%s': %v", mboxName, err)
+		}
+		numRecent := uint32(recentCount)
+		statusData.NumRecent = &numRecent
+	}
+
 	return statusData, nil
 }
