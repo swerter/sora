@@ -41,7 +41,9 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	if err != nil {
 		return nil, s.internalError("failed to read message: %v", err)
 	}
-	messageBytes := buf.Bytes()
+
+	// Trim the message to remove any leading CRLF characters
+	messageBytes := bytes.TrimLeft(buf.Bytes(), "\r\n")
 
 	messageContent, err := server.ParseMessage(bytes.NewReader(messageBytes))
 	if err != nil {
@@ -57,6 +59,10 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	messageID, _ := mailHeader.MessageID()
 	sentDate, _ := mailHeader.Date()
 	inReplyTo, _ := mailHeader.MsgIDList("In-Reply-To")
+
+	if len(inReplyTo) == 0 {
+		inReplyTo = nil
+	}
 
 	if sentDate.IsZero() {
 		sentDate = options.Time

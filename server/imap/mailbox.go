@@ -2,6 +2,7 @@ package imap
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
@@ -16,6 +17,7 @@ type Mailbox struct {
 	sessionTracker *imapserver.SessionTracker
 	numMessages    uint32
 	highestModSeq  uint64
+	sync.Mutex
 }
 
 func NewMailbox(dbmbx *db.DBMailbox, numMessages uint32, highestModSeq uint64) *Mailbox {

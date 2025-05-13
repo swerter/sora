@@ -45,7 +45,7 @@ func main() {
 	pop3Addr := flag.String("pop3addr", ":110", "POP3 server address")
 	uploaderTempPath := flag.String("uploaderpath", "/tmp/sora/uploads", "Directory for pending uploads")
 	cachePath := flag.String("cachedir", "/tmp/sora/cache", "Directory for cached files")
-	maxCacheSize := flag.Int64("maxcachesize", 1024*1024*1024, "Maximum cache size in bytes (default: 1GB)")
+	maxCacheSize := flag.Int64("maxcachesize", 100*1024*1024, "Maximum cache size in bytes (default: 100MB)")
 
 	startManageSieve := flag.Bool("managesieve", true, "Start the ManageSieve server")
 	managesieveAddr := flag.String("managesieveaddr", ":4190", "ManageSieve server address")
@@ -136,7 +136,7 @@ func main() {
 
 	// Start POP3 server
 	if *startPop3 {
-		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, *insecureAuth, *debug, errChan)
+		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan)
 	}
 
 	// Start ManageSieve server
@@ -188,8 +188,8 @@ func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *stor
 	}
 }
 
-func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, insecureAuth bool, debug bool, errChan chan error) {
-	s, err := pop3.New(hostname, addr, s3storage, database, insecureAuth, debug)
+func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error) {
+	s, err := pop3.New(hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug)
 	if err != nil {
 		errChan <- err
 		return

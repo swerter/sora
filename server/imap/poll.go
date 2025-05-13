@@ -9,7 +9,6 @@ import (
 
 func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
 	if s.mailbox == nil {
-		// TODO: Why is poll called if no mailbox is selected? E.g. LIST will call poll, why?
 		return nil
 	}
 
@@ -30,8 +29,24 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 		}
 	}
 
-	if s.mailbox.numMessages-numExpunged != poll.NumMessages {
+	expectedCount := s.mailbox.numMessages - numExpunged
+
+	s.mailbox.Lock()
+	defer s.mailbox.Unlock()
+
+	if uint32(poll.NumMessages) > expectedCount {
+		// Messages were added — safe to update
 		s.mailbox.mboxTracker.QueueNumMessages(uint32(poll.NumMessages))
+		s.mailbox.numMessages = poll.NumMessages
+
+	} else if uint32(poll.NumMessages) < expectedCount {
+		// Dangerous: messages disappeared without expunge — keep old count
+		// Do NOT call QueueNumMessages() in this case
+		s.Log("Warning: poll.NumMessages (%d) < expectedCount (%d); skipping QueueNumMessages to avoid panic",
+			poll.NumMessages, expectedCount)
+	} else {
+		// Counts match, update safely
+		s.mailbox.numMessages = poll.NumMessages
 	}
 
 	s.mailbox.numMessages = poll.NumMessages
