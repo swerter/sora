@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sort"
 	"strings"
 	"time"
 
@@ -30,16 +29,6 @@ var schema string
 // Database holds the SQL connection
 type Database struct {
 	Pool *pgxpool.Pool
-}
-
-// sortedKeys returns the keys of a map in sorted order
-func sortedKeys(m pgx.NamedArgs) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // containsFlag checks if a slice of flags contains a specific flag
@@ -872,6 +861,10 @@ func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPref
 			conditions = append(conditions, fmt.Sprintf("LOWER(subject) LIKE @%s", param))
 		case "message-id":
 			param := nextParam()
+			// if the message ID is wrapped in <messageId>, we need to remove the brackets
+			if strings.HasPrefix(lowerValue, "<") && strings.HasSuffix(lowerValue, ">") {
+				lowerValue = lowerValue[1 : len(lowerValue)-1]
+			}
 			args[param] = lowerValue
 			conditions = append(conditions, fmt.Sprintf("LOWER(message_id) = @%s", param))
 		case "in-reply-to":
@@ -981,11 +974,22 @@ func buildNumSetCondition(numSet imap.NumSet, columnName string, paramPrefix str
 func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64, criteria *imap.SearchCriteria) ([]Message, error) {
 	baseQuery := `
 	WITH message_seqs AS (
-		SELECT uid, ROW_NUMBER() OVER (ORDER BY uid) AS seqnum
+		SELECT
+			uid,
+			ROW_NUMBER() OVER (ORDER BY id) AS seqnum, -- id is needed for ordering/seqnum
+			flags,
+			subject,
+			internal_date,
+			sent_date,
+			size,
+			message_id,
+			in_reply_to,
+			recipients_json,
+			text_body_tsv -- Include text_body_tsv for full-text search
 		FROM messages
 		WHERE mailbox_id = @mailboxID AND expunged_at IS NULL
 	)
-	SELECT * FROM message_seqs`
+	SELECT uid, seqnum FROM message_seqs` // Only select uid and seqnum for the final result
 
 	paramCounter := 0
 	whereCondition, whereArgs, err := db.buildSearchCriteria(criteria, "p", &paramCounter)
@@ -994,16 +998,12 @@ func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64
 	}
 	whereArgs["mailboxID"] = mailboxID
 
-	query := fmt.Sprintf(" WHERE %s ORDER BY uid", whereCondition)
+	finalQueryString := baseQuery + fmt.Sprintf(" WHERE %s ORDER BY uid", whereCondition)
 
-	// Convert NamedArgs to positional arguments
-	positionalArgs := make([]interface{}, 0, len(whereArgs))
-	for _, key := range sortedKeys(whereArgs) {
-		positionalArgs = append(positionalArgs, whereArgs[key])
-	}
-
-	rows, err := db.Pool.Query(ctx, baseQuery+query, positionalArgs...)
+	rows, err := db.Pool.Query(ctx, finalQueryString, whereArgs)
 	if err != nil {
+		// It's helpful to log the query and arguments when an error occurs for easier debugging.
+		log.Printf("Error executing query: %s\nArgs: %#v\nError: %v", finalQueryString, whereArgs, err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -1011,7 +1011,8 @@ func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64
 	var messages []Message
 	for rows.Next() {
 		var message Message
-		if err := rows.Scan(&message.UID); err != nil {
+		// Scan only UID and SeqNum as selected in the final SELECT statement
+		if err := rows.Scan(&message.UID, &message.Seq); err != nil {
 			return nil, err
 		}
 		messages = append(messages, message)

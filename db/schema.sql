@@ -7,12 +7,12 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS mailboxes (
 	id BIGSERIAL PRIMARY KEY,	
 	user_id BIGINT REFERENCES users(id),
-	highest_uid BIGINT DEFAULT 0 NOT NULL,                         -- The highest UID in the mailbox
+	highest_uid BIGINT DEFAULT 0 NOT NULL,                       -- The highest UID in the mailbox
 	name TEXT NOT NULL,
-	uid_validity BIGINT NOT NULL,                                  -- Include uid_validity column for IMAP
-	parent_id BIGINT REFERENCES mailboxes(id) ON DELETE CASCADE,  -- Self-referencing for parent mailbox	
-	subscribed BOOLEAN DEFAULT TRUE,  														 -- New field to track mailbox subscription status
-	UNIQUE (user_id, name, parent_id)  														 -- Enforce unique mailbox names per user and parent mailbox
+	uid_validity BIGINT NOT NULL,                                -- Include uid_validity column for IMAP
+	parent_id BIGINT REFERENCES mailboxes(id) ON DELETE CASCADE, -- Self-referencing for parent mailbox	
+	subscribed BOOLEAN DEFAULT TRUE,  							 -- New field to track mailbox subscription status
+	UNIQUE (user_id, name, parent_id)  							 -- Enforce unique mailbox names per user and parent mailbox
 );
 
 -- Index for faster mailbox lookups by user_id and case insensitive name
