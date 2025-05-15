@@ -70,15 +70,20 @@ func (m *Mailbox) decodeNumSet(numSet imap.NumSet) imap.NumSet {
 		return numSet
 	}
 
-	// TODO: lift up to a go-imap helper
 	var out imap.SeqSet
 	for _, seqRange := range seqSet {
 		start := m.sessionTracker.DecodeSeqNum(seqRange.Start)
 		stop := m.sessionTracker.DecodeSeqNum(seqRange.Stop)
-		// TODO: don't skip range if bound is expunged
-		if start != 0 && stop != 0 {
-			out = append(out, imap.SeqRange{Start: start, Stop: stop})
+
+		// Allow 0 as open-ended bound
+		if start == 0 && seqRange.Start != 0 {
+			continue // Invalid start
 		}
+		if stop == 0 && seqRange.Stop != 0 {
+			continue // Invalid stop
+		}
+
+		out = append(out, imap.SeqRange{Start: start, Stop: stop})
 	}
 
 	return out
