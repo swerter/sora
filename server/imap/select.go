@@ -48,7 +48,14 @@ func (s *IMAPSession) Select(mboxName string, options *imap.SelectOptions) (*ima
 }
 
 func (s *IMAPSession) Unselect() error {
-	s.Log("Mailbox %s unselected", s.mailbox.Name)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if s.mailbox != nil {
+		s.Log("Mailbox %s unselected", s.mailbox.Name)
+	} else {
+		s.Log("Unselect called but no mailbox was selected")
+	}
 	s.mailbox = nil
 	return nil
 }
