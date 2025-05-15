@@ -16,7 +16,7 @@ type Session struct {
 
 func (s *Session) Log(format string, args ...interface{}) {
 	now := time.Now().Format("2006-01-02 15:04:05")
-	user := "unknown"
+	user := "none"
 	if s.User != nil {
 		user = fmt.Sprintf("%s/%d", s.FullAddress(), s.UserID())
 	}

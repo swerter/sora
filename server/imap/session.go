@@ -34,13 +34,16 @@ func (s *IMAPSession) internalError(format string, a ...interface{}) *imap.Error
 }
 
 func (s *IMAPSession) Close() error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.IMAPUser != nil {
 		s.Log("Closing session for user: %v", s.FullAddress())
 		s.IMAPUser = nil
 	}
 	s.mailbox = nil
 	if s.cancel != nil {
-		s.cancel() // Cancel the context when the session is closed
+		s.cancel() // Cancel the context for this session
 	}
 	return nil
 }
