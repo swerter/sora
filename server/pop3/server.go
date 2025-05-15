@@ -1,6 +1,7 @@
 package pop3
 
 import (
+	"context"
 	"log"
 	"net"
 	"time"
@@ -21,16 +22,18 @@ type POP3Server struct {
 	hostname string
 	db       *db.Database
 	s3       *storage.S3Storage
+	appCtx   context.Context
 	uploader *uploader.UploadWorker
 	cache    *cache.Cache
 }
 
-func New(hostname, popAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool) (*POP3Server, error) {
+func New(appCtx context.Context, hostname, popAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool) (*POP3Server, error) {
 	return &POP3Server{
 		hostname: hostname,
 		addr:     popAddr,
 		db:       database,
 		s3:       storage,
+		appCtx:   appCtx,
 		uploader: uploadWorker,
 		cache:    cache,
 	}, nil
@@ -53,10 +56,14 @@ func (s *POP3Server) Start(errChan chan error) {
 			return
 		}
 
+		sessionCtx, sessionCancel := context.WithCancel(s.appCtx)
+
 		s := &POP3Session{
 			server:  s,
 			conn:    &conn,
 			deleted: make(map[int]bool),
+			ctx:     sessionCtx,
+			cancel:  sessionCancel,
 		}
 
 		s.RemoteIP = (*s.conn).RemoteAddr().String()

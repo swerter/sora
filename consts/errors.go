@@ -11,6 +11,8 @@ var (
 	ErrNotPermitted         = errors.New("operation not permitted")
 	ErrMessageExists        = errors.New("message already exists")
 	ErrMalformedMessage     = errors.New("malformed message")
+	ErrMessageNotAvailable  = errors.New("message not available")
+	ErrEmptyMessageID       = errors.New("empty message ID")
 
 	ErrDBNotFound                = errors.New("not found")
 	ErrDBUniqueViolation         = errors.New("unique violation")

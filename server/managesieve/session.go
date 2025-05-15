@@ -18,14 +18,21 @@ type ManageSieveSession struct {
 	server.Session
 	mutex         sync.Mutex
 	server        *ManageSieveServer
-	conn          *net.Conn    // Connection to the client
-	*server.User               // User associated with the session
-	authenticated bool         // Flag to indicate if the user has been authenticated
-	scripts       []db.Message // List of messages in the mailbox as returned by the LIST command
-	errorsCount   int          // Number of errors encountered during the session
+	conn          *net.Conn          // Connection to the client
+	*server.User                     // User associated with the session
+	authenticated bool               // Flag to indicate if the user has been authenticated
+	scripts       []db.Message       // List of messages in the mailbox as returned by the LIST command
+	errorsCount   int                // Number of errors encountered during the session
+	ctx           context.Context    // Context for this session
+	cancel        context.CancelFunc // Function to cancel the session's context
 
 	reader *bufio.Reader
 	writer *bufio.Writer
+}
+
+// Context returns the session's context.
+func (s *ManageSieveSession) Context() context.Context {
+	return s.ctx
 }
 
 func (s *ManageSieveSession) handleConnection() {
@@ -69,7 +76,7 @@ func (s *ManageSieveSession) handleConnection() {
 				continue
 			}
 
-			ctx := context.Background()
+			ctx := s.Context() // Use session's context
 			userID, err := s.server.db.GetUserIDByAddress(ctx, address.FullAddress())
 			if err != nil {
 				if err == consts.ErrUserNotFound {
@@ -158,7 +165,7 @@ func (s *ManageSieveSession) handleListScripts() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	scripts, err := s.server.db.GetUserScripts(context.Background(), s.UserID())
+	scripts, err := s.server.db.GetUserScripts(s.Context(), s.UserID())
 	if err != nil {
 		s.sendResponse("-ERR Internal server error\r\n")
 		return
@@ -181,7 +188,7 @@ func (s *ManageSieveSession) handleGetScript(name string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	script, err := s.server.db.GetScriptByName(context.Background(), name, s.UserID())
+	script, err := s.server.db.GetScriptByName(s.Context(), name, s.UserID())
 	if err != nil {
 		s.sendResponse("-ERR No such script\r\n")
 		return
@@ -195,7 +202,7 @@ func (s *ManageSieveSession) handlePutScript(name, content string) {
 	defer s.mutex.Unlock()
 
 	// Check if the script exists
-	script, err := s.server.db.GetScriptByName(context.Background(), name, s.UserID())
+	script, err := s.server.db.GetScriptByName(s.Context(), name, s.UserID())
 	if err != nil {
 		if err != consts.ErrDBNotFound {
 			s.sendResponse("-ERR Internal server error\r\n")
@@ -204,7 +211,7 @@ func (s *ManageSieveSession) handlePutScript(name, content string) {
 	}
 	if script != nil {
 		// Script already exists, update it
-		_, err := s.server.db.UpdateScript(context.Background(), script.ID, s.UserID(), name, content)
+		_, err := s.server.db.UpdateScript(s.Context(), script.ID, s.UserID(), name, content)
 		if err != nil {
 			s.sendResponse("-ERR Internal server error\r\n")
 			return
@@ -213,7 +220,7 @@ func (s *ManageSieveSession) handlePutScript(name, content string) {
 		return
 	}
 
-	_, err = s.server.db.CreateScript(context.Background(), s.UserID(), name, content)
+	_, err = s.server.db.CreateScript(s.Context(), s.UserID(), name, content)
 	if err != nil {
 		s.sendResponse("-ERR Internal server error\r\n")
 		return
@@ -226,7 +233,7 @@ func (s *ManageSieveSession) handleDeleteScript(name string) {
 	defer s.mutex.Unlock()
 
 	// Check if the script exists
-	script, err := s.server.db.GetScriptByName(context.Background(), name, s.UserID())
+	script, err := s.server.db.GetScriptByName(s.Context(), name, s.UserID())
 	if err != nil {
 		if err != consts.ErrDBNotFound {
 			s.sendResponse("-ERR No such script\r\n")
@@ -236,7 +243,7 @@ func (s *ManageSieveSession) handleDeleteScript(name string) {
 		return
 	}
 
-	err = s.server.db.DeleteScript(context.Background(), script.ID, s.UserID())
+	err = s.server.db.DeleteScript(s.Context(), script.ID, s.UserID())
 	if err != nil {
 		s.sendResponse("-ERR Internal server error\r\n")
 		return
@@ -251,6 +258,9 @@ func (s *ManageSieveSession) Close() error {
 		s.User = nil
 		s.Id = ""
 		s.authenticated = false
+		if s.cancel != nil {
+			s.cancel() // Cancel the session's context
+		}
 	}
 	return nil
 }

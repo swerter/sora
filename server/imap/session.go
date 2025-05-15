@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/emersion/go-imap/v2"
@@ -14,7 +15,13 @@ type IMAPSession struct {
 	*IMAPUser
 	server  *IMAPServer
 	conn    *imapserver.Conn
+	ctx     context.Context
+	cancel  context.CancelFunc
 	mailbox *Mailbox
+}
+
+func (s *IMAPSession) Context() context.Context {
+	return s.ctx
 }
 
 func (s *IMAPSession) internalError(format string, a ...interface{}) *imap.Error {
@@ -32,5 +39,8 @@ func (s *IMAPSession) Close() error {
 		s.IMAPUser = nil
 	}
 	s.mailbox = nil
+	if s.cancel != nil {
+		s.cancel() // Cancel the context when the session is closed
+	}
 	return nil
 }
