@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS mailboxes (
 CREATE INDEX IF NOT EXISTS idx_mailboxes_lower_name_parent_id ON mailboxes (user_id, LOWER(name), parent_id);
 
 -- Partial unique index for top-level mailboxes
-CREATE UNIQUE INDEX IF NOT EXISTS unique_top_level_mailbox_name ON mailboxes (user_id, name)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mailboxes_user_id_name_top_level_unique ON mailboxes (user_id, name)
 	WHERE parent_id IS NULL;
 
 -- Index for faster mailbox lookups by user_id and subscription status
@@ -65,9 +65,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	--
 	mailbox_name TEXT,			    -- Store the mailbox path for restoring messages
 
-	deleted_at TIMESTAMP,			  -- Soft delete column
-	flags_changed_at TIMESTAMP, -- Track the last time flags were changed
-	expunged_at TIMESTAMP,			-- Track the last time the message was expunged
+	flags_changed_at TIMESTAMPTZ,     -- Track the last time flags were changed
+	expunged_at TIMESTAMPTZ,			-- Track the last time the message was expunged
 
 	created_modseq BIGINT NOT NULL,
 	updated_modseq BIGINT,
@@ -97,7 +96,6 @@ CREATE INDEX IF NOT EXISTS idx_messages_internal_date ON messages (internal_date
 CREATE INDEX IF NOT EXISTS idx_messages_sent_date ON messages (sent_date);
 CREATE INDEX IF NOT EXISTS idx_messages_flags_changed_at ON messages (flags_changed_at);
 CREATE INDEX IF NOT EXISTS idx_messages_expunged_at ON messages (expunged_at);
-CREATE INDEX IF NOT EXISTS idx_messages_deleted_at ON messages (deleted_at);
 
 -- Index for flags to speed up searches for seen messages
 CREATE INDEX IF NOT EXISTS idx_messages_flag_seen ON messages ((flags & 1)) WHERE (flags & 1) != 0;
