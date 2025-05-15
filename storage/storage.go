@@ -2,14 +2,13 @@
 package storage
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 
-	"github.com/emersion/go-message"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -19,7 +18,7 @@ type S3Storage struct {
 	BucketName string
 }
 
-func NewS3Storage(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool) (*S3Storage, error) {
+func New(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool) (*S3Storage, error) {
 	// Initialize the MinIO client
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
@@ -40,12 +39,41 @@ func NewS3Storage(endpoint, accessKeyID, secretAccessKey, bucketName string, use
 	}, nil
 }
 
-func (s *S3Storage) SaveMessage(key string, body io.Reader, size int64) error {
-	_, err := s.Client.PutObject(context.Background(), s.BucketName, key, body, size, minio.PutObjectOptions{SendContentMd5: true})
+// Exists checks if an object with the given key exists in the bucket.
+func (s *S3Storage) Exists(key string) (bool, string, error) {
+	objInfo, err := s.Client.StatObject(context.Background(), s.BucketName, key, minio.StatObjectOptions{})
+	if err == nil {
+		return true, objInfo.VersionID, nil // Object exists
+	}
+
+	// Check if the error is a minio.ErrorResponse
+	var minioErr minio.ErrorResponse
+	if errors.As(err, &minioErr) {
+		if minioErr.StatusCode == 404 {
+			return false, "", nil // Object does not exist
+		}
+	}
+
+	// Other error occurred
+	return false, "", fmt.Errorf("failed to stat object %s: %w", key, err)
+}
+
+func (s *S3Storage) Put(key string, body io.Reader, size int64) error {
+	exists, _, err := s.Exists(key)
+	if err != nil {
+		log.Printf("Error checking existence of object %s: %v", key, err)
+		return err
+	}
+	if exists {
+		log.Printf("Object %s already exists in S3, skipping upload.", key)
+		return nil // Object already exists, no need to upload
+	}
+
+	_, err = s.Client.PutObject(context.Background(), s.BucketName, key, body, size, minio.PutObjectOptions{SendContentMd5: true})
 	return err
 }
 
-func (s *S3Storage) GetMessage(key string) (io.ReadCloser, error) {
+func (s *S3Storage) Get(key string) (io.ReadCloser, error) {
 	object, err := s.Client.GetObject(context.Background(), s.BucketName, key, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, err
@@ -53,52 +81,23 @@ func (s *S3Storage) GetMessage(key string) (io.ReadCloser, error) {
 	return object, nil
 }
 
-func (s *S3Storage) DeleteMessage(key string) error {
-	return s.Client.RemoveObject(context.Background(), s.BucketName, key, minio.RemoveObjectOptions{})
-}
-
-// StoreMessagePart uploads the message part to the S3-compatible storage using an io.Reader for binary data
-func (s *S3Storage) SaveMessagePart(path string, partContent io.Reader, size int64) error {
-	// Upload the message part to the S3-compatible storage as a stream
-	_, err := s.Client.PutObject(context.Background(), s.BucketName, path, partContent, size, minio.PutObjectOptions{SendContentMd5: true})
+func (s *S3Storage) Delete(key string) error {
+	// Check if the object exists before attempting to delete.
+	// This makes DeleteMessage idempotent.
+	exists, versionId, err := s.Exists(key)
 	if err != nil {
-		return fmt.Errorf("failed to upload message part to S3: %v", err)
+		log.Printf("Error checking existence of object %s: %v", key, err)
+		return err
 	}
-
-	return nil
+	if !exists {
+		// Object does not exist, consider it successfully "deleted"
+		log.Printf("Object %s does not exist in S3, skipping deletion.", key)
+		return nil
+	}
+	return s.Client.RemoveObject(context.Background(), s.BucketName, key, minio.RemoveObjectOptions{VersionID: versionId})
 }
 
-func (s *S3Storage) CopyMessagePart(srcKey, destKey string) error {
-	// Define source and destination options
-	src := minio.CopySrcOptions{
-		Bucket: s.BucketName,
-		Object: srcKey,
-	}
-
-	dest := minio.CopyDestOptions{
-		Bucket: s.BucketName,
-		Object: destKey,
-	}
-
-	// Perform the S3 copy operation
-	_, err := s.Client.CopyObject(context.Background(), dest, src)
-	if err != nil {
-		return fmt.Errorf("failed to copy object from %s to %s: %v", srcKey, destKey, err)
-	}
-
-	return nil
-}
-
-// GetMessagePart retrieves a message part as an io.Reader (binary stream) from S3-compatible storage
-func (s *S3Storage) GetMessagePart(path string) (io.Reader, error) {
-	object, err := s.Client.GetObject(context.Background(), s.BucketName, path, minio.GetObjectOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve message part from S3: %v", err)
-	}
-	return object, nil
-}
-
-func (s *S3Storage) CopyMessage(sourcePath, destPath string) error {
+func (s *S3Storage) Copy(sourcePath, destPath string) error {
 	src := minio.CopySrcOptions{
 		Bucket: s.BucketName,
 		Object: sourcePath,
@@ -111,71 +110,5 @@ func (s *S3Storage) CopyMessage(sourcePath, destPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to copy object from %s to %s: %v", sourcePath, destPath, err)
 	}
-	return nil
-}
-
-func (s *S3Storage) SaveHeadersAndParts(ctx context.Context, m *message.Entity, baseKey string) error {
-	var headerBuf bytes.Buffer
-
-	// Iterate over all header fields using m.Header.Fields
-	for field := m.Header.Fields(); field.Next(); {
-		key := field.Key()
-		value := field.Value()
-
-		// Write each header field into the buffer
-		_, err := headerBuf.WriteString(fmt.Sprintf("%s: %s\n", key, value))
-		if err != nil {
-			return fmt.Errorf("failed to write headers: %v", err)
-		}
-	}
-
-	headerBuf.WriteString("\n")
-
-	headerKey := baseKey + "/headers"
-	err := s.SaveMessagePart(headerKey, &headerBuf, int64(headerBuf.Len()))
-	if err != nil {
-		return fmt.Errorf("failed to upload headers to S3: %v", err)
-	}
-
-	if mr := m.MultipartReader(); mr != nil {
-		partNumber := 1
-		for {
-			part, err := mr.NextPart()
-			if err == io.EOF {
-				break
-			} else if err != nil {
-				return fmt.Errorf("failed to read next part: %v", err)
-			}
-
-			// Read part content and upload to S3
-			var buf bytes.Buffer
-			size, err := io.Copy(&buf, part.Body)
-			if err != nil {
-				return fmt.Errorf("failed to read part content: %v", err)
-			}
-
-			partKey := fmt.Sprintf("%s/part%d", baseKey, partNumber)
-			err = s.SaveMessagePart(partKey, &buf, size)
-			if err != nil {
-				return fmt.Errorf("failed to upload part to S3: %v", err)
-			}
-
-			partNumber++
-		}
-	} else {
-		// Non-multipart message, save full message as one part
-		var buf bytes.Buffer
-		size, err := io.Copy(&buf, m.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read message content: %v", err)
-		}
-
-		fullKey := baseKey + "/full"
-		err = s.SaveMessagePart(fullKey, &buf, size)
-		if err != nil {
-			return fmt.Errorf("failed to upload full message to S3: %v", err)
-		}
-	}
-
 	return nil
 }

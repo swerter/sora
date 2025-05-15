@@ -2,20 +2,17 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"sort"
 	"strings"
 	"time"
 
 	"maps"
 
 	"github.com/emersion/go-imap/v2"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,16 +27,6 @@ var schema string
 // Database holds the SQL connection
 type Database struct {
 	Pool *pgxpool.Pool
-}
-
-// sortedKeys returns the keys of a map in sorted order
-func sortedKeys(m pgx.NamedArgs) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // containsFlag checks if a slice of flags contains a specific flag
@@ -221,9 +208,9 @@ func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID
 	var newMsgUID imap.UID
 	err = tx.QueryRow(ctx, `
 		INSERT INTO messages
-			(user_id, mailbox_id, mailbox_name, uid, uuid, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, s3_uploaded, recipients_json, text_body, text_body_tsv, created_modseq)
+			(user_id, mailbox_id, mailbox_name, uid, content_hash, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, uploaded, recipients_json, text_body, text_body_tsv, created_modseq)
 		SELECT
-			user_id, $1, $2, $3, uuid, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, s3_uploaded, recipients_json, text_body, text_body_tsv, nextval('messages_modseq')
+			user_id, $1, $2, $3, content_hash, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, uploaded, recipients_json, text_body, text_body_tsv, nextval('messages_modseq')
 		FROM
 			messages
 		WHERE
@@ -255,7 +242,7 @@ type InsertMessageOptions struct {
 	UserID        int64
 	MailboxID     int64
 	MailboxName   string
-	UUID          uuid.UUID
+	ContentHash   string
 	MessageID     string
 	Flags         []imap.Flag
 	InternalDate  time.Time
@@ -269,6 +256,12 @@ type InsertMessageOptions struct {
 }
 
 func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOptions, upload PendingUpload) (messageID int64, uid int64, err error) {
+	saneMessageID := helpers.SanitizeUTF8(options.MessageID)
+	if saneMessageID == "" {
+		log.Printf("MessageID is empty after sanitization")
+		return 0, 0, consts.ErrEmptyMessageID
+	}
+
 	bodyStructureData, err := helpers.SerializeBodyStructureGob(options.BodyStructure)
 	if err != nil {
 		log.Printf("Failed to serialize BodyStructure: %v", err)
@@ -320,15 +313,14 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 
 	// Sanitize inputs
 	saneSubject := helpers.SanitizeUTF8(options.Subject)
-	saneMessageID := helpers.SanitizeUTF8(options.MessageID)
 	saneInReplyToStr := helpers.SanitizeUTF8(inReplyToStr)
 	sanePlaintextBody := helpers.SanitizeUTF8(plaintextBody)
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO messages
-			(user_id, mailbox_id, mailbox_name, uid, message_id, uuid, flags, internal_date, size, text_body, text_body_tsv, subject, sent_date, in_reply_to, body_structure, recipients_json, created_modseq)
+			(user_id, mailbox_id, mailbox_name, uid, message_id, content_hash, flags, internal_date, size, text_body, text_body_tsv, subject, sent_date, in_reply_to, body_structure, recipients_json, created_modseq)
 		VALUES
-			(@user_id, @mailbox_id, @mailbox_name, @uid, @message_id, @uuid, @flags, @internal_date, @size, @text_body, to_tsvector('simple', @text_body), @subject, @sent_date, @in_reply_to, @body_structure, @recipients_json, nextval('messages_modseq'))
+			(@user_id, @mailbox_id, @mailbox_name, @uid, @message_id, @content_hash, @flags, @internal_date, @size, @text_body, to_tsvector('simple', @text_body), @subject, @sent_date, @in_reply_to, @body_structure, @recipients_json, nextval('messages_modseq'))
 		RETURNING id
 	`, pgx.NamedArgs{
 		"user_id":         options.UserID,
@@ -336,7 +328,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 		"mailbox_name":    options.MailboxName,
 		"uid":             highestUID,
 		"message_id":      saneMessageID,
-		"uuid":            options.UUID,
+		"content_hash":    options.ContentHash,
 		"flags":           bitwiseFlags,
 		"internal_date":   options.InternalDate,
 		"size":            options.Size,
@@ -350,25 +342,48 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
-			log.Printf("Message with ID %s already exists in mailbox %d", options.MessageID, options.MailboxID)
-			return 0, 0, consts.ErrDBUniqueViolation
+			// Unique constraint violation. Check if it's due to message_id and if we can return the existing message.
+			// The saneMessageID was used in the INSERT attempt.
+
+			log.Printf("Unique constraint violation for MessageID '%s' in MailboxID %d. Attempting to find existing message.", saneMessageID, options.MailboxID)
+			var existingID, existingUID int64
+			// Query within the same transaction. If we return successfully from here,
+			// the defer tx.Rollback(ctx) will roll back the attempted INSERT and UID bump.
+			queryErr := tx.QueryRow(ctx,
+				`SELECT id, uid FROM messages 
+					 WHERE user_id = $1 AND mailbox_id = $2 AND message_id = $3 AND expunged_at IS NULL`,
+				options.UserID, options.MailboxID, saneMessageID).Scan(&existingID, &existingUID)
+
+			if queryErr == nil {
+				log.Printf("Found existing message for MessageID '%s' in MailboxID %d. Returning existing ID: %d, UID: %d. Current transaction will be rolled back.", saneMessageID, options.MailboxID, existingID, existingUID)
+				return existingID, existingUID, nil // Return existing message details
+			} else if errors.Is(queryErr, pgx.ErrNoRows) {
+				// This is unexpected: unique constraint fired, but we can't find the row by message_id.
+				// Could be a conflict on UID or another unique constraint.
+				log.Printf("Unique constraint violation for MailboxID %d (MessageID '%s'), but no existing non-expunged message found by this MessageID. Falling back to unique violation error. Lookup error: %v", options.MailboxID, saneMessageID, queryErr)
+			} else {
+				// Error during the lookup query
+				log.Printf("Error querying for existing message after unique constraint violation (MailboxID %d, MessageID '%s'): %v. Falling back to unique violation error.", options.MailboxID, saneMessageID, queryErr)
+			}
+
+			// Fallback to returning the original unique violation error if MessageID was empty or lookup failed.
+			log.Printf("Original unique constraint violation error for MailboxID %d, MessageID '%s': %v", options.MailboxID, saneMessageID, err)
+			return 0, 0, consts.ErrDBUniqueViolation // Original error
 		}
 		log.Printf("Failed to insert message into database: %v", err)
 		return 0, 0, consts.ErrDBInsertFailed
 	}
 
 	_, err = tx.Exec(ctx, `
-	INSERT INTO pending_uploads (message_id, uuid, file_path, s3_path, size, mailbox_name, domain_name, local_part)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		messageRowId,
-		options.UUID,
-		upload.FilePath,
-		upload.S3Path,
+	INSERT INTO pending_uploads (instance_id, content_hash, size, created_at)
+	VALUES ($1, $2, $3, $4) ON CONFLICT (content_hash) DO NOTHING`,
+		upload.InstanceID,
+		options.ContentHash,
 		upload.Size,
-		upload.MailboxName,
-		upload.DomainName,
-		upload.LocalPart,
+		time.Now(),
 	)
+	// Delete any other instances of the same upload with the same content hash
+	// Mark all messages with the same content hash as uploaded
 
 	if err := tx.Commit(ctx); err != nil {
 		log.Printf("Failed to commit transaction: %v", err)
@@ -403,8 +418,8 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 			-- Insert the selected rows into the destination mailbox
 			INSERT INTO messages (
 					user_id,
-					uuid, 
-					s3_uploaded,
+					content_hash, 
+					uploaded,
 					message_id, 
 					in_reply_to, 
 					subject, 
@@ -418,14 +433,13 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 					text_body_tsv, 
 					mailbox_id, 
 					mailbox_path, 
-					deleted_at, 
 					flags_changed_at,
 					created_modseq
 			)
 			SELECT
 			    user_id,
-					uuid, 
-					s3_uploaded,
+					content_hash, 
+					uploaded,
 					message_id, 
 					in_reply_to, 
 					subject, 
@@ -439,7 +453,6 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 					text_body_tsv, 
 					$2 AS mailbox_id,  -- Assign to the new mailbox
 					mailbox_path, 
-					NULL AS deleted_at, 
 					NOW() AS flags_changed_at,
 					nextval('messages_modseq')
 			FROM messages
@@ -484,60 +497,54 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 	return messageUIDMap, nil
 }
 
-func (db *Database) GetMessageBodyStructure(ctx context.Context, messageUID imap.UID, mailboxID int64) (*imap.BodyStructure, error) {
-	var bodyStructureBytes []byte
+func selectNumSet(numSet imap.NumSet, baseQuery string, args []any) (string, []any) {
+	var conditions []string
 
-	err := db.Pool.QueryRow(ctx, `
-			SELECT 
-				body_structure
-			FROM 
-				messages
-			WHERE 
-				uid = $1 AND 
-				mailbox_id = $2 AND
-				expunged_at IS NULL`, messageUID, mailboxID).Scan(&bodyStructureBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	// Deserialize the JSON string back into BodyStructure
-	return helpers.DeserializeBodyStructureGob(bodyStructureBytes)
-}
-
-func selectNumSet(numSet imap.NumSet, query string, args []interface{}) (string, []interface{}) {
-	query += "(false"
 	switch set := numSet.(type) {
 	case imap.SeqSet:
+
+		if len(set) == 0 {
+			return baseQuery + " (1=0)", args // Always false if set is empty
+		}
 		for _, seqRange := range set {
-			query += " OR (true"
+			condition := "(true"
 			if seqRange.Start != 0 {
 				args = append(args, seqRange.Start)
-				query += fmt.Sprintf(" AND seqnum >= $%d", len(args))
+				condition += fmt.Sprintf(" AND seqnum >= $%d", len(args))
 			}
 			if seqRange.Stop != 0 {
 				args = append(args, seqRange.Stop)
-				query += fmt.Sprintf(" AND seqnum <= $%d", len(args))
+				condition += fmt.Sprintf(" AND seqnum <= $%d", len(args))
 			}
-			query += ")"
+			condition += ")"
+			conditions = append(conditions, condition)
 		}
 	case imap.UIDSet:
+		if len(set) == 0 {
+			return baseQuery + " (1=0)", args // Always false if set is empty
+		}
 		for _, uidRange := range set {
-			query += " OR (true"
+			condition := "(true"
 			if uidRange.Start != 0 {
 				args = append(args, uint32(uidRange.Start))
-				query += fmt.Sprintf(" AND uid >= $%d", len(args))
+				condition += fmt.Sprintf(" AND uid >= $%d", len(args))
 			}
 			if uidRange.Stop != 0 {
 				args = append(args, uint32(uidRange.Stop))
-				query += fmt.Sprintf(" AND uid <= $%d", len(args))
+				condition += fmt.Sprintf(" AND uid <= $%d", len(args))
 			}
-			query += ")"
+			condition += ")"
+			conditions = append(conditions, condition)
 		}
 	default:
 		panic("unsupported NumSet type") // unreachable
 	}
-	query += ")"
-	return query, args
+
+	if len(conditions) == 0 { // Should be caught by the len(set) == 0 checks above, but as a safeguard
+		return baseQuery + " (1=0)", args
+	}
+
+	return baseQuery + " (" + strings.Join(conditions, " OR ") + ")", args
 }
 
 // GetMessagesBySeqSet fetches messages from the database based on the NumSet and mailbox ID.
@@ -547,7 +554,7 @@ func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, nu
 
 	query := `
 		SELECT * FROM (
-			SELECT user_id, uid, mailbox_id, uuid, s3_uploaded, flags, internal_date, size, body_structure,
+			SELECT user_id, uid, mailbox_id, content_hash, uploaded, flags, internal_date, size, body_structure,
 				created_modseq, updated_modseq, expunged_modseq,
 				row_number() OVER (ORDER BY id) AS seqnum
 			FROM messages
@@ -571,7 +578,7 @@ func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, nu
 	for rows.Next() {
 		var msg Message
 		var bodyStructureBytes []byte
-		if err := rows.Scan(&msg.UserID, &msg.UID, &msg.MailboxID, &msg.UUID, &msg.S3Uploaded,
+		if err := rows.Scan(&msg.UserID, &msg.UID, &msg.MailboxID, &msg.ContentHash, &msg.IsUploaded,
 			&msg.BitwiseFlags, &msg.InternalDate, &msg.Size, &bodyStructureBytes, &msg.CreatedModSeq,
 			&msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.Seq); err != nil {
 			return nil, fmt.Errorf("failed to scan message: %v", err)
@@ -593,18 +600,14 @@ func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, nu
 func (db *Database) SetMessageFlags(ctx context.Context, messageID imap.UID, mailboxID int64, newFlags []imap.Flag) (*[]imap.Flag, error) {
 	var updatedFlagsBitwise int
 	flags := FlagsToBitwise(newFlags)
-	deletedAt := sql.NullTime{}
-	if db.containsFlag(newFlags, imap.FlagDeleted) {
-		deletedAt = sql.NullTime{Time: time.Now(), Valid: true}
-	}
 	err := db.Pool.QueryRow(ctx, `
 		UPDATE messages
-		SET flags = $1, flags_changed_at = $2, deleted_at = $3, updated_modseq = nextval('messages_modseq')
-		WHERE uid = $4 AND mailbox_id = $5
+		SET flags = $1, flags_changed_at = $2, updated_modseq = nextval('messages_modseq')
+		WHERE uid = $3 AND mailbox_id = $4
 		RETURNING flags
-	`, flags, time.Now(), deletedAt, messageID, mailboxID).Scan(&updatedFlagsBitwise)
+	`, flags, time.Now(), messageID, mailboxID).Scan(&updatedFlagsBitwise)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to set message flags for UID %d in mailbox %d: %w", messageID, mailboxID, err)
 	}
 	updatedFlags := BitwiseToFlags(updatedFlagsBitwise)
 	return &updatedFlags, nil
@@ -614,38 +617,19 @@ func (db *Database) AddMessageFlags(ctx context.Context, messageUID imap.UID, ma
 	var updatedFlagsBitwise int
 	flags := FlagsToBitwise(newFlags)
 
-	// Check if the deleted flag is being added
-	if db.containsFlag(newFlags, imap.FlagDeleted) {
-		err := db.Pool.QueryRow(ctx, `
-			UPDATE
-				messages
-			SET
-				flags = flags | $1,
-				flags_changed_at = $2,
-				deleted_at = $3,
-				updated_modseq = nextval('messages_modseq')
-			WHERE
-				uid = $4 AND
-				mailbox_id = $5
-			RETURNING flags`, flags, time.Now(), time.Now(), messageUID, mailboxID).Scan(&updatedFlagsBitwise)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		err := db.Pool.QueryRow(ctx, `
-			UPDATE
-				messages
-			SET
-				flags = flags | $1,
-				flags_changed_at = $2,
-				updated_modseq = nextval('messages_modseq')
-			WHERE
-				uid = $3 AND
-				mailbox_id = $4
-			RETURNING flags`, flags, time.Now(), messageUID, mailboxID).Scan(&updatedFlagsBitwise)
-		if err != nil {
-			return nil, err
-		}
+	err := db.Pool.QueryRow(ctx, `
+		UPDATE
+			messages
+		SET
+			flags = flags | $1,
+			flags_changed_at = $2,
+			updated_modseq = nextval('messages_modseq')
+		WHERE
+			uid = $3 AND
+			mailbox_id = $4
+		RETURNING flags`, flags, time.Now(), messageUID, mailboxID).Scan(&updatedFlagsBitwise)
+	if err != nil {
+		return nil, err
 	}
 
 	updatedFlags := BitwiseToFlags(updatedFlagsBitwise)
@@ -657,37 +641,19 @@ func (db *Database) RemoveMessageFlags(ctx context.Context, messageID imap.UID, 
 	flags := FlagsToBitwise(newFlags)
 	negatedFlags := ^flags
 
-	if db.containsFlag(newFlags, imap.FlagDeleted) {
-		err := db.Pool.QueryRow(ctx, `
-		UPDATE
-			messages
-		SET
-			flags = flags & $1,
-			flags_changed_at = $2,
-			deleted_at = NULL,
-			updated_modseq = nextval('messages_modseq')
-		WHERE 
-			uid = $3 AND
-			mailbox_id = $4
-		RETURNING flags`, negatedFlags, time.Now(), messageID, mailboxID).Scan(&updatedFlagsBitwise)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		err := db.Pool.QueryRow(ctx, `
-		UPDATE
-			messages
-		SET
-			flags = flags & $1,
-			flags_changed_at = $2,
-			updated_modseq = nextval('messages_modseq')
-		WHERE
-			uid = $3 AND
-			mailbox_id = $4
-		RETURNING flags`, negatedFlags, time.Now(), messageID, mailboxID).Scan(&updatedFlagsBitwise)
-		if err != nil {
-			return nil, err
-		}
+	err := db.Pool.QueryRow(ctx, `
+	UPDATE
+		messages
+	SET
+		flags = flags & $1,
+		flags_changed_at = $2,
+		updated_modseq = nextval('messages_modseq')
+	WHERE
+		uid = $3 AND
+		mailbox_id = $4
+	RETURNING flags`, negatedFlags, time.Now(), messageID, mailboxID).Scan(&updatedFlagsBitwise)
+	if err != nil {
+		return nil, err
 	}
 	updatedFlags := BitwiseToFlags(updatedFlagsBitwise)
 	return &updatedFlags, nil
@@ -872,6 +838,10 @@ func (db *Database) buildSearchCriteria(criteria *imap.SearchCriteria, paramPref
 			conditions = append(conditions, fmt.Sprintf("LOWER(subject) LIKE @%s", param))
 		case "message-id":
 			param := nextParam()
+			// if the message ID is wrapped in <messageId>, we need to remove the brackets
+			if strings.HasPrefix(lowerValue, "<") && strings.HasSuffix(lowerValue, ">") {
+				lowerValue = lowerValue[1 : len(lowerValue)-1]
+			}
 			args[param] = lowerValue
 			conditions = append(conditions, fmt.Sprintf("LOWER(message_id) = @%s", param))
 		case "in-reply-to":
@@ -981,11 +951,22 @@ func buildNumSetCondition(numSet imap.NumSet, columnName string, paramPrefix str
 func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64, criteria *imap.SearchCriteria) ([]Message, error) {
 	baseQuery := `
 	WITH message_seqs AS (
-		SELECT uid, ROW_NUMBER() OVER (ORDER BY uid) AS seqnum
+		SELECT
+			uid,
+			ROW_NUMBER() OVER (ORDER BY id) AS seqnum, -- id is needed for ordering/seqnum
+			flags,
+			subject,
+			internal_date,
+			sent_date,
+			size,
+			message_id,
+			in_reply_to,
+			recipients_json,
+			text_body_tsv -- Include text_body_tsv for full-text search
 		FROM messages
 		WHERE mailbox_id = @mailboxID AND expunged_at IS NULL
 	)
-	SELECT * FROM message_seqs`
+	SELECT uid, seqnum FROM message_seqs` // Only select uid and seqnum for the final result
 
 	paramCounter := 0
 	whereCondition, whereArgs, err := db.buildSearchCriteria(criteria, "p", &paramCounter)
@@ -994,16 +975,12 @@ func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64
 	}
 	whereArgs["mailboxID"] = mailboxID
 
-	query := fmt.Sprintf(" WHERE %s ORDER BY uid", whereCondition)
+	finalQueryString := baseQuery + fmt.Sprintf(" WHERE %s ORDER BY uid", whereCondition)
 
-	// Convert NamedArgs to positional arguments
-	positionalArgs := make([]interface{}, 0, len(whereArgs))
-	for _, key := range sortedKeys(whereArgs) {
-		positionalArgs = append(positionalArgs, whereArgs[key])
-	}
-
-	rows, err := db.Pool.Query(ctx, baseQuery+query, positionalArgs...)
+	rows, err := db.Pool.Query(ctx, finalQueryString, whereArgs)
 	if err != nil {
+		// It's helpful to log the query and arguments when an error occurs for easier debugging.
+		log.Printf("Error executing query: %s\nArgs: %#v\nError: %v", finalQueryString, whereArgs, err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -1011,7 +988,8 @@ func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64
 	var messages []Message
 	for rows.Next() {
 		var message Message
-		if err := rows.Scan(&message.UID); err != nil {
+		// Scan only UID and SeqNum as selected in the final SELECT statement
+		if err := rows.Scan(&message.UID, &message.Seq); err != nil {
 			return nil, err
 		}
 		messages = append(messages, message)
@@ -1028,7 +1006,11 @@ func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag
 	// Convert the IMAP flag to its corresponding bitwise value
 	bitwiseFlag := FlagToBitwise(flag)
 	rows, err := db.Pool.Query(ctx, `
-		SELECT uid, uuid FROM messages WHERE mailbox_id = $1 AND (flags & $2) != 0 AND expunged_at IS NULL
+				SELECT uid, content_hash, seqnum FROM (
+			SELECT uid, content_hash, ROW_NUMBER() OVER (ORDER BY id) AS seqnum
+			FROM messages
+			WHERE mailbox_id = $1 AND (flags & $2) != 0 AND expunged_at IS NULL
+		) AS sub
 	`, mailboxID, bitwiseFlag)
 	if err != nil {
 		return nil, err
@@ -1038,7 +1020,7 @@ func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag
 	var messages []Message
 	for rows.Next() {
 		var msg Message
-		if err := rows.Scan(&msg.UID, &msg.UUID); err != nil {
+		if err := rows.Scan(&msg.UID, &msg.ContentHash, &msg.Seq); err != nil {
 			return nil, err
 		}
 		messages = append(messages, msg)
@@ -1139,7 +1121,7 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 
 	query := `
 			SELECT 
-				uid, size, created_modseq, updated_modseq, expunged_modseq, uuid, s3_uploaded
+				uid, size, created_modseq, updated_modseq, expunged_modseq, content_hash, uploaded
 			FROM 
 				messages
 			WHERE 
@@ -1154,7 +1136,7 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 
 	for rows.Next() {
 		var msg Message
-		if err := rows.Scan(&msg.UID, &msg.Size, &msg.CreatedModSeq, &msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.UUID, &msg.S3Uploaded); err != nil {
+		if err := rows.Scan(&msg.UID, &msg.Size, &msg.CreatedModSeq, &msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.ContentHash, &msg.IsUploaded); err != nil {
 			return nil, fmt.Errorf("failed to scan message: %v", err)
 		}
 		messages = append(messages, msg)
@@ -1167,65 +1149,52 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 	return messages, nil
 }
 
-type S3DeleteCandidate struct {
-	UUID      uuid.UUID
-	Domain    string
-	LocalPart string
-}
-
-func (d *Database) ListS3ObjectsToDelete(ctx context.Context, olderThan time.Duration, limit int) ([]S3DeleteCandidate, error) {
-	cutoff := time.Now().Add(-olderThan)
-
+func (d *Database) ListS3ObjectsToDelete(ctx context.Context, olderThan time.Duration, limit int) ([]string, error) {
+	threshold := time.Now().Add(-olderThan).UTC()
 	rows, err := d.Pool.Query(ctx, `
-		SELECT m.uuid, u.username
-		FROM messages m
-		JOIN users u ON m.user_id = u.id
-		GROUP BY m.uuid, u.username
-		HAVING bool_and(m.expunged_at IS NOT NULL AND m.expunged_at < $1)
-		LIMIT $2
-	`, cutoff, limit)
+		WITH deletable_hashes AS (
+			SELECT content_hash
+			FROM messages m
+			GROUP BY content_hash
+			HAVING bool_and(expunged_at IS NOT NULL AND expunged_at < $1)
+		)
+		SELECT content_hash FROM deletable_hashes
+		LIMIT $2;
+	`, threshold, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var result []S3DeleteCandidate
+	var result []string
 	for rows.Next() {
-		var cand S3DeleteCandidate
-		var username string
-		if err := rows.Scan(&cand.UUID, &username); err != nil {
+		var contentHash string
+		if err := rows.Scan(&contentHash); err != nil {
 			continue
 		}
-		username = strings.ToLower(strings.TrimSpace(username))
-		parts := strings.SplitN(username, "@", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		cand.LocalPart = parts[0]
-		cand.Domain = parts[1]
-		result = append(result, cand)
+		result = append(result, contentHash)
 	}
 	return result, nil
 }
 
-func (d *Database) FindExistingUUIDs(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+func (d *Database) FindExistingContentHashes(ctx context.Context, ids []string) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 
-	rows, err := d.Pool.Query(ctx, `SELECT uuid FROM messages WHERE uuid = ANY($1)`, ids)
+	rows, err := d.Pool.Query(ctx, `SELECT content_hash FROM messages WHERE content_hash = ANY($1)`, ids)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var result []uuid.UUID
+	var result []string
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var chash string
+		if err := rows.Scan(&chash); err != nil {
 			continue // log or ignore individual scan errors
 		}
-		result = append(result, id)
+		result = append(result, chash)
 	}
 
 	return result, nil

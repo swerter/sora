@@ -7,19 +7,19 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS mailboxes (
 	id BIGSERIAL PRIMARY KEY,	
 	user_id BIGINT REFERENCES users(id),
-	highest_uid BIGINT DEFAULT 0 NOT NULL,                         -- The highest UID in the mailbox
+	highest_uid BIGINT DEFAULT 0 NOT NULL,                       -- The highest UID in the mailbox
 	name TEXT NOT NULL,
-	uid_validity BIGINT NOT NULL,                                  -- Include uid_validity column for IMAP
-	parent_id BIGINT REFERENCES mailboxes(id) ON DELETE CASCADE,  -- Self-referencing for parent mailbox	
-	subscribed BOOLEAN DEFAULT TRUE,  														 -- New field to track mailbox subscription status
-	UNIQUE (user_id, name, parent_id)  														 -- Enforce unique mailbox names per user and parent mailbox
+	uid_validity BIGINT NOT NULL,                                -- Include uid_validity column for IMAP
+	parent_id BIGINT REFERENCES mailboxes(id) ON DELETE CASCADE, -- Self-referencing for parent mailbox	
+	subscribed BOOLEAN DEFAULT TRUE,  							 -- New field to track mailbox subscription status
+	UNIQUE (user_id, name, parent_id)  							 -- Enforce unique mailbox names per user and parent mailbox
 );
 
 -- Index for faster mailbox lookups by user_id and case insensitive name
 CREATE INDEX IF NOT EXISTS idx_mailboxes_lower_name_parent_id ON mailboxes (user_id, LOWER(name), parent_id);
 
 -- Partial unique index for top-level mailboxes
-CREATE UNIQUE INDEX IF NOT EXISTS unique_top_level_mailbox_name ON mailboxes (user_id, name)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mailboxes_user_id_name_top_level_unique ON mailboxes (user_id, name)
 	WHERE parent_id IS NULL;
 
 -- Index for faster mailbox lookups by user_id and subscription status
@@ -41,8 +41,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	user_id BIGINT REFERENCES users(id) ON DELETE NO ACTION, 
 
 	uid BIGINT NOT NULL,                -- The message UID in its mailbox
-	uuid UUID NOT NULL,			        -- Unique object key for the message
-	s3_uploaded BOOLEAN DEFAULT FALSE,	-- Flag to indicate if the message was uploaded to S3
+	content_hash VARCHAR(64) NOT NULL,	-- Hash of the message content for deduplication
+	uploaded BOOLEAN DEFAULT FALSE,	    -- Flag to indicate if the message was uploaded to S3
 	recipients_json JSONB NOT NULL,	    -- JSONB field to store recipients
 	message_id TEXT NOT NULL, 		    -- The Message-ID from the message headers
 	in_reply_to TEXT,					-- The In-Reply-To header from the message
@@ -65,9 +65,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	--
 	mailbox_name TEXT,			    -- Store the mailbox path for restoring messages
 
-	deleted_at TIMESTAMP,			  -- Soft delete column
-	flags_changed_at TIMESTAMP, -- Track the last time flags were changed
-	expunged_at TIMESTAMP,			-- Track the last time the message was expunged
+	flags_changed_at TIMESTAMPTZ,     -- Track the last time flags were changed
+	expunged_at TIMESTAMPTZ,			-- Track the last time the message was expunged
 
 	created_modseq BIGINT NOT NULL,
 	updated_modseq BIGINT,
@@ -75,13 +74,13 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 -- Index for faster lookups by user_id and mailbox_id
-CREATE INDEX IF NOT EXISTS idx_messages_expunged_range ON messages (user_id, uuid, expunged_at) WHERE expunged_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_expunged_range ON messages (user_id, content_hash, expunged_at) WHERE expunged_at IS NOT NULL;
 
 -- Index to speed up message lookups by mailbox_id (for listing, searching)
 CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id ON messages (mailbox_id);
 
-CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages (uuid);
-CREATE INDEX IF NOT EXISTS idx_messages_expunged_uuid ON messages (uuid) WHERE expunged_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_content_hash ON messages (content_hash);
+CREATE INDEX IF NOT EXISTS idx_messages_expunged_content_hash ON messages (content_hash) WHERE expunged_at IS NOT NULL;
 
 -- Index to speed up message lookups by message_id
 CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages (LOWER(message_id));
@@ -97,7 +96,6 @@ CREATE INDEX IF NOT EXISTS idx_messages_internal_date ON messages (internal_date
 CREATE INDEX IF NOT EXISTS idx_messages_sent_date ON messages (sent_date);
 CREATE INDEX IF NOT EXISTS idx_messages_flags_changed_at ON messages (flags_changed_at);
 CREATE INDEX IF NOT EXISTS idx_messages_expunged_at ON messages (expunged_at);
-CREATE INDEX IF NOT EXISTS idx_messages_deleted_at ON messages (deleted_at);
 
 -- Index for flags to speed up searches for seen messages
 CREATE INDEX IF NOT EXISTS idx_messages_flag_seen ON messages ((flags & 1)) WHERE (flags & 1) != 0;
@@ -123,21 +121,19 @@ CREATE INDEX IF NOT EXISTS idx_messages_recipients_json ON messages USING GIN (r
 -- Pending uploads table for processing messages at own pace
 CREATE TABLE IF NOT EXISTS pending_uploads (
 	id BIGSERIAL PRIMARY KEY,
-	message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-	uuid UUID NOT NULL,
-	file_path TEXT NOT NULL,
-	s3_path TEXT NOT NULL,
+	instance_id TEXT NOT NULL, -- Unique identifier for the instance processing the upload, e.g., hostname
+	content_hash VARCHAR(64) NOT NULL,	
 	attempts INTEGER DEFAULT 0,
-	last_attempt TIMESTAMP,
+	last_attempt TIMESTAMPTZ,
 	size INTEGER NOT NULL,
-	mailbox_name TEXT NOT NULL,
-	domain_name TEXT NOT NULL,
-	local_part TEXT NOT NULL,
-	created_at TIMESTAMP DEFAULT now()
+	created_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- Index for retry loop: ordered by creation time
 CREATE INDEX IF NOT EXISTS idx_pending_uploads_created_at ON pending_uploads (created_at);
+
+-- Index to support the primary query in ListPendingUploads
+CREATE INDEX IF NOT EXISTS idx_pending_uploads_instance_id_created_at ON pending_uploads (instance_id, created_at);
 
 -- Index for retry attempts (if you ever query by attempt count or want to exclude "too many attempts")
 CREATE INDEX IF NOT EXISTS idx_pending_uploads_attempts ON pending_uploads (attempts);
@@ -145,11 +141,8 @@ CREATE INDEX IF NOT EXISTS idx_pending_uploads_attempts ON pending_uploads (atte
 -- Index to quickly check retries by file age
 CREATE INDEX IF NOT EXISTS idx_pending_uploads_last_attempt ON pending_uploads (last_attempt);
 
--- Index to clean up or check uploads by message_id
-CREATE INDEX IF NOT EXISTS idx_pending_uploads_message_id ON pending_uploads (message_id);
-
--- Index on uuid if you use it in your S3 key mapping / deduplication
-CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_uploads_uuid ON pending_uploads (uuid);
+-- Index on content_hash to speed up deduplication checks
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_uploads_content_hash ON pending_uploads (content_hash);
 
 --
 -- SIEVE scripts

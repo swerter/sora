@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -24,12 +25,14 @@ type IMAPServer struct {
 	server   *imapserver.Server
 	uploader *uploader.UploadWorker
 	cache    *cache.Cache
+	appCtx   context.Context // Store the application's parent context
 	caps     imap.CapSet
 }
 
-func New(hostname, imapAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool) (*IMAPServer, error) {
+func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool) (*IMAPServer, error) {
 	s := &IMAPServer{
 		hostname: hostname,
+		appCtx:   appCtx, // Store the passed-in application context
 		addr:     imapAddr,
 		db:       database,
 		s3:       storage,
@@ -64,9 +67,15 @@ func New(hostname, imapAddr string, storage *storage.S3Storage, database *db.Dat
 }
 
 func (s *IMAPServer) newSession(conn *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+	// Create a new cancellable context for this session, derived from the server's application context.
+	// This ensures the session context is cancelled when the main application context is cancelled.
+	sessionCtx, sessionCancel := context.WithCancel(s.appCtx)
+
 	session := &IMAPSession{
 		server: s,
 		conn:   conn,
+		ctx:    sessionCtx,
+		cancel: sessionCancel,
 	}
 
 	session.RemoteIP = conn.NetConn().RemoteAddr().String()
@@ -93,5 +102,10 @@ func (s *IMAPServer) Serve(imapAddr string) error {
 }
 
 func (s *IMAPServer) Close() {
-	s.db.Close()
+	log.Println("[IMAP] Closing IMAP server...")
+	if s.server != nil {
+		// This will close the listener and cause s.server.Serve(listener) to return.
+		// It will also start closing active client connections.
+		s.server.Close()
+	}
 }

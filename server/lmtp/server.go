@@ -1,6 +1,8 @@
 package lmtp
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -18,14 +20,16 @@ type LMTPServerBackend struct {
 	hostname string
 	db       *db.Database
 	s3       *storage.S3Storage
+	appCtx   context.Context
 	uploader *uploader.UploadWorker
 	sieve    sieveengine.Executor
 	server   *smtp.Server
 }
 
-func New(hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWorker *uploader.UploadWorker, debug bool, errChan chan error) *smtp.Server {
+func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWorker *uploader.UploadWorker, debug bool) (*LMTPServerBackend, error) {
 	backend := &LMTPServerBackend{
 		addr:     addr,
+		appCtx:   appCtx,
 		hostname: hostname,
 		db:       db,
 		s3:       s3,
@@ -49,18 +53,18 @@ func New(hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWo
 		s.Debug = debugWriter
 	}
 
-	log.Printf("LMTP listening on %s", s.Addr)
-	if err := s.ListenAndServe(); err != nil {
-		errChan <- err
-	}
-
-	return s
+	return backend, nil
 }
 
 func (b *LMTPServerBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	// Create a new cancellable context for this session, derived from the server's application context.
+	// This ensures the session context is cancelled when the main application context is cancelled.
+	sessionCtx, sessionCancel := context.WithCancel(b.appCtx)
 	s := &LMTPSession{
 		backend: b,
 		conn:    c,
+		ctx:     sessionCtx,
+		cancel:  sessionCancel, // Store the cancel function
 	}
 	s.RemoteIP = c.Conn().RemoteAddr().String()
 	s.Id = uuid.New().String()
@@ -69,4 +73,23 @@ func (b *LMTPServerBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 	s.Log("New session")
 	return s, nil
+}
+
+func (b *LMTPServerBackend) Start(errChan chan error) {
+	log.Printf("LMTP listening on %s", b.server.Addr)
+	if err := b.server.ListenAndServe(); err != nil {
+		// Check if the error is due to context cancellation (graceful shutdown)
+		// b.appCtx.Err() will be non-nil if the context was canceled.
+		if b.appCtx.Err() == nil {
+			errChan <- fmt.Errorf("LMTP server error: %w", err)
+		}
+	}
+}
+
+// Close stops the LMTP server.
+func (b *LMTPServerBackend) Close() error {
+	if b.server != nil {
+		return b.server.Close()
+	}
+	return nil
 }

@@ -1,8 +1,6 @@
 package imap
 
 import (
-	"context"
-
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/migadu/sora/db"
 )
@@ -12,7 +10,8 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 		return nil
 	}
 
-	ctx := context.Background()
+	ctx := s.Context()
+
 	poll, err := s.server.db.PollMailbox(ctx, s.mailbox.ID, s.mailbox.highestModSeq)
 	if err != nil {
 		return s.internalError("failed to poll mailbox: %v", err)

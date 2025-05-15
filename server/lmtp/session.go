@@ -13,7 +13,6 @@ import (
 
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-smtp"
-	"github.com/google/uuid"
 	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/helpers"
@@ -21,11 +20,19 @@ import (
 	"github.com/migadu/sora/server/sieveengine"
 )
 
+// LMTPSession represents a single LMTP session.
 type LMTPSession struct {
 	server.Session
 	backend *LMTPServerBackend
 	sender  *server.Address
 	conn    *smtp.Conn
+	cancel  context.CancelFunc // Function to cancel the session's context
+	ctx     context.Context    // Context for this session, derived from server's appCtx
+}
+
+// Context returns the session's context.
+func (s *LMTPSession) Context() context.Context {
+	return s.ctx
 }
 
 func (s *LMTPSession) Mail(from string, opts *smtp.MailOptions) error {
@@ -63,7 +70,7 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 		}
 	}
 	s.User = server.NewUser(toAddress, userId)
-	s.Log("Rcpt to=%s", toAddress.FullAddress())
+	s.Log("Rcpt to=%s (UserID: %d)", toAddress.FullAddress(), userId)
 	return nil
 }
 
@@ -83,8 +90,8 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		return s.internalError("failed to parse message: %v", err)
 	}
 
-	// Generate a new UUID for the message
-	uuid := uuid.New()
+	// Generate the content hash of the message
+	contentHash := helpers.HashContent(messageBytes)
 
 	// Parse message headers (this does not consume the body)
 	mailHeader := mail.Header{Header: messageContent.Header}
@@ -107,12 +114,12 @@ func (s *LMTPSession) Data(r io.Reader) error {
 
 	recipients := helpers.ExtractRecipients(messageContent.Header)
 
-	filePath, err := s.backend.uploader.StoreLocally(s.Domain(), s.LocalPart(), uuid, messageBytes)
+	filePath, err := s.backend.uploader.StoreLocally(contentHash, messageBytes)
 	if err != nil {
 		return s.internalError("failed to save message to disk: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx := s.Context() // Use the session's context for operations
 
 	sieveCtx := sieveengine.Context{
 		EnvelopeFrom: s.sender.FullAddress(),
@@ -153,16 +160,12 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		}
 	}
 
-	// The S3 key is generated based on the domain and local part of the email address
-	// and the UUID key of the message
-	s3Key := server.S3Key(s.Domain(), s.LocalPart(), uuid)
-
 	_, messageUID, err := s.backend.db.InsertMessage(ctx,
 		&db.InsertMessageOptions{
 			UserID:        s.UserID(),
 			MailboxID:     mailbox.ID,
 			MailboxName:   mailbox.Name,
-			UUID:          uuid,
+			ContentHash:   contentHash, // The S3 key is the content hash of the message
 			MessageID:     messageID,
 			InternalDate:  time.Now(),
 			Size:          int64(len(messageBytes)),
@@ -173,13 +176,10 @@ func (s *LMTPSession) Data(r io.Reader) error {
 			BodyStructure: &bodyStructure,
 			Recipients:    recipients,
 		},
-		db.PendingUpload{
-			FilePath:    *filePath,
-			S3Path:      s3Key,
+		db.PendingUpload{ // This struct is used to pass data to InsertMessage, not directly inserted into DB here
+			ContentHash: contentHash,
+			InstanceID:  s.backend.hostname,
 			Size:        int64(len(messageBytes)),
-			MailboxName: mailbox.Name,
-			DomainName:  s.Domain(),
-			LocalPart:   s.LocalPart(),
 		})
 	if err != nil {
 		_ = os.Remove(*filePath) // cleanup file on failure
@@ -208,6 +208,9 @@ func (s *LMTPSession) Reset() {
 
 func (s *LMTPSession) Logout() error {
 	s.Log("Logout")
+	if s.cancel != nil {
+		s.cancel() // Call cancel on logout
+	}
 	//TODO: Do we really need to return an error to terminate the session?
 	return &smtp.SMTPError{
 		Code:         221,

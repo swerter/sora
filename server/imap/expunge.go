@@ -2,7 +2,6 @@ package imap
 
 import (
 	"context"
-	"os"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
@@ -22,10 +21,10 @@ func (s *IMAPSession) Expunge(w *imapserver.ExpungeWriter, uidSet *imap.UIDSet) 
 			continue
 		}
 
-		// Delete from cache before expunging
-		err := s.server.cache.Delete(s.Domain(), s.LocalPart(), msg.UUID)
-		if err != nil && !isNotExist(err) {
-			s.Log("Failed to delete message %s from cache: %v", msg.UUID.String(), err)
+		// Send EXPUNGE response with the message's sequence number *before* deleting from DB
+		if err := w.WriteExpunge(uint32(msg.Seq)); err != nil {
+			// Log the error but continue, as failing to send one response shouldn't stop the whole expunge
+			s.Log("Failed to send EXPUNGE response for UID %d (Seq %d): %v", msg.UID, msg.Seq, err)
 		}
 
 		expungeUIDs = append(expungeUIDs, msg.UID)
@@ -35,10 +34,6 @@ func (s *IMAPSession) Expunge(w *imapserver.ExpungeWriter, uidSet *imap.UIDSet) 
 		return s.internalError("failed to expunge messages: %v", err)
 	}
 
-	s.Log("Expunged %d messages", len(expungeUIDs))
+	s.Log("Expunged %d messages from mailbox %s", len(expungeUIDs), s.mailbox.Name)
 	return nil
-}
-
-func isNotExist(err error) bool {
-	return err != nil && os.IsNotExist(err)
 }

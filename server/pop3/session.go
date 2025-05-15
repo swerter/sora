@@ -21,16 +21,22 @@ import (
 type POP3Session struct {
 	server.Session
 	server         *POP3Server
-	conn           *net.Conn    // Connection to the client
-	*server.User                // User associated with the session
-	authenticated  bool         // Flag to indicate if the user has been authenticated
-	messages       []db.Message // List of messages in the mailbox as returned by the LIST command
-	deleted        map[int]bool // Map of message IDs marked for deletion
-	inboxMailboxID int64        // POP3 suppots only INBOX
-	errorsCount    int          // Number of errors encountered during the session
+	conn           *net.Conn          // Connection to the client
+	*server.User                      // User associated with the session
+	authenticated  bool               // Flag to indicate if the user has been authenticated
+	messages       []db.Message       // List of messages in the mailbox as returned by the LIST command
+	deleted        map[int]bool       // Map of message IDs marked for deletion
+	inboxMailboxID int64              // POP3 suppots only INBOX
+	ctx            context.Context    // Context for this session
+	cancel         context.CancelFunc // Function to cancel the session's context
+	errorsCount    int                // Number of errors encountered during the session
 }
 
 func (s *POP3Session) handleConnection() {
+	// Ensure the session context is cancelled when the connection handler exits
+	// This is important if handleConnection exits for reasons other than s.Close() being called.
+	defer s.cancel() // This will cancel s.ctx
+
 	defer s.Close()
 	reader := bufio.NewReader(*s.conn)
 	writer := bufio.NewWriter(*s.conn)
@@ -40,7 +46,7 @@ func (s *POP3Session) handleConnection() {
 
 	s.Log("[POP3] connected")
 
-	ctx := context.Background()
+	ctx := s.ctx // Use the session's context for operations
 
 	for {
 		// Set a read deadline for the connection
@@ -239,8 +245,12 @@ func (s *POP3Session) handleConnection() {
 			log.Printf("[POP3] Fetching message body for UID %d", msg.UID)
 			bodyData, err := s.getMessageBody(&msg)
 			if err != nil {
-				s.Log("[POP3] RETR error: %v", err)
-				writer.WriteString("-ERR Internal server error\r\n")
+				if err == consts.ErrMessageNotAvailable {
+					writer.WriteString("-ERR Message not available\r\n")
+				} else {
+					s.Log("[POP3] RETR internal error: %v", err)
+					writer.WriteString("-ERR Internal server error\r\n")
+				}
 				writer.Flush()
 				continue
 			}
@@ -331,9 +341,9 @@ func (s *POP3Session) handleConnection() {
 					msg := s.messages[i]
 
 					// Delete from cache before expunging
-					err := s.server.cache.Delete(s.Domain(), s.LocalPart(), msg.UUID)
+					err := s.server.cache.Delete(msg.ContentHash)
 					if err != nil && !isNotExist(err) {
-						s.Log("[POP3] Failed to delete message %s from cache: %v", msg.UUID.String(), err)
+						s.Log("[POP3] Failed to delete message %s from cache: %v", msg.ContentHash, err)
 					}
 					expungeUIDs = append(expungeUIDs, msg.UID)
 				}
@@ -384,23 +394,25 @@ func (s *POP3Session) Close() error {
 		s.messages = nil
 		s.deleted = nil
 		s.authenticated = false
+		if s.cancel != nil { // Ensure cancel is called if not already
+			s.cancel()
+		}
 	}
 	return nil
 }
 
 func (s *POP3Session) getMessageBody(msg *db.Message) ([]byte, error) {
-	if msg.S3Uploaded {
+	if msg.IsUploaded {
 		// Try cache first
-		data, err := s.server.cache.Get(s.Domain(), s.LocalPart(), msg.UUID)
+		data, err := s.server.cache.Get(msg.ContentHash)
 		if err == nil && data != nil {
 			log.Printf("[POP3][CACHE] Hit for UID %d", msg.UID)
 			return data, nil
 		}
 
 		// Fallback to S3
-		s3Key := server.S3Key(s.Domain(), s.LocalPart(), msg.UUID)
-		log.Printf("[POP3][CACHE] Miss. Fetching UID %d from S3 (%s)", msg.UID, s3Key)
-		reader, err := s.server.s3.GetMessage(s3Key)
+		log.Printf("[POP3][CACHE] Miss. Fetching UID %d from S3 (%s)", msg.UID, msg.ContentHash)
+		reader, err := s.server.s3.Get(msg.ContentHash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to retrieve message UID %d from S3: %v", msg.UID, err)
 		}
@@ -409,18 +421,25 @@ func (s *POP3Session) getMessageBody(msg *db.Message) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		_ = s.server.cache.Put(s.Domain(), s.LocalPart(), msg.UUID, data)
+		// Store in cache
+		log.Printf("[POP3][CACHE] Storing UID %d in cache (%s)", msg.UID, msg.ContentHash)
+		_ = s.server.cache.Put(msg.ContentHash, data)
 		return data, nil
 	}
 
-	// If not uploaded to S3, fetch from local disk
+	// If not uploaded to S3, try fetch from local disk
 	log.Printf("[POP3] Fetching not yet uploaded message UID %d from disk", msg.UID)
-	data, err := s.server.uploader.GetLocalFile(s.Domain(), s.LocalPart(), msg.UUID)
+	data, err := s.server.uploader.GetLocalFile(msg.ContentHash)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve message UID %d from disk: %v", msg.UID, err)
+		if os.IsNotExist(err) {
+			log.Printf("[POP3] Message UID %d (hash %s) not found locally and not marked as uploaded. Assuming pending remote processing.", msg.UID, msg.ContentHash)
+			return nil, consts.ErrMessageNotAvailable
+		}
+		// Other error trying to access the local file
+		return nil, fmt.Errorf("error retrieving message UID %d from local disk: %w", msg.UID, err)
 	}
-	if data == nil {
-		return nil, fmt.Errorf("message UID %d not found on disk", msg.UID)
+	if data == nil { // Should ideally not happen if GetLocalFile returns nil, nil for "not found"
+		return nil, fmt.Errorf("message UID %d (hash %s) not found on disk (GetLocalFile returned nil data, nil error)", msg.UID, msg.ContentHash)
 	}
 	return data, nil
 }

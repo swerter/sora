@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -43,9 +44,9 @@ func main() {
 	lmtpAddr := flag.String("lmtpaddr", ":24", "LMTP server address")
 	startPop3 := flag.Bool("pop3", true, "Start the POP3 server")
 	pop3Addr := flag.String("pop3addr", ":110", "POP3 server address")
-	uploaderTempPath := flag.String("uploaderpath", "/tmp/sora/uploads", "Directory for pending uploads")
+	uploaderTempPath := flag.String("uploaderpath", "/tmp/sora/uploads", "Directory for pending uploads, defaults to /tmp/sora/uploads")
 	cachePath := flag.String("cachedir", "/tmp/sora/cache", "Directory for cached files")
-	maxCacheSize := flag.Int64("maxcachesize", 100*1024*1024, "Maximum cache size in bytes (default: 100MB)")
+	maxCacheSize := flag.Int64("cachesize", consts.MAX_TOTAL_CACHE_SIZE, "Disk cache size in Megabytes (default: 1 GB)")
 
 	startManageSieve := flag.Bool("managesieve", true, "Start the ManageSieve server")
 	managesieveAddr := flag.String("managesieveaddr", ":4190", "ManageSieve server address")
@@ -64,7 +65,7 @@ func main() {
 
 	// Initialize S3 storage
 	log.Printf("Connecting to S3 endpoint %s, bucket %s", *s3Endpoint, *s3Bucket)
-	s3storage, err := storage.NewS3Storage(*s3Endpoint, *s3AccessKey, *s3SecretKey, *s3Bucket, true)
+	s3storage, err := storage.New(*s3Endpoint, *s3AccessKey, *s3SecretKey, *s3Bucket, true)
 	if err != nil {
 		log.Fatalf("Failed to initialize S3 storage at endpoint %s: %v", *s3Endpoint, err)
 	}
@@ -114,11 +115,11 @@ func main() {
 	cache.StartPurgeLoop(ctx)
 
 	// Initialize the S3 cleanup worker
-	cleanupWorker := cleaner.New(database, s3storage, consts.CLEANUP_INTERVAL, consts.CLEANUP_GRACE_PERIOD)
+	cleanupWorker := cleaner.New(database, s3storage, cache, consts.CLEANUP_INTERVAL, consts.CLEANUP_GRACE_PERIOD)
 	cleanupWorker.Start(ctx)
 
 	// Start the upload worker
-	uploadWorker, err := uploader.New(ctx, *uploaderTempPath, database, s3storage, cache, errChan)
+	uploadWorker, err := uploader.New(ctx, *uploaderTempPath, hostname, database, s3storage, cache, errChan)
 	if err != nil {
 		log.Fatalf("Failed to create upload worker: %v", err)
 	}
@@ -126,7 +127,7 @@ func main() {
 
 	// Start LMTP server
 	if *startLmtp {
-		go startLMTPServer(ctx, hostname, *lmtpAddr, s3storage, database, uploadWorker, *debug, errChan)
+		go startLMTPServer(ctx, hostname, *lmtpAddr, s3storage, database, uploadWorker, *debug, errChan) // Pass ctx
 	}
 
 	// Start IMAP server
@@ -136,25 +137,25 @@ func main() {
 
 	// Start POP3 server
 	if *startPop3 {
-		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan)
+		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan) // Pass ctx
 	}
 
 	// Start ManageSieve server
 	if *startManageSieve {
-		go startManageSieveServer(ctx, hostname, *managesieveAddr, database, *insecureAuth, *debug, errChan)
+		go startManageSieveServer(ctx, hostname, *managesieveAddr, database, *insecureAuth, *debug, errChan) // Pass ctx
 	}
 
 	// Wait for any errors from the servers
 	select {
 	case <-ctx.Done():
-		log.Println("Context canceled. Shutting down.")
+		log.Println("Shutting down SORA servers...")
 	case err := <-errChan:
 		log.Fatalf("Server error: %v", err)
 	}
 }
 
 func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error) {
-	s, err := imap.New(hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug)
+	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug)
 	if err != nil {
 		errChan <- err
 		return
@@ -172,24 +173,26 @@ func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *stor
 }
 
 func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, debug bool, errChan chan error) {
-	s := lmtp.New(hostname, addr, s3storage, database, uploadWorker, debug, errChan)
+	// lmtp.New now returns the server instance without starting ListenAndServe
+	lmtpServer, err := lmtp.New(ctx, hostname, addr, s3storage, database, uploadWorker, debug)
+	if err != nil {
+		errChan <- fmt.Errorf("failed to create LMTP server: %w", err)
+		return
+	}
 
 	go func() {
 		<-ctx.Done()
 		log.Println("Shutting down LMTP server...")
-		s.Close()
+		if err := lmtpServer.Close(); err != nil {
+			log.Printf("Error closing LMTP server: %v", err)
+		}
 	}()
 
-	// block forever or until error is pushed into errChan by LMTP itself
-	select {
-	case <-ctx.Done():
-	case err := <-errChan:
-		log.Printf("LMTP server exited: %v", err)
-	}
+	lmtpServer.Start(errChan)
 }
 
 func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error) {
-	s, err := pop3.New(hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug)
+	s, err := pop3.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug) // Pass ctx
 	if err != nil {
 		errChan <- err
 		return
@@ -205,7 +208,7 @@ func startPOP3Server(ctx context.Context, hostname string, addr string, s3storag
 }
 
 func startManageSieveServer(ctx context.Context, hostname string, addr string, database *db.Database, insecureAuth bool, debug bool, errChan chan error) {
-	s, err := managesieve.New(hostname, addr, database, insecureAuth, debug)
+	s, err := managesieve.New(ctx, hostname, addr, database, insecureAuth, debug) // Pass ctx
 	if err != nil {
 		errChan <- err
 		return

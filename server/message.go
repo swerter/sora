@@ -6,7 +6,6 @@ import (
 	"log"
 
 	"github.com/emersion/go-message"
-	"github.com/google/uuid"
 )
 
 // ParseMessage reads and parses the email message from an io.Reader
@@ -20,9 +19,4 @@ func ParseMessage(r io.Reader) (*message.Entity, error) {
 	}
 
 	return m, nil
-}
-
-// Helper function to generate an S3 key for a user and message
-func S3Key(domain, localPart string, s3id uuid.UUID) string {
-	return fmt.Sprintf("%s/%s/%s", domain, localPart, s3id.String())
 }
