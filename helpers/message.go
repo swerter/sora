@@ -1,13 +1,13 @@
 package helpers
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"mime/quotedprintable"
 	"strings"
 
-	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/mail"
 	"github.com/k3a/html2text"
@@ -50,9 +50,7 @@ func ExtractPlaintextBody(msg *message.Entity) (*string, error) {
 
 		switch mediaType {
 		case "text/plain":
-			if plaintextBody == nil {
-				plaintextBody = &s
-			}
+			plaintextBody = &s
 		case "text/html":
 			if htmlBody == nil {
 				htmlBody = &s
@@ -68,36 +66,6 @@ func ExtractPlaintextBody(msg *message.Entity) (*string, error) {
 
 	return plaintextBody, nil
 }
-
-// Helper function to extract content disposition
-func extractDisposition(msg *message.Entity) *imap.BodyStructureDisposition {
-	disposition, params, _ := msg.Header.ContentDisposition()
-	if disposition != "" {
-		return &imap.BodyStructureDisposition{
-			Value:  disposition,
-			Params: params,
-		}
-	}
-	return nil
-}
-
-// // Helper function to parse the media type into its type and subtype components
-// func parseMediaType(mediaType string) (string, string) {
-// 	parts := strings.SplitN(mediaType, "/", 2)
-// 	if len(parts) != 2 {
-// 		return mediaType, "" // Return as-is if there's no subtype
-// 	}
-// 	return parts[0], parts[1]
-// }
-
-// func calculateNumLines(r io.Reader) int64 {
-// 	var numLines int64
-// 	scanner := bufio.NewScanner(r)
-// 	for scanner.Scan() {
-// 		numLines++
-// 	}
-// 	return numLines
-// }
 
 // decodeToBinary decodes the MIME-encoded content (e.g., Base64, Quoted-Printable) into raw binary.
 func DecodeToBinary(part *message.Entity) (io.Reader, error) {
@@ -119,4 +87,12 @@ func DecodeToBinary(part *message.Entity) (io.Reader, error) {
 		// Unknown encoding
 		return nil, fmt.Errorf("unsupported encoding: %s", encodingType)
 	}
+}
+
+func HashContent(content []byte) string {
+	sha256 := sha256.New()
+	sha256.Write(content)
+	content = sha256.Sum(nil)
+	// Convert the hash to a hexadecimal string
+	return fmt.Sprintf("%x", content)
 }

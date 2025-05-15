@@ -5,16 +5,15 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap/v2"
-	"github.com/google/uuid"
 )
 
 // Message struct to represent an email message
 type Message struct {
 	UserID         int64     // ID of the user who owns the message
 	UID            imap.UID  // Unique identifier for the message
-	UUID           uuid.UUID // UUID of the message in S3
+	ContentHash    string    // Hash of the message content
 	MailboxID      int64     // ID of the mailbox the message belongs to
-	S3Uploaded     bool      // Indicates if the message is uploaded to S3
+	IsUploaded     bool      // Indicates if the message is uploaded to S3
 	Seq            uint32    // Sequence number of the message in the mailbox
 	BitwiseFlags   int       // Bitwise flags for the message (e.g., \Seen, \Flagged)
 	FlagsChangedAt time.Time // Time when the flags were last changed

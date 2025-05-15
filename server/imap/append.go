@@ -12,7 +12,6 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-message/mail"
-	"github.com/google/uuid"
 	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/helpers"
@@ -50,8 +49,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		return nil, s.internalError("failed to parse message: %v", err)
 	}
 
-	// Generate a new UUID for the message
-	uuid := uuid.New()
+	contentHash := helpers.HashContent(messageBytes)
 
 	// Parse message headers (this does not consume the body)
 	mailHeader := mail.Header{Header: messageContent.Header}
@@ -79,14 +77,11 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 
 	recipients := helpers.ExtractRecipients(messageContent.Header)
 
-	filePath, err := s.server.uploader.StoreLocally(s.Domain(), s.LocalPart(), uuid, messageBytes)
+	filePath, err := s.server.uploader.StoreLocally(contentHash, messageBytes)
 	if err != nil {
 		return nil, s.internalError("failed to save message to disk: %v", err)
 	}
 
-	// The S3 key is generated based on the domain and local part of the email address
-	// and the UUID key of the message
-	s3Key := server.S3Key(s.Domain(), s.LocalPart(), uuid)
 	size := int64(len(messageBytes))
 
 	_, messageUID, err := s.server.db.InsertMessage(ctx,
@@ -94,7 +89,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 			UserID:        s.UserID(),
 			MailboxID:     mailbox.ID,
 			MailboxName:   mailbox.Name,
-			UUID:          uuid,
+			ContentHash:   contentHash,
 			MessageID:     messageID,
 			Flags:         options.Flags,
 			InternalDate:  options.Time,
@@ -107,12 +102,9 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 			Recipients:    recipients,
 		},
 		db.PendingUpload{
-			FilePath:    *filePath,
-			S3Path:      s3Key,
+			InstanceID:  s.server.hostname,
+			ContentHash: contentHash,
 			Size:        size,
-			MailboxName: mailbox.Name,
-			DomainName:  s.Domain(),
-			LocalPart:   s.LocalPart(),
 		})
 	if err != nil {
 		_ = os.Remove(*filePath) // cleanup file on failure
