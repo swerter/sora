@@ -6,13 +6,17 @@ import (
 )
 
 func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
+	s.mutex.Lock()
 	if s.mailbox == nil {
+		s.mutex.Unlock()
 		return nil
 	}
+	mailbox := s.mailbox
+	s.mutex.Unlock()
 
 	ctx := s.Context()
 
-	poll, err := s.server.db.PollMailbox(ctx, s.mailbox.ID, s.mailbox.highestModSeq)
+	poll, err := s.server.db.PollMailbox(ctx, mailbox.ID, mailbox.highestModSeq)
 	if err != nil {
 		return s.internalError("failed to poll mailbox: %v", err)
 	}
@@ -20,23 +24,23 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 	var numExpunged uint32
 	for _, update := range poll.Updates {
 		if update.IsExpunge {
-			s.mailbox.mboxTracker.QueueExpunge(update.SeqNum)
+			mailbox.mboxTracker.QueueExpunge(update.SeqNum)
 			numExpunged++
 		} else {
 			flags := db.BitwiseToFlags(update.BitwiseFlags)
-			s.mailbox.mboxTracker.QueueMessageFlags(update.SeqNum, update.UID, flags, nil)
+			mailbox.mboxTracker.QueueMessageFlags(update.SeqNum, update.UID, flags, nil)
 		}
 	}
 
-	expectedCount := s.mailbox.numMessages - numExpunged
+	expectedCount := mailbox.numMessages - numExpunged
 
-	s.mailbox.Lock()
-	defer s.mailbox.Unlock()
+	mailbox.Lock()
+	defer mailbox.Unlock()
 
 	if uint32(poll.NumMessages) > expectedCount {
 		// Messages were added — safe to update
-		s.mailbox.mboxTracker.QueueNumMessages(uint32(poll.NumMessages))
-		s.mailbox.numMessages = poll.NumMessages
+		mailbox.mboxTracker.QueueNumMessages(uint32(poll.NumMessages))
+		mailbox.numMessages = poll.NumMessages
 
 	} else if uint32(poll.NumMessages) < expectedCount {
 		// Dangerous: messages disappeared without expunge — keep old count
@@ -45,11 +49,11 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 			poll.NumMessages, expectedCount)
 	} else {
 		// Counts match, update safely
-		s.mailbox.numMessages = poll.NumMessages
+		mailbox.numMessages = poll.NumMessages
 	}
 
-	s.mailbox.numMessages = poll.NumMessages
-	s.mailbox.highestModSeq = poll.ModSeq
+	mailbox.numMessages = poll.NumMessages
+	mailbox.highestModSeq = poll.ModSeq
 
-	return s.mailbox.sessionTracker.Poll(w, allowExpunge)
+	return mailbox.sessionTracker.Poll(w, allowExpunge)
 }
