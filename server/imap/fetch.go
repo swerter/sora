@@ -53,7 +53,7 @@ func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, o
 	}
 
 	if options.BodyStructure != nil {
-		if err := s.writeBodyStructure(m, msg.UID, msg.MailboxID); err != nil {
+		if err := s.writeBodyStructure(m, &msg.BodyStructure); err != nil {
 			return err
 		}
 	}
@@ -124,13 +124,8 @@ func (s *IMAPSession) writeEnvelope(m *imapserver.FetchResponseWriter, messageUI
 }
 
 // Fetch helper to write the body structure for a message
-func (s *IMAPSession) writeBodyStructure(m *imapserver.FetchResponseWriter, messageUID imap.UID, mailboxID int64) error {
-	ctx := context.Background()
-	bodyStructure, err := s.server.db.GetMessageBodyStructure(ctx, messageUID, mailboxID)
-	if err != nil {
-		return s.internalError("failed to retrieve body structure for message UID %d: %v", messageUID, err)
-	}
-	m.WriteBodyStructure(*bodyStructure)
+func (s *IMAPSession) writeBodyStructure(m *imapserver.FetchResponseWriter, bodyStructure *imap.BodyStructure) error {
+	m.WriteBodyStructure(*bodyStructure) // Use the already deserialized BodyStructure
 	return nil
 }
 

@@ -497,26 +497,6 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 	return messageUIDMap, nil
 }
 
-func (db *Database) GetMessageBodyStructure(ctx context.Context, messageUID imap.UID, mailboxID int64) (*imap.BodyStructure, error) {
-	var bodyStructureBytes []byte
-
-	err := db.Pool.QueryRow(ctx, `
-			SELECT 
-				body_structure
-			FROM 
-				messages
-			WHERE 
-				uid = $1 AND 
-				mailbox_id = $2 AND
-				expunged_at IS NULL`, messageUID, mailboxID).Scan(&bodyStructureBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	// Deserialize the JSON string back into BodyStructure
-	return helpers.DeserializeBodyStructureGob(bodyStructureBytes)
-}
-
 func selectNumSet(numSet imap.NumSet, baseQuery string, args []any) (string, []any) {
 	var conditions []string
 
