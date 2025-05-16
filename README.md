@@ -17,7 +17,8 @@ It serves as a lightweight building block for larger infrastructure systems, wit
 - Fast startup and efficient resource usage
 - **LMTP** support for message delivery
 - **POP3** support
-- **ManageSIEVE** and **SIEVE** support _coming soon_
+- **ManageSIEVE** 
+- **SIEVE** scripts support
 
 ---
 
