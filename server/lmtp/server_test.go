@@ -22,6 +22,7 @@ func TestNewLMTPServer(t *testing.T) {
 		nil, // db
 		nil, // uploadWorker
 		false,
+		"", // externalRelay
 	)
 
 	// Verify that the server was created successfully
@@ -58,6 +59,7 @@ func TestLMTPServerClose(t *testing.T) {
 		nil, // db
 		nil, // uploadWorker
 		false,
+		"", // externalRelay
 	)
 	assert.NoError(t, err)
 	assert.NotNil(t, server)

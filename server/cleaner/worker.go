@@ -84,6 +84,15 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	}
 	defer w.db.ReleaseCleanupLock(ctx)
 
+	// Clean up old vacation responses
+	count, err := w.db.CleanupOldVacationResponses(ctx, w.gracePeriod)
+	if err != nil {
+		log.Printf("[CLEANUP] failed to clean up old vacation responses: %v", err)
+		// Continue with S3 cleanup even if vacation cleanup fails
+	} else if count > 0 {
+		log.Printf("[CLEANUP] deleted %d old vacation responses", count)
+	}
+
 	candidates, err := w.db.ListS3ObjectsToDelete(ctx, w.gracePeriod, BATCH_PURGE_SIZE)
 	if err != nil {
 		log.Println("[CLEANUP] failed to list delete candidates:", err)
