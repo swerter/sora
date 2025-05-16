@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	--
 	-- Keep messages if mailbox is deleted by nullifying the mailbox_id
 	--
-	mailbox_id BIGINT REFERENCES mailboxes(id) ON DELETE NO ACTION, 
+	mailbox_id BIGINT REFERENCES mailboxes(id) ON DELETE SET NULL, 
 
 	--
 	-- Information for restoring messages from S3
