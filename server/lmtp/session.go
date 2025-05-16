@@ -3,12 +3,14 @@ package lmtp
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"time"
 
+	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/mail"
 
 	"github.com/emersion/go-imap/v2/imapserver"
@@ -19,6 +21,55 @@ import (
 	"github.com/migadu/sora/server"
 	"github.com/migadu/sora/server/sieveengine"
 )
+
+// sendToExternalRelay sends a message to the external relay using TLS
+func (s *LMTPSession) sendToExternalRelay(from string, to string, message []byte) error {
+	if s.backend.externalRelay == "" {
+		return fmt.Errorf("external relay not configured")
+	}
+
+	// Configure TLS with secure defaults
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// Connect to the SMTP server using TLS
+	c, err := smtp.DialTLS(s.backend.externalRelay, tlsConfig)
+	if err != nil {
+		return fmt.Errorf("failed to connect to external relay with TLS: %w", err)
+	}
+	defer c.Close()
+
+	// Set the sender and recipient
+	if err := c.Mail(from, nil); err != nil {
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+	if err := c.Rcpt(to, nil); err != nil {
+		return fmt.Errorf("failed to set recipient: %w", err)
+	}
+
+	// Send the message body
+	wc, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("failed to start data: %w", err)
+	}
+	_, err = wc.Write(message)
+	if err != nil {
+		return fmt.Errorf("failed to write message: %w", err)
+	}
+	err = wc.Close()
+	if err != nil {
+		return fmt.Errorf("failed to close data writer: %w", err)
+	}
+
+	// Send the QUIT command and close the connection
+	err = c.Quit()
+	if err != nil {
+		return fmt.Errorf("failed to quit: %w", err)
+	}
+
+	return nil
+}
 
 // LMTPSession represents a single LMTP session.
 type LMTPSession struct {
@@ -202,8 +253,33 @@ if envelope :is "from" "spam@example.com" {
 		mailboxName = result.Mailbox
 	case sieveengine.ActionRedirect:
 		s.Log("[LMTP] Message redirected to %s by SIEVE", result.RedirectTo)
-		// TODO: Implement message redirection
-		// For now, we'll just store it in the INBOX
+
+		// Send the message to the external relay if configured
+		if s.backend.externalRelay != "" {
+			err := s.sendToExternalRelay(s.sender.FullAddress(), result.RedirectTo, messageBytes)
+			if err != nil {
+				s.Log("[LMTP] Error sending redirected message to external relay: %v", err)
+				// Continue processing even if relay fails, store in INBOX as fallback
+			} else {
+				s.Log("[LMTP] Successfully sent redirected message to %s via external relay %s",
+					result.RedirectTo, s.backend.externalRelay)
+				// Message was successfully relayed, no need to store it locally
+				return nil
+			}
+		} else {
+			s.Log("[LMTP] External relay not configured, storing message in INBOX")
+		}
+
+		// Fallback: store in INBOX if relay is not configured or fails
+		mailboxName = consts.MAILBOX_INBOX
+	case sieveengine.ActionVacation:
+		// Handle vacation response
+		err := s.handleVacationResponse(ctx, result, messageContent)
+		if err != nil {
+			s.Log("[LMTP] Error handling vacation response: %v", err)
+			// Continue processing even if vacation response fails
+		}
+		// Store the original message in INBOX
 		mailboxName = consts.MAILBOX_INBOX
 	default:
 		mailboxName = consts.MAILBOX_INBOX
@@ -289,4 +365,105 @@ func (s *LMTPSession) internalError(format string, a ...interface{}) error {
 		EnhancedCode: smtp.EnhancedCode{4, 4, 2},
 		Message:      fmt.Sprintf(format, a...),
 	}
+}
+
+// handleVacationResponse processes a vacation auto-response
+func (s *LMTPSession) handleVacationResponse(ctx context.Context, result sieveengine.Result, originalMessage *message.Entity) error {
+	// Check if we've already sent a vacation response to this sender recently
+	// Default duration is 7 days if not specified in the sieve script
+	duration := 7 * 24 * time.Hour
+
+	// Check if we've already sent a response to this sender within the duration
+	hasRecent, err := s.backend.db.HasRecentVacationResponse(ctx, s.UserID(), s.sender.FullAddress(), duration)
+	if err != nil {
+		return fmt.Errorf("failed to check recent vacation responses: %w", err)
+	}
+
+	// If we've already sent a response recently, don't send another one
+	if hasRecent {
+		s.Log("[LMTP] Skipping vacation response to %s (already sent recently)", s.sender.FullAddress())
+		return nil
+	}
+
+	// Create the vacation response message
+	var vacationFrom string
+	if result.VacationFrom != "" {
+		vacationFrom = result.VacationFrom
+	} else {
+		vacationFrom = s.User.Address.FullAddress()
+	}
+
+	var vacationSubject string
+	if result.VacationSubj != "" {
+		vacationSubject = result.VacationSubj
+	} else {
+		vacationSubject = "Auto: Out of Office"
+	}
+
+	// Get the original message ID for the In-Reply-To header
+	originalHeader := mail.Header{Header: originalMessage.Header}
+	originalMessageID, _ := originalHeader.MessageID()
+
+	// Create a new message
+	var vacationMessage bytes.Buffer
+
+	// Create message header
+	var h message.Header
+	h.Set("From", vacationFrom)
+	h.Set("To", s.sender.FullAddress())
+	h.Set("Subject", vacationSubject)
+	h.Set("Message-ID", fmt.Sprintf("<%d.vacation@%s>", time.Now().UnixNano(), s.HostName))
+	if originalMessageID != "" {
+		h.Set("In-Reply-To", originalMessageID)
+		h.Set("References", originalMessageID)
+	}
+	h.Set("Auto-Submitted", "auto-replied")
+	h.Set("X-Auto-Response-Suppress", "All")
+	h.Set("Date", time.Now().Format(time.RFC1123Z))
+
+	// Create the message with the header
+	w, err := message.CreateWriter(&vacationMessage, h)
+	if err != nil {
+		return fmt.Errorf("failed to create message writer: %w", err)
+	}
+
+	// Create the text part
+	var textHeader message.Header
+	textHeader.Set("Content-Type", "text/plain; charset=utf-8")
+	textWriter, err := w.CreatePart(textHeader)
+	if err != nil {
+		return fmt.Errorf("failed to create text part: %w", err)
+	}
+
+	// Write the vacation message body
+	_, err = textWriter.Write([]byte(result.VacationMsg))
+	if err != nil {
+		return fmt.Errorf("failed to write vacation message body: %w", err)
+	}
+
+	// Close the writers
+	textWriter.Close()
+	w.Close()
+
+	// Send the vacation response via the external relay if configured
+	if s.backend.externalRelay != "" {
+		err = s.sendToExternalRelay(vacationFrom, s.sender.FullAddress(), vacationMessage.Bytes())
+		if err != nil {
+			s.Log("[LMTP] Error sending vacation response via external relay: %v", err)
+			// Continue processing even if relay fails
+		} else {
+			s.Log("[LMTP] Successfully sent vacation response to %s via external relay %s",
+				s.sender.FullAddress(), s.backend.externalRelay)
+		}
+	} else {
+		s.Log("[LMTP] External relay not configured, vacation response not sent")
+	}
+
+	// Record that we sent a vacation response to this sender
+	err = s.backend.db.RecordVacationResponse(ctx, s.UserID(), s.sender.FullAddress())
+	if err != nil {
+		return fmt.Errorf("failed to record vacation response: %w", err)
+	}
+
+	return nil
 }

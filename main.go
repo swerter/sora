@@ -50,6 +50,9 @@ func main() {
 	startManageSieve := flag.Bool("managesieve", true, "Start the ManageSieve server")
 	managesieveAddr := flag.String("managesieveaddr", ":4190", "ManageSieve server address")
 
+	// External relay for LMTP server
+	externalRelay := flag.String("externalrelay", "", "External relay address for LMTP server (e.g., smtp.example.com:25)")
+
 	// Parse the command-line flags
 	flag.Parse()
 
@@ -116,7 +119,7 @@ func main() {
 
 	// Start LMTP server
 	if *startLmtp {
-		go startLMTPServer(ctx, hostname, *lmtpAddr, s3storage, database, uploadWorker, *debug, errChan) // Pass ctx
+		go startLMTPServer(ctx, hostname, *lmtpAddr, s3storage, database, uploadWorker, *debug, *externalRelay, errChan)
 	}
 
 	// Start IMAP server
@@ -161,9 +164,9 @@ func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *stor
 	}
 }
 
-func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, debug bool, errChan chan error) {
+func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string, errChan chan error) {
 	// lmtp.New now returns the server instance without starting ListenAndServe
-	lmtpServer, err := lmtp.New(ctx, hostname, addr, s3storage, database, uploadWorker, debug)
+	lmtpServer, err := lmtp.New(ctx, hostname, addr, s3storage, database, uploadWorker, debug, externalRelay)
 	if err != nil {
 		errChan <- fmt.Errorf("failed to create LMTP server: %w", err)
 		return

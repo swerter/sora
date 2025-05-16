@@ -16,24 +16,26 @@ import (
 )
 
 type LMTPServerBackend struct {
-	addr     string
-	hostname string
-	db       *db.Database
-	s3       *storage.S3Storage
-	appCtx   context.Context
-	uploader *uploader.UploadWorker
-	sieve    sieveengine.Executor
-	server   *smtp.Server
+	addr          string
+	hostname      string
+	db            *db.Database
+	s3            *storage.S3Storage
+	appCtx        context.Context
+	uploader      *uploader.UploadWorker
+	sieve         sieveengine.Executor
+	server        *smtp.Server
+	externalRelay string
 }
 
-func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWorker *uploader.UploadWorker, debug bool) (*LMTPServerBackend, error) {
+func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string) (*LMTPServerBackend, error) {
 	backend := &LMTPServerBackend{
-		addr:     addr,
-		appCtx:   appCtx,
-		hostname: hostname,
-		db:       db,
-		s3:       s3,
-		uploader: uploadWorker,
+		addr:          addr,
+		appCtx:        appCtx,
+		hostname:      hostname,
+		db:            db,
+		s3:            s3,
+		uploader:      uploadWorker,
+		externalRelay: externalRelay,
 	}
 	s := smtp.NewServer(backend)
 	s.Addr = addr

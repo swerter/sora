@@ -158,5 +158,20 @@ CREATE TABLE IF NOT EXISTS sieve_scripts (
 -- Index to speed up sieve script lookups by user_id
 CREATE INDEX IF NOT EXISTS idx_sieve_scripts_user_id ON sieve_scripts (user_id);
 
+-- Vacation responses tracking table
+CREATE TABLE IF NOT EXISTS vacation_responses (
+	id BIGSERIAL PRIMARY KEY,
+	user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+	sender_address TEXT NOT NULL,
+	response_date TIMESTAMPTZ NOT NULL,
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL
+);
+
+-- Index for faster lookups by user_id and sender_address
+CREATE INDEX IF NOT EXISTS idx_vacation_responses_user_sender ON vacation_responses (user_id, sender_address);
+
+-- Index for cleanup of old responses
+CREATE INDEX IF NOT EXISTS idx_vacation_responses_response_date ON vacation_responses (response_date);
+
 -- Test user for development
 -- INSERT into users (username, password) values ('user@domain.com', '$2a$10$59jW86pmlBLK2CF.hqmNpOWDPFRPKLWm4u6mpP/p.q1gtH3P0sqyK') ON CONFLICT (username) DO NOTHING;
