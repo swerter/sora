@@ -16,6 +16,9 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 
 	ctx := s.Context()
 
+	mailbox.Lock()
+	defer mailbox.Unlock()
+
 	poll, err := s.server.db.PollMailbox(ctx, mailbox.ID, mailbox.highestModSeq)
 	if err != nil {
 		return s.internalError("failed to poll mailbox: %v", err)
@@ -34,9 +37,6 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 
 	expectedCount := mailbox.numMessages - numExpunged
 
-	mailbox.Lock()
-	defer mailbox.Unlock()
-
 	if uint32(poll.NumMessages) > expectedCount {
 		// Messages were added — safe to update
 		mailbox.mboxTracker.QueueNumMessages(uint32(poll.NumMessages))
@@ -52,7 +52,7 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 		mailbox.numMessages = poll.NumMessages
 	}
 
-	mailbox.numMessages = poll.NumMessages
+	// Only update highestModSeq, numMessages is already handled in the conditions above
 	mailbox.highestModSeq = poll.ModSeq
 
 	return mailbox.sessionTracker.Poll(w, allowExpunge)
