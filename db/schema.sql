@@ -157,3 +157,6 @@ CREATE TABLE IF NOT EXISTS sieve_scripts (
 
 -- Index to speed up sieve script lookups by user_id
 CREATE INDEX IF NOT EXISTS idx_sieve_scripts_user_id ON sieve_scripts (user_id);
+
+-- Test user for development
+-- INSERT into users (username, password) values ('user@domain.com', '$2a$10$59jW86pmlBLK2CF.hqmNpOWDPFRPKLWm4u6mpP/p.q1gtH3P0sqyK') ON CONFLICT (username) DO NOTHING;

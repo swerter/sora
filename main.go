@@ -22,7 +22,6 @@ import (
 )
 
 func main() {
-	seed := flag.Bool("seed", false, "Insert seed data into the database")
 	insecureAuth := flag.Bool("insecure-auth", false, "Allow authentication without TLS")
 	debug := flag.Bool("debug", false, "Print all commands and responses")
 
@@ -89,16 +88,6 @@ func main() {
 		log.Fatalf("Failed to connect to the database: %v", err)
 	}
 	defer database.Close() // Ensure the database is closed on exit
-
-	// If the seed flag is set, insert test data
-	// TODO: Remove this in production
-	if *seed {
-		log.Println("Seeding the database with test data...")
-		err = database.InsertUser(ctx, "user@domain.com", "password")
-		if err != nil {
-			log.Fatalf("Failed to insert test user: %v", err)
-		}
-	}
 
 	hostname, _ := os.Hostname()
 

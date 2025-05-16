@@ -7,17 +7,16 @@ import (
 	"net"
 
 	"github.com/google/uuid"
-	"github.com/migadu/sora/db"
 )
 
 type ManageSieveServer struct {
 	addr     string
 	hostname string
-	db       *db.Database
+	db       DBer
 	appCtx   context.Context // Store the application's parent context
 }
 
-func New(appCtx context.Context, hostname, addr string, database *db.Database, insecureAuth bool, debug bool) (*ManageSieveServer, error) {
+func New(appCtx context.Context, hostname, addr string, database DBer, insecureAuth bool, debug bool) (*ManageSieveServer, error) {
 	return &ManageSieveServer{
 		hostname: hostname,
 		addr:     addr,

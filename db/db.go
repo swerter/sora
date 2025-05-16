@@ -132,29 +132,6 @@ func (db *Database) Authenticate(ctx context.Context, userID int64, password str
 	return nil
 }
 
-func (db *Database) InsertUser(ctx context.Context, username, password string) error {
-	// Hash the password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return fmt.Errorf("failed to hash password: %v", err)
-	}
-
-	// Upsert user into the database (insert or update if the username already exists)
-	_, err = db.Pool.Exec(ctx, `
-        INSERT INTO users (username, password)
-        VALUES ($1, $2)
-        ON CONFLICT (username) DO UPDATE
-        SET password = EXCLUDED.password
-    `, username, hashedPassword)
-	if err != nil {
-		return fmt.Errorf("failed to upsert test user: %v", err)
-	}
-
-	log.Println("User created successfully")
-
-	return nil
-}
-
 func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID, srcMailboxID int64, destMailboxID int64, destMailboxName string) (imap.UID, error) {
 	tx, err := d.Pool.Begin(ctx)
 	if err != nil {
@@ -258,8 +235,9 @@ type InsertMessageOptions struct {
 func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOptions, upload PendingUpload) (messageID int64, uid int64, err error) {
 	saneMessageID := helpers.SanitizeUTF8(options.MessageID)
 	if saneMessageID == "" {
-		log.Printf("MessageID is empty after sanitization")
-		return 0, 0, consts.ErrEmptyMessageID
+		log.Printf("MessageID is empty after sanitization, generating a new one without modifying the message.")
+		// Generate a new message ID if not provided
+		saneMessageID = fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), options.MailboxName)
 	}
 
 	bodyStructureData, err := helpers.SerializeBodyStructureGob(options.BodyStructure)

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/foxcpp/go-sieve"
 	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/server"
@@ -130,6 +131,18 @@ func (s *ManageSieveSession) handleConnection() {
 			scriptContent := parts[2]
 			s.handlePutScript(scriptName, scriptContent)
 
+		case "SETACTIVE":
+			if !s.authenticated {
+				s.sendResponse("-ERR Not authenticated\r\n")
+				continue
+			}
+			if len(parts) < 2 {
+				s.sendResponse("-ERR Syntax: SETACTIVE scriptName\r\n")
+				continue
+			}
+			scriptName := parts[1]
+			s.handleSetActive(scriptName)
+
 		case "DELETESCRIPT":
 			if !s.authenticated {
 				s.sendResponse("-ERR Not authenticated\r\n")
@@ -201,6 +214,15 @@ func (s *ManageSieveSession) handlePutScript(name, content string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	// Validate the script first
+	scriptReader := strings.NewReader(content)
+	options := sieve.DefaultOptions()
+	_, err := sieve.Load(scriptReader, options)
+	if err != nil {
+		s.sendResponse(fmt.Sprintf("-ERR Script validation failed: %v\r\n", err))
+		return
+	}
+
 	// Check if the script exists
 	script, err := s.server.db.GetScriptByName(s.Context(), name, s.UserID())
 	if err != nil {
@@ -226,6 +248,40 @@ func (s *ManageSieveSession) handlePutScript(name, content string) {
 		return
 	}
 	s.sendResponse("+OK Script stored\r\n")
+}
+
+func (s *ManageSieveSession) handleSetActive(name string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Check if the script exists
+	script, err := s.server.db.GetScriptByName(s.Context(), name, s.UserID())
+	if err != nil {
+		if err == consts.ErrDBNotFound {
+			s.sendResponse("-ERR No such script\r\n")
+			return
+		}
+		s.sendResponse("-ERR Internal server error\r\n")
+		return
+	}
+
+	// Validate the script before activating it
+	scriptReader := strings.NewReader(script.Script)
+	options := sieve.DefaultOptions()
+	_, err = sieve.Load(scriptReader, options)
+	if err != nil {
+		s.sendResponse(fmt.Sprintf("-ERR Script validation failed: %v\r\n", err))
+		return
+	}
+
+	// Set the script as active
+	err = s.server.db.SetScriptActive(s.Context(), script.ID, s.UserID(), true)
+	if err != nil {
+		s.sendResponse("-ERR Internal server error\r\n")
+		return
+	}
+
+	s.sendResponse("+OK Script activated\r\n")
 }
 
 func (s *ManageSieveSession) handleDeleteScript(name string) {
