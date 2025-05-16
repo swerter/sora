@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	_ "embed"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/mail"
 
+	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-smtp"
 	"github.com/migadu/sora/consts"
@@ -21,6 +23,9 @@ import (
 	"github.com/migadu/sora/server"
 	"github.com/migadu/sora/server/sieveengine"
 )
+
+//go:embed default.sieve
+var defaultSieveScript string
 
 // sendToExternalRelay sends a message to the external relay using TLS
 func (s *LMTPSession) sendToExternalRelay(from string, to string, message []byte) error {
@@ -175,16 +180,6 @@ func (s *LMTPSession) Data(r io.Reader) error {
 	// Get the user's active script from the database
 	activeScript, err := s.backend.db.GetActiveScript(ctx, s.UserID())
 
-	// Create a default script in case we don't find an active one
-	defaultScript := `require ["fileinto", "envelope", "reject"];
-if envelope :is "from" "spam@example.com" {
-    discard;
-} elsif header :contains "subject" "important" {
-    fileinto "Important";
-} else {
-    keep;
-}`
-
 	// Initialize variables for script evaluation result
 	var result sieveengine.Result
 	var mailboxName string
@@ -198,7 +193,7 @@ if envelope :is "from" "spam@example.com" {
 	}
 
 	// Always run the default script first as a "before script"
-	defaultSieveExecutor, defaultScriptErr := sieveengine.NewSieveExecutor(defaultScript)
+	defaultSieveExecutor, defaultScriptErr := sieveengine.NewSieveExecutor(defaultSieveScript)
 	if defaultScriptErr != nil {
 		s.Log("[LMTP] Failed to create default sieve executor: %v", defaultScriptErr)
 		// If we can't create a default sieve executor, use a simple keep action
