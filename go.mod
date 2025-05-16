@@ -6,6 +6,7 @@ require (
 	github.com/emersion/go-imap/v2 v2.0.0-beta.5.0.20250414124145-ad3a71d773b0
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-smtp v0.21.3
+	github.com/foxcpp/go-sieve v0.0.0-20240130002450-72d6b002882a
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/k3a/html2text v1.2.1
@@ -13,6 +14,9 @@ require (
 	github.com/minio/minio-go/v7 v7.0.89
 	golang.org/x/crypto v0.36.0
 )
+
+// Use the fork at github.com/migadu/go-sieve instead of the original repository
+replace github.com/foxcpp/go-sieve => github.com/migadu/go-sieve v0.0.0-20240130002450-72d6b002882a
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

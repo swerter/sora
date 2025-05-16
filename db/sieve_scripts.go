@@ -45,6 +45,19 @@ func (db *Database) GetScript(ctx context.Context, scriptID, userID int64) (*Sie
 	return &script, nil
 }
 
+func (db *Database) GetActiveScript(ctx context.Context, userID int64) (*SieveScript, error) {
+	var script SieveScript
+	err := db.Pool.QueryRow(ctx, "SELECT id, user_id, name, script, active FROM sieve_scripts WHERE user_id = $1 AND active = true", userID).Scan(&script.ID, &script.UserID, &script.Name, &script.Script, &script.Active)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, consts.ErrDBNotFound
+		}
+		return nil, err
+	}
+
+	return &script, nil
+}
+
 func (db *Database) GetScriptByName(ctx context.Context, name string, userID int64) (*SieveScript, error) {
 	var script SieveScript
 	err := db.Pool.QueryRow(ctx, "SELECT id, name, script, active FROM sieve_scripts WHERE name = $1 AND user_id = $2", name, userID).Scan(&script.ID, &script.Name, &script.Script, &script.Active)

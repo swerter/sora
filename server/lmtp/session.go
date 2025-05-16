@@ -121,6 +121,24 @@ func (s *LMTPSession) Data(r io.Reader) error {
 
 	ctx := s.Context() // Use the session's context for operations
 
+	// Get the user's active script from the database
+	activeScript, err := s.backend.db.GetActiveScript(ctx, s.UserID())
+
+	// Create a default script in case we don't find an active one
+	defaultScript := `require ["fileinto", "envelope", "reject"];
+if envelope :is "from" "spam@example.com" {
+    discard;
+} elsif header :contains "subject" "important" {
+    fileinto "Important";
+} else {
+    keep;
+}`
+
+	// Initialize variables for script evaluation result
+	var result sieveengine.Result
+	var mailboxName string
+
+	// Create the sieve context (used for both default and user scripts)
 	sieveCtx := sieveengine.Context{
 		EnvelopeFrom: s.sender.FullAddress(),
 		EnvelopeTo:   s.User.Address.FullAddress(),
@@ -128,20 +146,65 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		Body:         *plaintextBody,
 	}
 
-	result, err := s.backend.sieve.Evaluate(sieveCtx)
-	if err != nil {
-		s.Log("[LMTP] SIEVE evaluation error: %v", err)
-		// fallback: default to INBOX
+	// Always run the default script first as a "before script"
+	defaultSieveExecutor, defaultScriptErr := sieveengine.NewSieveExecutor(defaultScript)
+	if defaultScriptErr != nil {
+		s.Log("[LMTP] Failed to create default sieve executor: %v", defaultScriptErr)
+		// If we can't create a default sieve executor, use a simple keep action
 		result = sieveengine.Result{Action: sieveengine.ActionKeep}
+	} else {
+		// Evaluate the default script
+		defaultResult, defaultEvalErr := defaultSieveExecutor.Evaluate(sieveCtx)
+		if defaultEvalErr != nil {
+			s.Log("[LMTP] Default SIEVE evaluation error: %v", defaultEvalErr)
+			// fallback: default to INBOX
+			result = sieveengine.Result{Action: sieveengine.ActionKeep}
+		} else {
+			// Set the result from the default script
+			result = defaultResult
+			s.Log("[LMTP] Default script result action: %v", result.Action)
+		}
 	}
 
-	var mailboxName string
+	// If user has an active script, run it and let it override the resultAction
+	if err == nil && activeScript != nil {
+		s.Log("[LMTP] Using user's active script: %s", activeScript.Name)
+		userSieveExecutor, userScriptErr := sieveengine.NewSieveExecutor(activeScript.Script)
+		if userScriptErr != nil {
+			s.Log("[LMTP] Failed to create sieve executor from user script: %v", userScriptErr)
+			// Keep the result from the default script
+		} else {
+			// Evaluate the user script
+			userResult, userEvalErr := userSieveExecutor.Evaluate(sieveCtx)
+			if userEvalErr != nil {
+				s.Log("[LMTP] User SIEVE evaluation error: %v", userEvalErr)
+				// Keep the result from the default script
+			} else {
+				// Override the result with the user script result
+				result = userResult
+				s.Log("[LMTP] User script overrode result action: %v", result.Action)
+			}
+		}
+	} else {
+		if err != nil && err != consts.ErrDBNotFound {
+			s.Log("[LMTP] Failed to get active script: %v", err)
+		} else {
+			s.Log("[LMTP] No active script found, using only default script result")
+		}
+	}
+
+	// Process the result
 	switch result.Action {
 	case sieveengine.ActionDiscard:
 		s.Log("[LMTP] Message discarded by SIEVE")
 		return nil
 	case sieveengine.ActionFileInto:
 		mailboxName = result.Mailbox
+	case sieveengine.ActionRedirect:
+		s.Log("[LMTP] Message redirected to %s by SIEVE", result.RedirectTo)
+		// TODO: Implement message redirection
+		// For now, we'll just store it in the INBOX
+		mailboxName = consts.MAILBOX_INBOX
 	default:
 		mailboxName = consts.MAILBOX_INBOX
 	}
