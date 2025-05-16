@@ -218,10 +218,6 @@ func (db *Database) CreateDefaultMailbox(ctx context.Context, userID int64, name
 
 // DeleteMailbox deletes a mailbox for a specific user by id
 func (db *Database) DeleteMailbox(ctx context.Context, mailboxID int64) error {
-	//
-	// TODO: Implement delayed S3 deletion of messages
-	//
-
 	mbox, err := db.GetMailbox(ctx, mailboxID)
 	if err != nil {
 		log.Printf("Failed to fetch mailbox %d: %v", mailboxID, err)
@@ -235,15 +231,13 @@ func (db *Database) DeleteMailbox(ctx context.Context, mailboxID int64) error {
 	}
 	defer tx.Rollback(ctx) // Ensure the transaction is rolled back if an error occurs
 
-	// Soft delete messages of the mailbox and set mailbox_name (path) for possible restoration
-	now := time.Now()
+	// Set mailbox_name (path) for possible restoration
 	_, err = tx.Exec(ctx, `
 		UPDATE messages SET 
-			mailbox_name = $1, 
-			deleted_at = $2 
-		WHERE mailbox_id = $3`, mbox.Name, now, mailboxID)
+			mailbox_name = $1 
+		WHERE mailbox_id = $2`, mbox.Name, mailboxID)
 	if err != nil {
-		log.Printf("Failed to soft delete messages of folder %d : %v", mailboxID, err)
+		log.Printf("Failed to set path on messages of folder %d : %v", mailboxID, err)
 		return consts.ErrInternalError
 	}
 
