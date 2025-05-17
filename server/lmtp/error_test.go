@@ -15,7 +15,7 @@ func TestLMTPErrorCreation(t *testing.T) {
 	session.Session.Id = "test-session"
 
 	// Test creating an internal error
-	err := session.internalError("test error: %v", "reason")
+	err := session.InternalError("test error: %v", "reason")
 
 	// Verify that the error was created correctly
 	assert.Error(t, err)

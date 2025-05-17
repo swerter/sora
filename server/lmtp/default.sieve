@@ -1,8 +1,7 @@
-require ["fileinto", "envelope", "reject"];
-if envelope :is "from" "spam@example.com" {
-    discard;
-} elsif header :contains "subject" "important" {
-    fileinto "Important";
+require ["fileinto"];
+
+if exists "X-Spam-Flag" {
+    fileinto "Junk";
 } else {
     keep;
 }

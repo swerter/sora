@@ -287,8 +287,8 @@ func TestLMTPSession_Logout(t *testing.T) {
 	assert.Error(t, sessionCtx.Err())
 }
 
-// TestLMTPSession_internalError tests the internalError method of LMTPSession
-func TestLMTPSession_internalError(t *testing.T) {
+// TestLMTPSession_InternalError tests the InternalError method of LMTPSession
+func TestLMTPSession_InternalError(t *testing.T) {
 	// Create a backend without a sieve executor
 	backend := &LMTPServerBackend{
 		hostname: "test.example.com",
@@ -314,8 +314,8 @@ func TestLMTPSession_internalError(t *testing.T) {
 	session.Id = "test-session-id"
 	session.HostName = backend.hostname
 
-	// Call internalError
-	err := session.internalError("test error: %v", "reason")
+	// Call InternalError
+	err := session.InternalError("test error: %v", "reason")
 
 	// Verify the error is an SMTP error with the correct code
 	assert.Error(t, err)
