@@ -293,24 +293,56 @@ type MailboxSummary struct {
 }
 
 func (d *Database) GetMailboxSummary(ctx context.Context, mailboxID int64) (*MailboxSummary, error) {
+	log.Printf("[MAILBOX] Getting summary for mailbox %d", mailboxID)
+
+	// Use a transaction to ensure consistent results
+	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	const query = `
 		SELECT
 			COALESCE(MAX(uid), 0) + 1 AS uid_next,
 			COUNT(*) AS num_messages,
 			COALESCE(SUM(size), 0) AS total_size,
-			COALESCE(MAX(GREATEST(created_modseq, updated_modseq, expunged_modseq)), 0) AS highest_modseq,
+			COALESCE(MAX(GREATEST(created_modseq, 
+				COALESCE(updated_modseq, 0), 
+				COALESCE(expunged_modseq, 0))), 0) AS highest_modseq,
 			COUNT(*) FILTER (WHERE (flags & $2) = 0) AS recent_count,
 			COUNT(*) FILTER (WHERE (flags & $3) = 0) AS unseen_count
 		FROM messages
 		WHERE mailbox_id = $1 AND expunged_at IS NULL;
 	`
-	row := d.Pool.QueryRow(ctx, query, mailboxID, FlagRecent, FlagSeen)
+	row := tx.QueryRow(ctx, query, mailboxID, FlagRecent, FlagSeen)
 
 	var s MailboxSummary
-	err := row.Scan(&s.UIDNext, &s.NumMessages, &s.TotalSize, &s.HighestModSeq, &s.RecentCount, &s.UnseenCount)
+	err = row.Scan(&s.UIDNext, &s.NumMessages, &s.TotalSize, &s.HighestModSeq, &s.RecentCount, &s.UnseenCount)
 	if err != nil {
 		return nil, fmt.Errorf("GetMailboxSummary: %w", err)
 	}
+
+	// Double-check the message count with a separate query
+	var countCheck int
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*) 
+		FROM messages 
+		WHERE mailbox_id = $1 AND expunged_at IS NULL
+	`, mailboxID).Scan(&countCheck)
+
+	if err != nil {
+		log.Printf("[MAILBOX] Error in count check: %v", err)
+	} else if countCheck != s.NumMessages {
+		log.Printf("[MAILBOX] Warning: Count mismatch for mailbox %d. Summary reports %d messages, count check reports %d",
+			mailboxID, s.NumMessages, countCheck)
+		// Use the count check value as it's more reliable
+		s.NumMessages = countCheck
+	}
+
+	log.Printf("[MAILBOX] Summary for mailbox %d: %d messages, UIDNext=%d, HighestModSeq=%d",
+		mailboxID, s.NumMessages, s.UIDNext, s.HighestModSeq)
+
 	return &s, nil
 }
 

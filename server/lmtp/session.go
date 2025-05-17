@@ -294,6 +294,8 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		}
 	}
 
+	// By default, new messages should be marked as unread (no \Seen flag)
+	// The Flags field is explicitly set to an empty slice to ensure no flags are set
 	_, messageUID, err := s.backend.db.InsertMessage(ctx,
 		&db.InsertMessageOptions{
 			UserID:        s.UserID(),
@@ -309,6 +311,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 			InReplyTo:     inReplyTo,
 			BodyStructure: &bodyStructure,
 			Recipients:    recipients,
+			Flags:         []imap.Flag{}, // Explicitly set empty flags to mark as unread
 		},
 		db.PendingUpload{ // This struct is used to pass data to InsertMessage, not directly inserted into DB here
 			ContentHash: contentHash,
