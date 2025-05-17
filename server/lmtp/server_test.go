@@ -23,6 +23,8 @@ func TestNewLMTPServer(t *testing.T) {
 		nil, // uploadWorker
 		false,
 		"", // externalRelay
+		"", // TLS certificate file
+		"", // TLS key file
 	)
 
 	// Verify that the server was created successfully
@@ -60,6 +62,8 @@ func TestLMTPServerClose(t *testing.T) {
 		nil, // uploadWorker
 		false,
 		"", // externalRelay
+		"", // TLS certificate file
+		"", // TLS key file
 	)
 	assert.NoError(t, err)
 	assert.NotNil(t, server)

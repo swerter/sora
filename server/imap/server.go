@@ -2,6 +2,7 @@ package imap
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -18,18 +19,19 @@ import (
 )
 
 type IMAPServer struct {
-	addr     string
-	db       *db.Database
-	hostname string
-	s3       *storage.S3Storage
-	server   *imapserver.Server
-	uploader *uploader.UploadWorker
-	cache    *cache.Cache
-	appCtx   context.Context // Store the application's parent context
-	caps     imap.CapSet
+	addr      string
+	db        *db.Database
+	hostname  string
+	s3        *storage.S3Storage
+	server    *imapserver.Server
+	uploader  *uploader.UploadWorker
+	cache     *cache.Cache
+	appCtx    context.Context // Store the application's parent context
+	caps      imap.CapSet
+	tlsConfig *tls.Config // TLS configuration
 }
 
-func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool) (*IMAPServer, error) {
+func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string) (*IMAPServer, error) {
 	s := &IMAPServer{
 		hostname: hostname,
 		appCtx:   appCtx, // Store the passed-in application context
@@ -50,6 +52,18 @@ func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3S
 		},
 	}
 
+	// Setup TLS if certificate and key files are provided
+	if tlsCertFile != "" && tlsKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
+		}
+		s.tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+	}
+
 	var debugWriter io.Writer
 	if debug {
 		debugWriter = os.Stdout
@@ -61,6 +75,7 @@ func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3S
 		InsecureAuth: insecureAuth,
 		DebugWriter:  debugWriter,
 		Caps:         s.caps,
+		TLSConfig:    s.tlsConfig,
 	})
 
 	return s, nil
@@ -91,13 +106,26 @@ func (s *IMAPServer) newSession(conn *imapserver.Conn) (imapserver.Session, *ima
 }
 
 func (s *IMAPServer) Serve(imapAddr string) error {
-	listener, err := net.Listen("tcp", imapAddr)
-	if err != nil {
-		return fmt.Errorf("failed to create listener: %w", err)
+	var listener net.Listener
+	var err error
+
+	if s.tlsConfig != nil {
+		// Use TLS listener if TLS is configured
+		listener, err = tls.Listen("tcp", imapAddr, s.tlsConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create TLS listener: %w", err)
+		}
+		log.Printf("IMAP listening with TLS on %s", imapAddr)
+	} else {
+		// Use regular TCP listener if no TLS
+		listener, err = net.Listen("tcp", imapAddr)
+		if err != nil {
+			return fmt.Errorf("failed to create listener: %w", err)
+		}
+		log.Printf("IMAP listening on %s", imapAddr)
 	}
 	defer listener.Close()
 
-	log.Printf("IMAP listening on %s", imapAddr)
 	return s.server.Serve(listener)
 }
 

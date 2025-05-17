@@ -58,6 +58,9 @@ func (s *POP3Session) handleConnection() {
 				writer.WriteString("-ERR Connection timed out due to inactivity\r\n")
 				writer.Flush()
 				s.Log("[POP3] timed out")
+			} else if err == io.EOF {
+				// Client closed connection without QUIT
+				s.Log("[POP3] client dropped connection")
 			} else {
 				s.Log("[POP3] error: %v", err)
 			}

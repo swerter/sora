@@ -416,12 +416,20 @@ func (s *LMTPSession) Reset() {
 }
 
 func (s *LMTPSession) Logout() error {
-	s.Log("[LMTP] Session logout requested")
+	// Check if this is a normal QUIT command or an abrupt connection close
+	if s.conn != nil && s.conn.Conn() != nil {
+		// If we can still access the connection, it's a normal QUIT
+		s.Log("[LMTP] Session logout requested")
+	} else {
+		// If the connection is nil or already closed, it's an abrupt disconnect
+		s.Log("[LMTP] Client dropped connection")
+	}
+
 	if s.cancel != nil {
 		s.cancel() // Call cancel on logout
 		s.Log("[LMTP] Session context canceled")
 	}
-	//TODO: Do we really need to return an error to terminate the session?
+
 	s.Log("[LMTP] Session logout completed")
 	return &smtp.SMTPError{
 		Code:         221,

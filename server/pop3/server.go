@@ -2,6 +2,8 @@ package pop3
 
 import (
 	"context"
+	"crypto/tls"
+	"fmt"
 	"log"
 	"net"
 	"time"
@@ -14,17 +16,18 @@ const ERROR_DELAY = 3 * time.Second
 const IDLE_TIMEOUT = 5 * time.Minute // Maximum duration of inactivity before the connection is closed
 
 type POP3Server struct {
-	addr     string
-	hostname string
-	db       DBer               // Use our DBer interface
-	s3       S3StorageInterface // Use our interface
-	appCtx   context.Context
-	uploader UploadWorkerInterface // Use our interface
-	cache    CacheInterface        // Use our interface
+	addr      string
+	hostname  string
+	db        DBer               // Use our DBer interface
+	s3        S3StorageInterface // Use our interface
+	appCtx    context.Context
+	uploader  UploadWorkerInterface // Use our interface
+	cache     CacheInterface        // Use our interface
+	tlsConfig *tls.Config           // TLS configuration
 }
 
-func New(appCtx context.Context, hostname, popAddr string, storage S3StorageInterface, database DBer, uploadWorker UploadWorkerInterface, cache CacheInterface, insecureAuth bool, debug bool) (*POP3Server, error) {
-	return &POP3Server{
+func New(appCtx context.Context, hostname, popAddr string, storage S3StorageInterface, database DBer, uploadWorker UploadWorkerInterface, cache CacheInterface, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string) (*POP3Server, error) {
+	server := &POP3Server{
 		hostname: hostname,
 		addr:     popAddr,
 		db:       database,
@@ -32,21 +35,48 @@ func New(appCtx context.Context, hostname, popAddr string, storage S3StorageInte
 		appCtx:   appCtx,
 		uploader: uploadWorker,
 		cache:    cache,
-	}, nil
+	}
+
+	// Setup TLS if certificate and key files are provided
+	if tlsCertFile != "" && tlsKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
+		}
+		server.tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+	}
+
+	return server, nil
 }
 
 func (s *POP3Server) Start(errChan chan error) {
-	ln, err := net.Listen("tcp", s.addr)
-	if err != nil {
-		errChan <- err
-		return
-	}
-	defer ln.Close()
+	var listener net.Listener
+	var err error
 
-	log.Printf("POP3 listening on %s", s.addr)
+	if s.tlsConfig != nil {
+		// Start TLS listener if TLS is configured
+		listener, err = tls.Listen("tcp", s.addr, s.tlsConfig)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to create TLS listener: %w", err)
+			return
+		}
+		log.Printf("POP3 listening with TLS on %s", s.addr)
+	} else {
+		// Start regular TCP listener if no TLS
+		listener, err = net.Listen("tcp", s.addr)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to create listener: %w", err)
+			return
+		}
+		log.Printf("POP3 listening on %s", s.addr)
+	}
+	defer listener.Close()
 
 	for {
-		conn, err := ln.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			errChan <- err
 			return

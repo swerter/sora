@@ -2,6 +2,7 @@ package lmtp
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -25,9 +26,10 @@ type LMTPServerBackend struct {
 	sieve         sieveengine.Executor
 	server        *smtp.Server
 	externalRelay string
+	tlsConfig     *tls.Config // TLS configuration
 }
 
-func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string) (*LMTPServerBackend, error) {
+func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string, tlsCertFile, tlsKeyFile string) (*LMTPServerBackend, error) {
 	backend := &LMTPServerBackend{
 		addr:          addr,
 		appCtx:        appCtx,
@@ -37,11 +39,25 @@ func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, d
 		uploader:      uploadWorker,
 		externalRelay: externalRelay,
 	}
+
+	// Setup TLS if certificate and key files are provided
+	if tlsCertFile != "" && tlsKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
+		}
+		backend.tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+	}
+
 	s := smtp.NewServer(backend)
 	s.Addr = addr
 	s.Domain = hostname
 	s.AllowInsecureAuth = true
 	s.LMTP = true
+	s.TLSConfig = backend.tlsConfig
 
 	// Save the server instance in the backend
 	backend.server = s

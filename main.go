@@ -53,6 +53,23 @@ func main() {
 	// External relay for LMTP server
 	externalRelay := flag.String("externalrelay", "", "External relay address for LMTP server (e.g., smtp.example.com:25)")
 
+	// TLS options for each server
+	imapTLS := flag.Bool("imaptls", false, "Enable TLS for IMAP server")
+	imapTLSCert := flag.String("imaptlscert", "", "TLS certificate file for IMAP server")
+	imapTLSKey := flag.String("imaptlskey", "", "TLS key file for IMAP server")
+
+	pop3TLS := flag.Bool("pop3tls", false, "Enable TLS for POP3 server")
+	pop3TLSCert := flag.String("pop3tlscert", "", "TLS certificate file for POP3 server")
+	pop3TLSKey := flag.String("pop3tlskey", "", "TLS key file for POP3 server")
+
+	lmtpTLS := flag.Bool("lmtptls", false, "Enable TLS for LMTP server")
+	lmtpTLSCert := flag.String("lmtptlscert", "", "TLS certificate file for LMTP server")
+	lmtpTLSKey := flag.String("lmtptlskey", "", "TLS key file for LMTP server")
+
+	manageSieveTLS := flag.Bool("managesievetls", false, "Enable TLS for ManageSieve server")
+	manageSieveTLSCert := flag.String("managesievetlscert", "", "TLS certificate file for ManageSieve server")
+	manageSieveTLSKey := flag.String("managesievetlskey", "", "TLS key file for ManageSieve server")
+
 	// Parse the command-line flags
 	flag.Parse()
 
@@ -119,22 +136,42 @@ func main() {
 
 	// Start LMTP server
 	if *startLmtp {
-		go startLMTPServer(ctx, hostname, *lmtpAddr, s3storage, database, uploadWorker, *debug, *externalRelay, errChan)
+		var lmtpCertFile, lmtpKeyFile string
+		if *lmtpTLS {
+			lmtpCertFile = *lmtpTLSCert
+			lmtpKeyFile = *lmtpTLSKey
+		}
+		go startLMTPServer(ctx, hostname, *lmtpAddr, s3storage, database, uploadWorker, *debug, *externalRelay, errChan, lmtpCertFile, lmtpKeyFile)
 	}
 
 	// Start IMAP server
 	if *startImap {
-		go startIMAPServer(ctx, hostname, *imapAddr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan)
+		var imapCertFile, imapKeyFile string
+		if *imapTLS {
+			imapCertFile = *imapTLSCert
+			imapKeyFile = *imapTLSKey
+		}
+		go startIMAPServer(ctx, hostname, *imapAddr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan, imapCertFile, imapKeyFile)
 	}
 
 	// Start POP3 server
 	if *startPop3 {
-		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan) // Pass ctx
+		var pop3CertFile, pop3KeyFile string
+		if *pop3TLS {
+			pop3CertFile = *pop3TLSCert
+			pop3KeyFile = *pop3TLSKey
+		}
+		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan, pop3CertFile, pop3KeyFile)
 	}
 
 	// Start ManageSieve server
 	if *startManageSieve {
-		go startManageSieveServer(ctx, hostname, *managesieveAddr, database, *insecureAuth, *debug, errChan) // Pass ctx
+		var manageSieveCertFile, manageSieveKeyFile string
+		if *manageSieveTLS {
+			manageSieveCertFile = *manageSieveTLSCert
+			manageSieveKeyFile = *manageSieveTLSKey
+		}
+		go startManageSieveServer(ctx, hostname, *managesieveAddr, database, *insecureAuth, *debug, errChan, manageSieveCertFile, manageSieveKeyFile)
 	}
 
 	// Wait for any errors from the servers
@@ -146,8 +183,8 @@ func main() {
 	}
 }
 
-func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error) {
-	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug)
+func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string) {
+	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug, tlsCertFile, tlsKeyFile)
 	if err != nil {
 		errChan <- err
 		return
@@ -164,9 +201,9 @@ func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *stor
 	}
 }
 
-func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string, errChan chan error) {
+func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string, errChan chan error, tlsCertFile, tlsKeyFile string) {
 	// lmtp.New now returns the server instance without starting ListenAndServe
-	lmtpServer, err := lmtp.New(ctx, hostname, addr, s3storage, database, uploadWorker, debug, externalRelay)
+	lmtpServer, err := lmtp.New(ctx, hostname, addr, s3storage, database, uploadWorker, debug, externalRelay, tlsCertFile, tlsKeyFile)
 	if err != nil {
 		errChan <- fmt.Errorf("failed to create LMTP server: %w", err)
 		return
@@ -183,8 +220,8 @@ func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *stor
 	lmtpServer.Start(errChan)
 }
 
-func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error) {
-	s, err := pop3.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug) // Pass ctx
+func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string) {
+	s, err := pop3.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug, tlsCertFile, tlsKeyFile) // Pass ctx
 	if err != nil {
 		errChan <- err
 		return
@@ -199,8 +236,8 @@ func startPOP3Server(ctx context.Context, hostname string, addr string, s3storag
 	s.Start(errChan)
 }
 
-func startManageSieveServer(ctx context.Context, hostname string, addr string, database *db.Database, insecureAuth bool, debug bool, errChan chan error) {
-	s, err := managesieve.New(ctx, hostname, addr, database, insecureAuth, debug) // Pass ctx
+func startManageSieveServer(ctx context.Context, hostname string, addr string, database *db.Database, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string) {
+	s, err := managesieve.New(ctx, hostname, addr, database, insecureAuth, debug, tlsCertFile, tlsKeyFile) // Pass ctx
 	if err != nil {
 		errChan <- err
 		return

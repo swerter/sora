@@ -27,6 +27,8 @@ func TestPOP3ServerNew(t *testing.T) {
 		mockCache,
 		false,
 		false,
+		"", // TLS certificate file
+		"", // TLS key file
 	)
 
 	// Verify that the server was created successfully
@@ -63,6 +65,8 @@ func TestPOP3ServerClose(t *testing.T) {
 		mockCache,
 		false,
 		false,
+		"", // TLS certificate file
+		"", // TLS key file
 	)
 	assert.NoError(t, err)
 	assert.NotNil(t, server)

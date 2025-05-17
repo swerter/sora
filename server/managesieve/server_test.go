@@ -21,6 +21,8 @@ func TestNewManageSieveServer(t *testing.T) {
 		nil, // db
 		false,
 		false,
+		"", // TLS certificate file
+		"", // TLS key file
 	)
 
 	// Verify that the server was created successfully
@@ -43,6 +45,8 @@ func TestManageSieveServerClose(t *testing.T) {
 		nil, // db
 		false,
 		false,
+		"", // TLS certificate file
+		"", // TLS key file
 	)
 	assert.NoError(t, err)
 	assert.NotNil(t, server)

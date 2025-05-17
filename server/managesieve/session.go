@@ -45,8 +45,11 @@ func (s *ManageSieveSession) handleConnection() {
 	for {
 		line, err := s.reader.ReadString('\n')
 		if err != nil {
-			if err != io.EOF {
-				fmt.Printf("Read error: %v\n", err)
+			if err == io.EOF {
+				// Client closed connection without LOGOUT
+				s.Log("client dropped connection")
+			} else {
+				s.Log("read error: %v", err)
 			}
 			return
 		}
