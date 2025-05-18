@@ -31,7 +31,7 @@ type IMAPServer struct {
 	tlsConfig *tls.Config // TLS configuration
 }
 
-func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string) (*IMAPServer, error) {
+func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string, insecureSkipVerify ...bool) (*IMAPServer, error) {
 	s := &IMAPServer{
 		hostname: hostname,
 		appCtx:   appCtx, // Store the passed-in application context
@@ -59,8 +59,17 @@ func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3S
 			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
 		}
 		s.tlsConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
+			Certificates:             []tls.Certificate{cert},
+			MinVersion:               tls.VersionTLS12, // Allow older TLS versions for better compatibility
+			ClientAuth:               tls.NoClientCert,
+			ServerName:               hostname,
+			PreferServerCipherSuites: true, // Prefer server cipher suites over client cipher suites
+		}
+
+		// Set InsecureSkipVerify if requested (for self-signed certificates)
+		if len(insecureSkipVerify) > 0 && insecureSkipVerify[0] {
+			s.tlsConfig.InsecureSkipVerify = true
+			log.Printf("WARNING: TLS certificate verification disabled for IMAP server")
 		}
 	}
 

@@ -29,7 +29,7 @@ type LMTPServerBackend struct {
 	tlsConfig     *tls.Config // TLS configuration
 }
 
-func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string, tlsCertFile, tlsKeyFile string) (*LMTPServerBackend, error) {
+func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string, tlsCertFile, tlsKeyFile string, insecureSkipVerify ...bool) (*LMTPServerBackend, error) {
 	backend := &LMTPServerBackend{
 		addr:          addr,
 		appCtx:        appCtx,
@@ -47,8 +47,17 @@ func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, d
 			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
 		}
 		backend.tlsConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
+			Certificates:             []tls.Certificate{cert},
+			MinVersion:               tls.VersionTLS12, // Allow older TLS versions for better compatibility
+			ClientAuth:               tls.NoClientCert,
+			ServerName:               hostname,
+			PreferServerCipherSuites: true, // Prefer server cipher suites over client cipher suites
+		}
+
+		// Set InsecureSkipVerify if requested (for self-signed certificates)
+		if len(insecureSkipVerify) > 0 && insecureSkipVerify[0] {
+			backend.tlsConfig.InsecureSkipVerify = true
+			log.Printf("WARNING: TLS certificate verification disabled for LMTP server")
 		}
 	}
 

@@ -70,6 +70,9 @@ func main() {
 	manageSieveTLSCert := flag.String("managesievetlscert", "", "TLS certificate file for ManageSieve server")
 	manageSieveTLSKey := flag.String("managesievetlskey", "", "TLS key file for ManageSieve server")
 
+	// Option to skip TLS certificate verification (for self-signed certificates)
+	tlsInsecureSkipVerify := flag.Bool("tlsinsecureskipverify", false, "Skip TLS certificate verification (for self-signed certificates)")
+
 	// Parse the command-line flags
 	flag.Parse()
 
@@ -141,7 +144,7 @@ func main() {
 			lmtpCertFile = *lmtpTLSCert
 			lmtpKeyFile = *lmtpTLSKey
 		}
-		go startLMTPServer(ctx, hostname, *lmtpAddr, s3storage, database, uploadWorker, *debug, *externalRelay, errChan, lmtpCertFile, lmtpKeyFile)
+		go startLMTPServer(ctx, hostname, *lmtpAddr, s3storage, database, uploadWorker, *debug, *externalRelay, errChan, lmtpCertFile, lmtpKeyFile, *tlsInsecureSkipVerify)
 	}
 
 	// Start IMAP server
@@ -151,7 +154,7 @@ func main() {
 			imapCertFile = *imapTLSCert
 			imapKeyFile = *imapTLSKey
 		}
-		go startIMAPServer(ctx, hostname, *imapAddr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan, imapCertFile, imapKeyFile)
+		go startIMAPServer(ctx, hostname, *imapAddr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan, imapCertFile, imapKeyFile, *tlsInsecureSkipVerify)
 	}
 
 	// Start POP3 server
@@ -161,7 +164,7 @@ func main() {
 			pop3CertFile = *pop3TLSCert
 			pop3KeyFile = *pop3TLSKey
 		}
-		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan, pop3CertFile, pop3KeyFile)
+		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan, pop3CertFile, pop3KeyFile, *tlsInsecureSkipVerify)
 	}
 
 	// Start ManageSieve server
@@ -171,7 +174,7 @@ func main() {
 			manageSieveCertFile = *manageSieveTLSCert
 			manageSieveKeyFile = *manageSieveTLSKey
 		}
-		go startManageSieveServer(ctx, hostname, *managesieveAddr, database, *insecureAuth, *debug, errChan, manageSieveCertFile, manageSieveKeyFile)
+		go startManageSieveServer(ctx, hostname, *managesieveAddr, database, *insecureAuth, *debug, errChan, manageSieveCertFile, manageSieveKeyFile, *tlsInsecureSkipVerify)
 	}
 
 	// Wait for any errors from the servers
@@ -183,8 +186,8 @@ func main() {
 	}
 }
 
-func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string) {
-	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug, tlsCertFile, tlsKeyFile)
+func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
+	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify)
 	if err != nil {
 		errChan <- err
 		return
@@ -201,9 +204,9 @@ func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *stor
 	}
 }
 
-func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string, errChan chan error, tlsCertFile, tlsKeyFile string) {
+func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
 	// lmtp.New now returns the server instance without starting ListenAndServe
-	lmtpServer, err := lmtp.New(ctx, hostname, addr, s3storage, database, uploadWorker, debug, externalRelay, tlsCertFile, tlsKeyFile)
+	lmtpServer, err := lmtp.New(ctx, hostname, addr, s3storage, database, uploadWorker, debug, externalRelay, tlsCertFile, tlsKeyFile, insecureSkipVerify)
 	if err != nil {
 		errChan <- fmt.Errorf("failed to create LMTP server: %w", err)
 		return
@@ -220,8 +223,8 @@ func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *stor
 	lmtpServer.Start(errChan)
 }
 
-func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string) {
-	s, err := pop3.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug, tlsCertFile, tlsKeyFile) // Pass ctx
+func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
+	s, err := pop3.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify) // Pass ctx
 	if err != nil {
 		errChan <- err
 		return
@@ -236,8 +239,8 @@ func startPOP3Server(ctx context.Context, hostname string, addr string, s3storag
 	s.Start(errChan)
 }
 
-func startManageSieveServer(ctx context.Context, hostname string, addr string, database *db.Database, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string) {
-	s, err := managesieve.New(ctx, hostname, addr, database, insecureAuth, debug, tlsCertFile, tlsKeyFile) // Pass ctx
+func startManageSieveServer(ctx context.Context, hostname string, addr string, database *db.Database, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
+	s, err := managesieve.New(ctx, hostname, addr, database, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify) // Pass ctx
 	if err != nil {
 		errChan <- err
 		return
