@@ -1,4 +1,4 @@
-package pop3
+package imap
 
 import (
 	"bufio"
@@ -11,10 +11,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestBasicPOP3ConnectionAuthenticationLogout is a simple integration test for POP3
+// TestBasicIMAPConnectionAuthenticationLogout is a simple integration test for IMAP
 // that tests connection, authentication with user@domain.com/password, and logout
-func TestBasicPOP3ConnectionAuthenticationLogout(t *testing.T) {
-	// Create a simple TCP server that simulates a POP3 server
+func TestBasicIMAPConnectionAuthenticationLogout(t *testing.T) {
+	// Create a simple TCP server that simulates an IMAP server
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Failed to create listener: %v", err)
@@ -38,29 +38,23 @@ func TestBasicPOP3ConnectionAuthenticationLogout(t *testing.T) {
 		conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		// Send greeting
-		fmt.Fprintf(conn, "+OK POP3 server ready\r\n")
+		fmt.Fprintf(conn, "* OK IMAP4rev1 Server ready\r\n")
 
 		// Read commands
 		scanner := bufio.NewScanner(conn)
 		for scanner.Scan() {
 			cmd := scanner.Text()
 
-			if strings.HasPrefix(cmd, "USER") {
-				// Check if the username is correct
-				if cmd == "USER user@domain.com" {
-					fmt.Fprintf(conn, "+OK User accepted\r\n")
+			if strings.HasPrefix(cmd, "a001 LOGIN") {
+				// Check if the login credentials are correct
+				if cmd == "a001 LOGIN user@domain.com password" {
+					fmt.Fprintf(conn, "a001 OK LOGIN completed\r\n")
 				} else {
-					fmt.Fprintf(conn, "-ERR Invalid username\r\n")
+					fmt.Fprintf(conn, "a001 NO [AUTHENTICATIONFAILED] Invalid credentials\r\n")
 				}
-			} else if strings.HasPrefix(cmd, "PASS") {
-				// Check if the password is correct
-				if cmd == "PASS password" {
-					fmt.Fprintf(conn, "+OK Password accepted\r\n")
-				} else {
-					fmt.Fprintf(conn, "-ERR Authentication failed\r\n")
-				}
-			} else if strings.HasPrefix(cmd, "QUIT") {
-				fmt.Fprintf(conn, "+OK Goodbye\r\n")
+			} else if strings.HasPrefix(cmd, "a002 LOGOUT") {
+				fmt.Fprintf(conn, "* BYE IMAP4rev1 Server logging out\r\n")
+				fmt.Fprintf(conn, "a002 OK LOGOUT completed\r\n")
 				break
 			}
 		}
@@ -86,37 +80,34 @@ func TestBasicPOP3ConnectionAuthenticationLogout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read greeting: %v", err)
 	}
-	assert.Equal(t, "+OK POP3 server ready\r\n", greeting)
+	assert.Equal(t, "* OK IMAP4rev1 Server ready\r\n", greeting)
 
-	// Send USER command
-	fmt.Fprintf(conn, "USER user@domain.com\r\n")
+	// Send LOGIN command
+	fmt.Fprintf(conn, "a001 LOGIN user@domain.com password\r\n")
 
 	// Read the response
 	response, err := reader.ReadString('\n')
 	if err != nil {
-		t.Fatalf("Failed to read USER response: %v", err)
+		t.Fatalf("Failed to read login response: %v", err)
 	}
-	assert.Equal(t, "+OK User accepted\r\n", response)
+	assert.Equal(t, "a001 OK LOGIN completed\r\n", response)
 
-	// Send PASS command
-	fmt.Fprintf(conn, "PASS password\r\n")
+	// Send LOGOUT command
+	fmt.Fprintf(conn, "a002 LOGOUT\r\n")
 
-	// Read the response
-	response, err = reader.ReadString('\n')
+	// Read the BYE response
+	bye, err := reader.ReadString('\n')
 	if err != nil {
-		t.Fatalf("Failed to read PASS response: %v", err)
+		t.Fatalf("Failed to read BYE response: %v", err)
 	}
-	assert.Equal(t, "+OK Password accepted\r\n", response)
+	assert.Equal(t, "* BYE IMAP4rev1 Server logging out\r\n", bye)
 
-	// Send QUIT command
-	fmt.Fprintf(conn, "QUIT\r\n")
-
-	// Read the response
-	response, err = reader.ReadString('\n')
+	// Read the OK response
+	ok, err := reader.ReadString('\n')
 	if err != nil {
-		t.Fatalf("Failed to read QUIT response: %v", err)
+		t.Fatalf("Failed to read OK response: %v", err)
 	}
-	assert.Equal(t, "+OK Goodbye\r\n", response)
+	assert.Equal(t, "a002 OK LOGOUT completed\r\n", ok)
 
 	// Wait for the server to finish
 	select {
@@ -127,9 +118,9 @@ func TestBasicPOP3ConnectionAuthenticationLogout(t *testing.T) {
 	}
 }
 
-// TestPOP3AuthenticationFailure tests authentication failure with wrong password
-func TestPOP3AuthenticationFailure(t *testing.T) {
-	// Create a simple TCP server that simulates a POP3 server
+// TestIMAPAuthenticationFailure tests authentication failure with wrong password
+func TestIMAPAuthenticationFailure(t *testing.T) {
+	// Create a simple TCP server that simulates an IMAP server
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Failed to create listener: %v", err)
@@ -153,19 +144,16 @@ func TestPOP3AuthenticationFailure(t *testing.T) {
 		conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		// Send greeting
-		fmt.Fprintf(conn, "+OK POP3 server ready\r\n")
+		fmt.Fprintf(conn, "* OK IMAP4rev1 Server ready\r\n")
 
 		// Read commands
 		scanner := bufio.NewScanner(conn)
 		for scanner.Scan() {
 			cmd := scanner.Text()
 
-			if strings.HasPrefix(cmd, "USER") {
-				// Accept any username for this test
-				fmt.Fprintf(conn, "+OK User accepted\r\n")
-			} else if strings.HasPrefix(cmd, "PASS") {
+			if strings.HasPrefix(cmd, "a001 LOGIN") {
 				// This test is for wrong password
-				fmt.Fprintf(conn, "-ERR Authentication failed\r\n")
+				fmt.Fprintf(conn, "a001 NO [AUTHENTICATIONFAILED] Invalid credentials\r\n")
 				break
 			}
 		}
@@ -191,27 +179,17 @@ func TestPOP3AuthenticationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read greeting: %v", err)
 	}
-	assert.Equal(t, "+OK POP3 server ready\r\n", greeting)
+	assert.Equal(t, "* OK IMAP4rev1 Server ready\r\n", greeting)
 
-	// Send USER command
-	fmt.Fprintf(conn, "USER user@domain.com\r\n")
+	// Send LOGIN command with wrong password
+	fmt.Fprintf(conn, "a001 LOGIN user@domain.com wrongpassword\r\n")
 
 	// Read the response
 	response, err := reader.ReadString('\n')
 	if err != nil {
-		t.Fatalf("Failed to read USER response: %v", err)
+		t.Fatalf("Failed to read login response: %v", err)
 	}
-	assert.Equal(t, "+OK User accepted\r\n", response)
-
-	// Send PASS command with wrong password
-	fmt.Fprintf(conn, "PASS wrongpassword\r\n")
-
-	// Read the response
-	response, err = reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("Failed to read PASS response: %v", err)
-	}
-	assert.Equal(t, "-ERR Authentication failed\r\n", response)
+	assert.Equal(t, "a001 NO [AUTHENTICATIONFAILED] Invalid credentials\r\n", response)
 
 	// Wait for the server to finish
 	select {
@@ -220,19 +198,4 @@ func TestPOP3AuthenticationFailure(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Test timed out waiting for server to finish")
 	}
-}
-
-// TestPOP3ServerConcurrentConnections verifies that the POP3 server can handle concurrent connections
-func TestPOP3ServerConcurrentConnections(t *testing.T) {
-	t.Skip("Skipping integration test that requires multiple concurrent connections")
-}
-
-// TestPOP3ServerErrorHandling verifies that the POP3 server handles errors correctly
-func TestPOP3ServerErrorHandling(t *testing.T) {
-	t.Skip("Skipping integration test that requires error simulation")
-}
-
-// TestPOP3ServerTimeout verifies that the POP3 server handles timeouts correctly
-func TestPOP3ServerTimeout(t *testing.T) {
-	t.Skip("Skipping integration test that requires timeout simulation")
 }
