@@ -34,20 +34,33 @@ func (s *IMAPSession) internalError(format string, a ...interface{}) *imap.Error
 }
 
 func (s *IMAPSession) Close() error {
+	// Check if s is nil
+	if s == nil {
+		return nil
+	}
+
 	// Only lock the mutex if IMAPUser is not nil
 	if s.IMAPUser != nil {
-		s.mutex.Lock()
-		s.Log("Closing session for user: %v", s.FullAddress())
-		s.IMAPUser = nil
-		s.mutex.Unlock()
+		// Lock the mutex if it's available
+		if s.IMAPUser != nil {
+			userMutex := &s.IMAPUser.mutex
+			fullAddress := s.IMAPUser.FullAddress()
+
+			userMutex.Lock()
+			s.Log("Closing session for user: %v", fullAddress)
+			s.IMAPUser = nil
+			userMutex.Unlock()
+		}
 	} else {
 		// Log when a client connection drops before authentication
 		s.Log("Client connection dropped (unauthenticated)")
 	}
 
 	s.mailbox = nil
+
 	if s.cancel != nil {
 		s.cancel() // Cancel the context for this session
 	}
+
 	return nil
 }
