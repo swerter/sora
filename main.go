@@ -117,21 +117,23 @@ func main() {
 	errChan := make(chan error, 1)
 
 	// Initialize cache
-	cache, err := cache.New(*cachePath, *maxCacheSize, database)
+	cacheInstance, err := cache.New(*cachePath, *maxCacheSize, database)
 	if err != nil {
 		log.Fatalf("Failed to initialize cache: %v", err)
 	}
-	if err := cache.SyncFromDisk(); err != nil {
+	defer cacheInstance.Close() // Ensure the cache is closed on exit
+
+	if err := cacheInstance.SyncFromDisk(); err != nil {
 		log.Fatalf("Failed to sync cache from disk: %v", err)
 	}
-	cache.StartPurgeLoop(ctx)
+	cacheInstance.StartPurgeLoop(ctx)
 
 	// Initialize the S3 cleanup worker
-	cleanupWorker := cleaner.New(database, s3storage, cache, consts.CLEANUP_INTERVAL, consts.CLEANUP_GRACE_PERIOD)
+	cleanupWorker := cleaner.New(database, s3storage, cacheInstance, consts.CLEANUP_INTERVAL, consts.CLEANUP_GRACE_PERIOD)
 	cleanupWorker.Start(ctx)
 
 	// Start the upload worker
-	uploadWorker, err := uploader.New(ctx, *uploaderTempPath, hostname, database, s3storage, cache, errChan)
+	uploadWorker, err := uploader.New(ctx, *uploaderTempPath, hostname, database, s3storage, cacheInstance, errChan)
 	if err != nil {
 		log.Fatalf("Failed to create upload worker: %v", err)
 	}
@@ -154,7 +156,7 @@ func main() {
 			imapCertFile = *imapTLSCert
 			imapKeyFile = *imapTLSKey
 		}
-		go startIMAPServer(ctx, hostname, *imapAddr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan, imapCertFile, imapKeyFile, *tlsInsecureSkipVerify)
+		go startIMAPServer(ctx, hostname, *imapAddr, s3storage, database, uploadWorker, cacheInstance, *insecureAuth, *debug, errChan, imapCertFile, imapKeyFile, *tlsInsecureSkipVerify)
 	}
 
 	// Start POP3 server
@@ -164,7 +166,7 @@ func main() {
 			pop3CertFile = *pop3TLSCert
 			pop3KeyFile = *pop3TLSKey
 		}
-		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cache, *insecureAuth, *debug, errChan, pop3CertFile, pop3KeyFile, *tlsInsecureSkipVerify)
+		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cacheInstance, *insecureAuth, *debug, errChan, pop3CertFile, pop3KeyFile, *tlsInsecureSkipVerify)
 	}
 
 	// Start ManageSieve server
@@ -186,8 +188,8 @@ func main() {
 	}
 }
 
-func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
-	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify)
+func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cacheInstance *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
+	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cacheInstance, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify)
 	if err != nil {
 		errChan <- err
 		return
@@ -223,8 +225,8 @@ func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *stor
 	lmtpServer.Start(errChan)
 }
 
-func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
-	s, err := pop3.New(ctx, hostname, addr, s3storage, database, uploadWorker, cache, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify) // Pass ctx
+func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cacheInstance *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
+	s, err := pop3.New(ctx, hostname, addr, s3storage, database, uploadWorker, cacheInstance, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify) // Pass ctx
 	if err != nil {
 		errChan <- err
 		return

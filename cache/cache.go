@@ -32,6 +32,15 @@ type Cache struct {
 	sourceDB         *db.Database
 }
 
+// Close closes the cache database connection
+func (c *Cache) Close() error {
+	if c.db != nil {
+		log.Println("[CACHE] Closing cache database connection")
+		return c.db.Close()
+	}
+	return nil
+}
+
 func New(basePath string, maxSizeMegaBytes int64, sourceDb *db.Database) (*Cache, error) {
 	// Ensure data subdirectory exists
 	dataDir := filepath.Join(basePath, DATA_DIR)

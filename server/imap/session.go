@@ -39,18 +39,15 @@ func (s *IMAPSession) Close() error {
 		return nil
 	}
 
-	// Only lock the mutex if IMAPUser is not nil
+	// Safely handle IMAPUser with proper locking
 	if s.IMAPUser != nil {
-		// Lock the mutex if it's available
-		if s.IMAPUser != nil {
-			userMutex := &s.IMAPUser.mutex
-			fullAddress := s.IMAPUser.FullAddress()
+		userMutex := &s.IMAPUser.mutex
+		fullAddress := s.IMAPUser.FullAddress()
 
-			userMutex.Lock()
-			s.Log("Closing session for user: %v", fullAddress)
-			s.IMAPUser = nil
-			userMutex.Unlock()
-		}
+		userMutex.Lock()
+		s.Log("Closing session for user: %v", fullAddress)
+		s.IMAPUser = nil
+		userMutex.Unlock()
 	} else {
 		// Log when a client connection drops before authentication
 		s.Log("Client connection dropped (unauthenticated)")

@@ -25,8 +25,8 @@ func New(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool)
 		Secure: useSSL, // Use SSL (https) if true
 	})
 	if err != nil {
-		log.Fatalln(err)
-		return nil, err
+		log.Printf("Failed to initialize MinIO client: %v", err)
+		return nil, fmt.Errorf("failed to initialize MinIO client: %w", err)
 	}
 
 	// Enable detailed tracing of requests and responses for debugging

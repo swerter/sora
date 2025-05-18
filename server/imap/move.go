@@ -35,7 +35,6 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 	// Collect message IDs for moving and sequence numbers for expunge
 	var sourceUIDs []imap.UID
 	var seqNums []uint32
-	var destUIDs []imap.UID
 
 	for _, msg := range messages {
 		sourceUIDs = append(sourceUIDs, msg.UID)
@@ -48,17 +47,21 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 		return s.internalError("failed to move messages: %v", err)
 	}
 
+	// Prepare the source and destination UIDs for the COPYUID response
+	var mappedSourceUIDs []imap.UID
+	var mappedDestUIDs []imap.UID
+
 	// messageUIDMap holds the mapping between original UIDs and new UIDs
 	for originalUID, newUID := range messageUIDMap {
-		sourceUIDs = append(sourceUIDs, imap.UID(originalUID))
-		destUIDs = append(destUIDs, imap.UID(newUID))
+		mappedSourceUIDs = append(mappedSourceUIDs, imap.UID(originalUID))
+		mappedDestUIDs = append(mappedDestUIDs, imap.UID(newUID))
 	}
 
 	// Prepare CopyData (UID data for the COPYUID response)
 	copyData := &imap.CopyData{
-		UIDValidity: s.mailbox.UIDValidity,         // UIDVALIDITY of the source mailbox
-		SourceUIDs:  imap.UIDSetNum(sourceUIDs...), // Original UIDs (source mailbox)
-		DestUIDs:    imap.UIDSetNum(destUIDs...),   // New UIDs in the destination mailbox
+		UIDValidity: s.mailbox.UIDValidity,               // UIDVALIDITY of the source mailbox
+		SourceUIDs:  imap.UIDSetNum(mappedSourceUIDs...), // Original UIDs (source mailbox)
+		DestUIDs:    imap.UIDSetNum(mappedDestUIDs...),   // New UIDs in the destination mailbox
 	}
 
 	// Write the CopyData (COPYUID response)

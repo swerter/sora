@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/migadu/sora/consts"
+	"github.com/migadu/sora/helpers"
 )
 
 // DBMailbox represents the database structure of a mailbox
@@ -558,33 +559,7 @@ func (db *Database) updateParentPathOnMailboxChildren(
 }
 
 // findCommonPath finds the common path between two mailbox names based on the delimiter.
+// This is a wrapper around helpers.FindCommonPath for backward compatibility.
 func findCommonPath(oldName, newName, delimiter string) string {
-	// Split the mailbox names into components
-	oldParts := strings.Split(oldName, delimiter)
-	newParts := strings.Split(newName, delimiter)
-
-	// Determine the shorter length to prevent out-of-range errors
-	minLen := len(oldParts)
-	if len(newParts) < minLen {
-		minLen = len(newParts)
-	}
-
-	// Iterate to find the common prefix
-	commonParts := []string{}
-	for i := 0; i < minLen; i++ {
-		if oldParts[i] == newParts[i] {
-			commonParts = append(commonParts, oldParts[i])
-		} else {
-			break
-		}
-	}
-
-	// If there's no common path, return an empty string
-	if len(commonParts) == 0 {
-		return ""
-	}
-
-	// Reconstruct the common path
-	commonPath := strings.Join(commonParts, delimiter)
-	return commonPath
+	return helpers.FindCommonPath(oldName, newName, delimiter)
 }
