@@ -117,18 +117,26 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 			Message:      "Invalid recipient",
 		}
 	}
-	s.Log("[LMTP] Looking up user ID for address: %s", toAddress.FullAddress())
-	userId, err := s.backend.db.GetUserIDByAddress(context.Background(), toAddress.FullAddress())
+	fullAddress := toAddress.FullAddress()
+	s.Log("[LMTP] Looking up user ID for address: %s", fullAddress)
+	userId, err := s.backend.db.GetUserIDByAddress(s.ctx, fullAddress)
 	if err != nil {
 		s.Log("[LMTP] Failed to get user ID by address: %v", err)
 		return &smtp.SMTPError{
 			Code:         550,
-			EnhancedCode: smtp.EnhancedCode{5, 0, 2}, // TODO: Check the correct code
+			EnhancedCode: smtp.EnhancedCode{5, 0, 2},
 			Message:      "No such user here",
 		}
 	}
 	s.User = server.NewUser(toAddress, userId)
-	s.Log("[LMTP] Recipient accepted: %s (UserID: %d)", toAddress.FullAddress(), userId)
+
+	// Ensure default mailboxes (INBOX/Drafts/Sent/Spam/Trash) exist
+	err = s.backend.db.CreateDefaultMailboxes(s.ctx, userId)
+	if err != nil {
+		return s.InternalError("[LMTP] failed to create default mailboxes: %v", err)
+	}
+
+	s.Log("[LMTP] Recipient accepted: %s (UserID: %d)", fullAddress, userId)
 	return nil
 }
 
