@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	--
 	-- Information for restoring messages from S3
 	--
-	mailbox_name TEXT,			    -- Store the mailbox path for restoring messages
+	mailbox_path TEXT,			    -- Store the mailbox path for restoring messages
 
 	flags_changed_at TIMESTAMPTZ,     -- Track the last time flags were changed
 	expunged_at TIMESTAMPTZ,			-- Track the last time the message was expunged
@@ -173,5 +173,5 @@ CREATE INDEX IF NOT EXISTS idx_vacation_responses_user_sender ON vacation_respon
 -- Index for cleanup of old responses
 CREATE INDEX IF NOT EXISTS idx_vacation_responses_response_date ON vacation_responses (response_date);
 
--- Test user for development
--- INSERT into users (username, password) values ('user@domain.com', '$2a$10$59jW86pmlBLK2CF.hqmNpOWDPFRPKLWm4u6mpP/p.q1gtH3P0sqyK') ON CONFLICT (username) DO NOTHING;
+-- Test user for development "user@domain.com" with password "password"
+INSERT into users (username, password) values ('user@domain.com', '$2a$10$59jW86pmlBLK2CF.hqmNpOWDPFRPKLWm4u6mpP/p.q1gtH3P0sqyK') ON CONFLICT (username) DO NOTHING;

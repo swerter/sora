@@ -3,9 +3,11 @@ package imap
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
+	"github.com/migadu/sora/consts"
 )
 
 func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest string) error {
@@ -67,6 +69,20 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 	// Write the CopyData (COPYUID response)
 	if err := w.WriteCopyData(copyData); err != nil {
 		return s.internalError("failed to write COPYUID: %v", err)
+	}
+
+	// Check if destination is Trash folder
+	isTrashFolder := strings.EqualFold(dest, "Trash") || dest == consts.MAILBOX_TRASH
+	if isTrashFolder && len(mappedDestUIDs) > 0 {
+		s.Log("Automatically marking %d moved messages as seen in Trash folder", len(mappedDestUIDs))
+
+		for _, uid := range mappedDestUIDs {
+			_, err := s.server.db.AddMessageFlags(ctx, uid, destMailbox.ID, []imap.Flag{imap.FlagSeen})
+			if err != nil {
+				s.Log("Failed to mark message UID %d as seen in Trash: %v", uid, err)
+				// Continue with other messages even if one fails
+			}
+		}
 	}
 
 	// Expunge messages in the source mailbox (optional)

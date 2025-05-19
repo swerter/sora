@@ -166,10 +166,27 @@ func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID
 		return 0, consts.ErrDBUpdateFailed
 	}
 
+	// Log the destination mailbox name for debugging
+	log.Printf("Copying message to mailbox '%s'", destMailboxName)
+
+	// Get the updated_modseq of the source message to use for the created_modseq of the copy
+	var srcUpdatedModSeq int64
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(updated_modseq, created_modseq) 
+		FROM messages 
+		WHERE mailbox_id = $1 AND uid = $2
+	`, srcMailboxID, srcMessageUID).Scan(&srcUpdatedModSeq)
+	if err != nil {
+		log.Printf("Failed to get source message modseq: %v", err)
+		return 0, consts.ErrDBQueryFailed
+	}
+
+	log.Printf("Using source message modseq %d for copy's created_modseq", srcUpdatedModSeq)
+
 	var newMsgUID imap.UID
 	err = tx.QueryRow(ctx, `
 		INSERT INTO messages
-			(user_id, mailbox_id, mailbox_name, uid, content_hash, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, uploaded, recipients_json, text_body, text_body_tsv, created_modseq)
+			(user_id, mailbox_id, mailbox_path, uid, content_hash, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, uploaded, recipients_json, text_body, text_body_tsv, created_modseq)
 		SELECT
 			user_id, $1, $2, $3, content_hash, message_id, flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, uploaded, recipients_json, text_body, text_body_tsv, nextval('messages_modseq')
 		FROM
@@ -280,14 +297,14 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO messages
-			(user_id, mailbox_id, mailbox_name, uid, message_id, content_hash, flags, internal_date, size, text_body, text_body_tsv, subject, sent_date, in_reply_to, body_structure, recipients_json, created_modseq)
+			(user_id, mailbox_id, mailbox_path, uid, message_id, content_hash, flags, internal_date, size, text_body, text_body_tsv, subject, sent_date, in_reply_to, body_structure, recipients_json, created_modseq)
 		VALUES
-			(@user_id, @mailbox_id, @mailbox_name, @uid, @message_id, @content_hash, @flags, @internal_date, @size, @text_body, to_tsvector('simple', @text_body), @subject, @sent_date, @in_reply_to, @body_structure, @recipients_json, nextval('messages_modseq'))
+			(@user_id, @mailbox_id, @mailbox_path, @uid, @message_id, @content_hash, @flags, @internal_date, @size, @text_body, to_tsvector('simple', @text_body), @subject, @sent_date, @in_reply_to, @body_structure, @recipients_json, nextval('messages_modseq'))
 		RETURNING id
 	`, pgx.NamedArgs{
 		"user_id":         options.UserID,
 		"mailbox_id":      options.MailboxID,
-		"mailbox_name":    options.MailboxName,
+		"mailbox_path":    options.MailboxName,
 		"uid":             highestUID,
 		"message_id":      saneMessageID,
 		"content_hash":    options.ContentHash,
@@ -355,9 +372,15 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 	return messageRowId, highestUID, nil
 }
 
-func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailboxID, destMailboxID int64) (map[int64]int64, error) {
-	// Map to store the original message ID to new UID mapping
-	messageUIDMap := make(map[int64]int64)
+func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailboxID, destMailboxID int64) (map[imap.UID]imap.UID, error) {
+	// Map to store the original UID to new UID mapping
+	messageUIDMap := make(map[imap.UID]imap.UID)
+
+	// Check if source and destination mailboxes are the same
+	if srcMailboxID == destMailboxID {
+		log.Printf("[MOVE] Source and destination mailboxes are the same (ID=%d). Aborting move operation.", srcMailboxID)
+		return nil, fmt.Errorf("cannot move messages within the same mailbox")
+	}
 
 	// Ensure the destination mailbox exists
 	_, err := db.GetMailbox(ctx, destMailboxID)
@@ -374,80 +397,140 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 	}
 	defer tx.Rollback(ctx) // Rollback if any error occurs
 
-	// Move the messages and assign new UIDs in the destination mailbox
-	query := `
-		WITH inserted_messages AS (
-			-- Insert the selected rows into the destination mailbox
-			INSERT INTO messages (
-					user_id,
-					content_hash, 
-					uploaded,
-					message_id, 
-					in_reply_to, 
-					subject, 
-					sent_date, 
-					internal_date, 
-					flags, 
-					size, 
-					body_structure, 
-					recipient_json,
-					text_body, 
-					text_body_tsv, 
-					mailbox_id, 
-					mailbox_path, 
-					flags_changed_at,
-					created_modseq
-			)
-			SELECT
-			    user_id,
-					content_hash, 
-					uploaded,
-					message_id, 
-					in_reply_to, 
-					subject, 
-					sent_date, 
-					internal_date, 
-					flags, 
-					size, 
-					body_structure, 
-					recipient_json,
-					text_body, 
-					text_body_tsv, 
-					$2 AS mailbox_id,  -- Assign to the new mailbox
-					mailbox_path, 
-					NOW() AS flags_changed_at,
-					nextval('messages_modseq')
-			FROM messages
-			WHERE mailbox_id = $1 AND id = ANY($3)
-			RETURNING id
-	),
-	numbered_messages AS (
-			-- Generate new UIDs based on row numbers
-			SELECT id, 
-						ROW_NUMBER() OVER (ORDER BY id) + (SELECT COALESCE(MAX(id), 0) FROM messages WHERE mailbox_id = $2) AS uid
-			FROM inserted_messages
-	)
-	-- Delete the original messages from the source mailbox
-	DELETE FROM messages
-	WHERE mailbox_id = $1 AND id = ANY($3)
-	RETURNING id;
-	`
-
-	// Execute the query
-	rows, err := tx.Query(ctx, query, srcMailboxID, destMailboxID, ids)
+	// Get the count of messages to move
+	var messageCount int
+	err = tx.QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE mailbox_id = $1 AND uid = ANY($2)", srcMailboxID, ids).Scan(&messageCount)
 	if err != nil {
-		log.Printf("Failed to move messages: %v", err)
-		return nil, fmt.Errorf("failed to move messages: %v", err)
+		log.Printf("Failed to count messages to move: %v", err)
+		return nil, consts.ErrInternalError
+	}
+
+	if messageCount == 0 {
+		log.Printf("[MOVE] No messages found to move from mailbox %d", srcMailboxID)
+		return messageUIDMap, nil
+	}
+
+	// Lock the destination mailbox and get the current highest UID
+	var highestUID int64
+	err = tx.QueryRow(ctx, `
+		SELECT highest_uid 
+		FROM mailboxes 
+		WHERE id = $1 
+		FOR UPDATE;`, destMailboxID).Scan(&highestUID)
+	if err != nil {
+		log.Printf("Failed to fetch highest UID: %v", err)
+		return nil, consts.ErrDBQueryFailed
+	}
+
+	// Get the source message IDs and UIDs
+	rows, err := tx.Query(ctx, `
+		SELECT id, uid FROM messages 
+		WHERE mailbox_id = $1 AND uid = ANY($2)
+		ORDER BY id
+	`, srcMailboxID, ids)
+	if err != nil {
+		log.Printf("Failed to query source messages: %v", err)
+		return nil, consts.ErrInternalError
 	}
 	defer rows.Close()
 
-	// Iterate through the moved messages to map original ID to the new UID
+	// Collect message IDs and assign new UIDs
+	var messageIDs []int64
+	var newUIDs []int64
 	for rows.Next() {
-		var messageID, newUID int64
-		if err := rows.Scan(&messageID, &newUID); err != nil {
+		var messageID int64
+		var sourceUID imap.UID
+		if err := rows.Scan(&messageID, &sourceUID); err != nil {
 			return nil, fmt.Errorf("failed to scan message ID and UID: %v", err)
 		}
-		messageUIDMap[messageID] = newUID
+		messageIDs = append(messageIDs, messageID)
+
+		highestUID++
+		newUIDs = append(newUIDs, highestUID)
+		messageUIDMap[sourceUID] = imap.UID(highestUID)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating through source messages: %v", err)
+	}
+
+	// Update the highest UID in the destination mailbox
+	_, err = tx.Exec(ctx, `
+		UPDATE mailboxes 
+		SET highest_uid = $1 
+		WHERE id = $2
+	`, highestUID, destMailboxID)
+	if err != nil {
+		log.Printf("Failed to update highest UID: %v", err)
+		return nil, consts.ErrDBUpdateFailed
+	}
+
+	// Move each message individually with its assigned UID
+	for i, messageID := range messageIDs {
+		newUID := newUIDs[i]
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO messages (
+				user_id,
+				content_hash, 
+				uploaded,
+				message_id, 
+				in_reply_to, 
+				subject, 
+				sent_date, 
+				internal_date, 
+				flags, 
+				size, 
+				body_structure, 
+				recipients_json,
+				text_body, 
+				text_body_tsv, 
+				mailbox_id, 
+				mailbox_path, 
+				flags_changed_at,
+				created_modseq,
+				uid
+			)
+			SELECT
+				user_id,
+				content_hash, 
+				uploaded,
+				message_id, 
+				in_reply_to, 
+				subject, 
+				sent_date, 
+				internal_date, 
+				flags, 
+				size, 
+				body_structure, 
+				recipients_json,
+				text_body, 
+				text_body_tsv, 
+				$1 AS mailbox_id,  -- Assign to the new mailbox
+				mailbox_path, 
+				NOW() AS flags_changed_at,
+				nextval('messages_modseq'),
+				$2 -- Assign the new UID
+			FROM messages
+			WHERE id = $3 AND mailbox_id = $4
+		`, destMailboxID, newUID, messageID, srcMailboxID)
+
+		if err != nil {
+			log.Printf("Failed to insert message %d into destination mailbox: %v", messageID, err)
+			return nil, fmt.Errorf("failed to move message %d: %v", messageID, err)
+		}
+	}
+
+	// Mark the original messages as expunged in the source mailbox
+	_, err = tx.Exec(ctx, `
+		UPDATE messages
+		SET expunged_at = NOW(), expunged_modseq = nextval('messages_modseq')
+		WHERE mailbox_id = $1 AND id = ANY($2)
+	`, srcMailboxID, messageIDs)
+
+	if err != nil {
+		log.Printf("Failed to mark original messages as expunged: %v", err)
+		return nil, fmt.Errorf("failed to mark original messages as expunged: %v", err)
 	}
 
 	// Commit the transaction
@@ -456,6 +539,7 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 		return nil, consts.ErrInternalError
 	}
 
+	log.Printf("[MOVE] Successfully moved %d messages from mailbox %d to %d", len(messageUIDMap), srcMailboxID, destMailboxID)
 	return messageUIDMap, nil
 }
 
@@ -673,6 +757,9 @@ func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, nu
 	// Log the query for debugging
 	log.Printf("GetMessagesBySeqSet query: %s, args: %v", query, args)
 
+	// Log the query for debugging
+	log.Printf("[GetMessagesBySeqSet] Query: %s, args: %v", query, args)
+
 	// Execute the query
 	rows, err := db.Pool.Query(ctx, query, args...)
 	if err != nil {
@@ -695,6 +782,9 @@ func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, nu
 		}
 		msg.BodyStructure = *bodyStructure
 		messages = append(messages, msg)
+
+		// Debug log each message found
+		log.Printf("[GetMessagesBySeqSet] Found message UID %d, Seq %d", msg.UID, msg.Seq)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error fetching messages: %v", err)
@@ -823,14 +913,41 @@ func (db *Database) RemoveMessageFlags(ctx context.Context, messageID imap.UID, 
 }
 
 func (db *Database) ExpungeMessageUIDs(ctx context.Context, mailboxID int64, uids ...imap.UID) error {
-	_, err := db.Pool.Exec(ctx, `
+	if len(uids) == 0 {
+		log.Printf("[EXPUNGE] No UIDs to expunge for mailbox %d", mailboxID)
+		return nil
+	}
+
+	log.Printf("[EXPUNGE] Expunging %d messages from mailbox %d: %v", len(uids), mailboxID, uids)
+
+	result, err := db.Pool.Exec(ctx, `
 		UPDATE messages
 		SET expunged_at = NOW(), expunged_modseq = nextval('messages_modseq')
-		WHERE mailbox_id = $1 AND uid = ANY($2)
+		WHERE mailbox_id = $1 AND uid = ANY($2) AND expunged_at IS NULL
 	`, mailboxID, uids)
+
 	if err != nil {
+		log.Printf("[EXPUNGE] Error expunging messages: %v", err)
 		return err
 	}
+
+	rowsAffected := result.RowsAffected()
+	log.Printf("[EXPUNGE] Successfully expunged %d messages from mailbox %d", rowsAffected, mailboxID)
+
+	// Double-check that the messages were actually expunged
+	var count int
+	err = db.Pool.QueryRow(ctx, `
+		SELECT COUNT(*) 
+		FROM messages 
+		WHERE mailbox_id = $1 AND uid = ANY($2) AND expunged_at IS NULL
+	`, mailboxID, uids).Scan(&count)
+
+	if err != nil {
+		log.Printf("[EXPUNGE] Error checking if messages were expunged: %v", err)
+	} else if count > 0 {
+		log.Printf("[EXPUNGE] Warning: %d messages were not expunged", count)
+	}
+
 	return nil
 }
 
@@ -1202,15 +1319,16 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 
 	log.Printf("[POLL] Polling mailbox %d since modseq %d", mailboxID, sinceModSeq)
 
-	// First, check for any new messages (created_modseq > sinceModSeq)
-	// This is critical for handling messages delivered via LMTP
+	// First, check for any new or updated messages
+	// - For new messages: created_modseq >= sinceModSeq (to catch messages created at exactly sinceModSeq)
+	// - For updated messages: updated_modseq > sinceModSeq (strictly greater to avoid infinite loops)
 	newMsgRows, err := tx.Query(ctx, `
-		SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS seq_num, flags
+		SELECT uid, ROW_NUMBER() OVER (ORDER BY id) AS seq_num, flags
 		FROM messages
 		WHERE 
 			mailbox_id = $1 AND 
 			expunged_at IS NULL AND
-			created_modseq > $2
+			created_modseq >= $2
 		ORDER BY id
 	`, mailboxID, sinceModSeq)
 	if err != nil {
@@ -1235,8 +1353,8 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 
 	// Now fetch messages updated or expunged since last poll
 	rows, err := tx.Query(ctx, `
-		SELECT id, seq_num, flags, expunged_modseq FROM (
-			SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS seq_num, flags, created_modseq, updated_modseq, expunged_modseq
+		SELECT uid, ROW_NUMBER() OVER (ORDER BY id) AS seq_num, flags, expunged_modseq FROM (
+			SELECT uid, id, flags, created_modseq, updated_modseq, expunged_modseq
 			FROM messages
 			WHERE 
 				mailbox_id = $1 AND 
@@ -1246,7 +1364,7 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 					(expunged_modseq IS NOT NULL AND expunged_modseq > $2)
 				)
 		) AS sub
-		ORDER BY seq_num DESC
+		ORDER BY id
 	`, mailboxID, sinceModSeq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query mailbox updates: %w", err)
@@ -1296,6 +1414,45 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 
 	log.Printf("[POLL] Mailbox %d has %d messages, current modseq: %d", mailboxID, numMessages, currentModSeq)
 
+	// Add explicit expunge updates for messages that were moved or deleted
+	// This ensures clients are properly notified about messages that no longer exist
+	expungedRows, err := tx.Query(ctx, `
+		SELECT uid
+		FROM messages
+		WHERE 
+			mailbox_id = $1 AND 
+			expunged_at IS NOT NULL AND
+			expunged_modseq > $2
+		ORDER BY id
+	`, mailboxID, sinceModSeq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query expunged messages: %w", err)
+	}
+	defer expungedRows.Close()
+
+	var expungedUIDs []imap.UID
+	for expungedRows.Next() {
+		var uid imap.UID
+		if err := expungedRows.Scan(&uid); err != nil {
+			return nil, fmt.Errorf("failed to scan expunged message: %w", err)
+		}
+		expungedUIDs = append(expungedUIDs, uid)
+	}
+
+	if len(expungedUIDs) > 0 {
+		log.Printf("[POLL] Found %d explicitly expunged messages in mailbox %d: %v",
+			len(expungedUIDs), mailboxID, expungedUIDs)
+
+		// Add explicit expunge updates
+		for _, uid := range expungedUIDs {
+			update := MessageUpdate{
+				UID:       uid,
+				IsExpunge: true,
+			}
+			updates = append(updates, update)
+		}
+	}
+
 	return &MailboxPoll{
 		Updates:     updates,
 		NumMessages: numMessages,
@@ -1319,15 +1476,36 @@ func (db *Database) GetUserIDByAddress(ctx context.Context, username string) (in
 func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Message, error) {
 	var messages []Message
 
+	// First, check if there are any messages in the mailbox at all (including expunged)
+	var totalCount, expungedCount int
+	err := db.Pool.QueryRow(ctx, `
+		SELECT 
+			COUNT(*) as total_count,
+			COUNT(*) FILTER (WHERE expunged_at IS NOT NULL) as expunged_count
+		FROM 
+			messages
+		WHERE 
+			mailbox_id = $1
+	`, mailboxID).Scan(&totalCount, &expungedCount)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to count messages: %v", err)
+	}
+
+	log.Printf("[LIST] Mailbox %d has %d total messages, %d expunged, %d active",
+		mailboxID, totalCount, expungedCount, totalCount-expungedCount)
+
+	// Now query only the non-expunged messages
 	query := `
-			SELECT 
-				uid, size, created_modseq, updated_modseq, expunged_modseq, content_hash, uploaded
-			FROM 
-				messages
-			WHERE 
-				mailbox_id = $1 AND 
-				expunged_at IS NULL
-			ORDER BY uid`
+		SELECT 
+			uid, size, created_modseq, updated_modseq, expunged_modseq, content_hash, uploaded
+		FROM 
+			messages
+		WHERE 
+			mailbox_id = $1 AND 
+			expunged_at IS NULL
+		ORDER BY uid`
+
 	rows, err := db.Pool.Query(ctx, query, mailboxID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query messages: %v", err)
@@ -1346,6 +1524,7 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 		return nil, fmt.Errorf("error fetching messages: %v", err)
 	}
 
+	log.Printf("[LIST] Returning %d messages for mailbox %d", len(messages), mailboxID)
 	return messages, nil
 }
 
@@ -1398,4 +1577,29 @@ func (d *Database) FindExistingContentHashes(ctx context.Context, ids []string) 
 	}
 
 	return result, nil
+}
+
+// GetMessageSeqNum calculates the correct sequence number for a message with the given UID
+// This is useful for recovering from sequence number inconsistencies
+func (db *Database) GetMessageSeqNum(ctx context.Context, uid imap.UID, mailboxID int64) (uint32, error) {
+	var seqNum uint32
+
+	// Calculate the sequence number as the row number when ordering by ID
+	// This matches how sequence numbers are assigned in other parts of the code
+	err := db.Pool.QueryRow(ctx, `
+		SELECT ROW_NUMBER() OVER (ORDER BY id) AS seq_num
+		FROM messages
+		WHERE uid = $1 AND mailbox_id = $2 AND expunged_at IS NULL
+	`, uid, mailboxID).Scan(&seqNum)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			// Message not found or already expunged
+			log.Printf("GetMessageSeqNum: Message UID %d not found in mailbox %d", uid, mailboxID)
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to get sequence number for message UID %d: %w", uid, err)
+	}
+
+	return seqNum, nil
 }

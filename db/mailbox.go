@@ -232,10 +232,9 @@ func (db *Database) DeleteMailbox(ctx context.Context, mailboxID int64) error {
 	}
 	defer tx.Rollback(ctx) // Ensure the transaction is rolled back if an error occurs
 
-	// Set mailbox_name (path) for possible restoration
 	_, err = tx.Exec(ctx, `
 		UPDATE messages SET 
-			mailbox_name = $1 
+			mailbox_path = $1 
 		WHERE mailbox_id = $2`, mbox.Name, mailboxID)
 	if err != nil {
 		log.Printf("Failed to set path on messages of folder %d : %v", mailboxID, err)
@@ -316,6 +315,7 @@ func (d *Database) GetMailboxSummary(ctx context.Context, mailboxID int64) (*Mai
 		FROM messages
 		WHERE mailbox_id = $1 AND expunged_at IS NULL;
 	`
+	log.Printf("[MAILBOX] Running summary query: %s", query)
 	row := tx.QueryRow(ctx, query, mailboxID, FlagRecent, FlagSeen)
 
 	var s MailboxSummary
@@ -326,11 +326,13 @@ func (d *Database) GetMailboxSummary(ctx context.Context, mailboxID int64) (*Mai
 
 	// Double-check the message count with a separate query
 	var countCheck int
-	err = tx.QueryRow(ctx, `
+	countQuery := `
 		SELECT COUNT(*) 
 		FROM messages 
 		WHERE mailbox_id = $1 AND expunged_at IS NULL
-	`, mailboxID).Scan(&countCheck)
+	`
+	log.Printf("[MAILBOX] Running count check query: %s", countQuery)
+	err = tx.QueryRow(ctx, countQuery, mailboxID).Scan(&countCheck)
 
 	if err != nil {
 		log.Printf("[MAILBOX] Error in count check: %v", err)

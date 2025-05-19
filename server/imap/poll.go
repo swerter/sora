@@ -55,9 +55,29 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 	for _, update := range poll.Updates {
 		if update.IsExpunge {
 			// Handle expunged messages
-			mailbox.mboxTracker.QueueExpunge(update.SeqNum)
-			numExpunged++
-			s.Log("Expunged message: UID=%d, SeqNum=%d", update.UID, update.SeqNum)
+			if update.SeqNum > 0 {
+				// Only queue expunge if we have a valid sequence number
+				mailbox.mboxTracker.QueueExpunge(update.SeqNum)
+				numExpunged++
+				s.Log("Expunged message: UID=%d, SeqNum=%d", update.UID, update.SeqNum)
+			} else {
+				// For expunged messages without a valid sequence number,
+				// we need to find the sequence number or skip the notification
+				seqNum, err := s.server.db.GetMessageSeqNum(ctx, update.UID, mailbox.ID)
+				if err != nil {
+					s.Log("Error getting sequence number for expunged message UID %d: %v", update.UID, err)
+					continue
+				}
+
+				if seqNum > 0 {
+					mailbox.mboxTracker.QueueExpunge(seqNum)
+					numExpunged++
+					s.Log("Expunged message (recovered seqnum): UID=%d, SeqNum=%d", update.UID, seqNum)
+				} else {
+					// Message already expunged or not found
+					s.Log("Skipping expunge notification for already expunged message: UID=%d", update.UID)
+				}
+			}
 		} else {
 			// Handle flag changes
 			flags := db.BitwiseToFlags(update.BitwiseFlags)
