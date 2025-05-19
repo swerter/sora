@@ -68,7 +68,7 @@ func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, o
 		}
 
 		if len(options.BodySection) > 0 {
-			if err := s.handleBodySections(m, bodyData, options); err != nil {
+			if err := s.handleBodySections(m, bodyData, options, msg); err != nil {
 				return err
 			}
 		}
@@ -156,7 +156,7 @@ func (s *IMAPSession) handleBinarySectionSize(w *imapserver.FetchResponseWriter,
 }
 
 // Fetch helper to handle BODY sections for a message
-func (s *IMAPSession) handleBodySections(w *imapserver.FetchResponseWriter, bodyData []byte, options *imap.FetchOptions) error {
+func (s *IMAPSession) handleBodySections(w *imapserver.FetchResponseWriter, bodyData []byte, options *imap.FetchOptions, msg *db.Message) error {
 	for _, section := range options.BodySection {
 		buf := imapserver.ExtractBodySection(bytes.NewReader(bodyData), section)
 		wc := w.WriteBodySection(section, int64(len(buf)))
@@ -167,6 +167,19 @@ func (s *IMAPSession) handleBodySections(w *imapserver.FetchResponseWriter, body
 		}
 		if closeErr != nil {
 			return closeErr
+		}
+		// Set \Seen flag when BODY[] is requested (empty section means full body)
+		// According to IMAP RFC, fetching the full message body should set \Seen flag
+		// unless the PEEK option is specified (BODY.PEEK[])
+		if len(section.Part) == 0 && section.Specifier == "" {
+			ctx := context.Background()
+			// We need to get the message UID from the parent function
+			// The msg parameter is available in the parent fetchMessage function
+			_, err := s.server.db.AddMessageFlags(ctx, msg.UID, s.mailbox.ID, []imap.Flag{imap.FlagSeen})
+			if err != nil {
+				log.Printf("Failed to set \\Seen flag for message UID %d: %v", msg.UID, err)
+				// Continue despite error - fetching the body is more important than setting the flag
+			}
 		}
 	}
 	return nil
