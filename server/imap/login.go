@@ -57,6 +57,10 @@ func (s *IMAPSession) Login(address, password string) error {
 
 	s.IMAPUser = NewIMAPUser(addressSt, userID)
 
+	// Set the User field in the embedded Session struct
+	// This ensures that Session.Log() will properly show the user information
+	s.Session.User = &s.IMAPUser.User
+
 	s.Log("User %s successfully authenticated", address)
 	return nil
 }

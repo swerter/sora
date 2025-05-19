@@ -47,6 +47,8 @@ func (s *IMAPSession) Close() error {
 		userMutex.Lock()
 		s.Log("Closing session for user: %v", fullAddress)
 		s.IMAPUser = nil
+		// Also clear the User field in the embedded Session struct
+		s.Session.User = nil
 		userMutex.Unlock()
 	} else {
 		// Log when a client connection drops before authentication
