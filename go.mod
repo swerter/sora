@@ -1,6 +1,6 @@
 module github.com/migadu/sora
 
-go 1.23.1
+go 1.23.7
 
 require (
 	github.com/emersion/go-imap/v2 v2.0.0-beta.5
