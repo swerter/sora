@@ -1,28 +1,22 @@
 package imap
 
 import (
-	"context"
-	"log"
-
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 )
 
 func (s *IMAPSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCriteria, options *imap.SearchOptions) (*imap.SearchData, error) {
-	ctx := context.Background()
-
 	criteria = s.decodeSearchCriteria(criteria)
 
-	if s.mailbox.numMessages == 0 && len(criteria.SeqNum) > 0 {
-		log.Println("Skipping UID SEARCH because mailbox is empty")
+	if s.currentNumMessages == 0 && len(criteria.SeqNum) > 0 {
+		s.Log("[SEARCH] skipping UID SEARCH because mailbox is empty")
 		return &imap.SearchData{
 			All:   imap.UIDSet{},
-			UID:   numKind == imapserver.NumKindUID,
 			Count: 0,
 		}, nil
 	}
 
-	messages, err := s.server.db.GetMessagesWithCriteria(ctx, s.mailbox.ID, criteria)
+	messages, err := s.server.db.GetMessagesWithCriteria(s.ctx, s.selectedMailbox.ID, criteria)
 	if err != nil {
 		return nil, s.internalError("failed to search messages: %v", err)
 	}
@@ -33,7 +27,7 @@ func (s *IMAPSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 	)
 	for _, msg := range messages {
 		uids.AddNum(msg.UID)
-		seqNums.AddNum(s.mailbox.sessionTracker.EncodeSeqNum(msg.Seq))
+		seqNums.AddNum(s.sessionTracker.EncodeSeqNum(msg.Seq))
 	}
 
 	var all imap.NumSet
@@ -46,9 +40,35 @@ func (s *IMAPSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 
 	searchData := &imap.SearchData{
 		All:   all,
-		UID:   numKind == imapserver.NumKindUID, // Set UID flag if searching by UID
-		Count: uint32(len(uids)),                // Set the count of matching messages
+		Count: uint32(len(uids)),
 	}
+
+	// hasModSeqCriteria := criteria.ModSeq != nil
+	// _, hasCondStore := s.server.caps[imap.CapCondStore]
+
+	// if hasCondStore && hasModSeqCriteria {
+	// 	var highestModSeq uint64
+	// 	for _, msg := range messages {
+	// 		var msgModSeq int64
+	// 		msgModSeq = msg.CreatedModSeq
+
+	// 		if msg.UpdatedModSeq != nil && *msg.UpdatedModSeq > msgModSeq {
+	// 			msgModSeq = *msg.UpdatedModSeq
+	// 		}
+
+	// 		if msg.ExpungedModSeq != nil && *msg.ExpungedModSeq > msgModSeq {
+	// 			msgModSeq = *msg.ExpungedModSeq
+	// 		}
+
+	// 		if uint64(msgModSeq) > highestModSeq {
+	// 			highestModSeq = uint64(msgModSeq)
+	// 		}
+	// 	}
+
+	// 	if highestModSeq > 0 {
+	// 		searchData.ModSeq = highestModSeq
+	// 	}
+	// }
 
 	searchData.Count = uint32(len(messages))
 
@@ -60,7 +80,7 @@ func (s *IMAPSession) decodeSearchCriteria(criteria *imap.SearchCriteria) *imap.
 
 	decoded.SeqNum = make([]imap.SeqSet, len(criteria.SeqNum))
 	for i, seqSet := range criteria.SeqNum {
-		decoded.SeqNum[i] = s.mailbox.decodeNumSet(seqSet).(imap.SeqSet)
+		decoded.SeqNum[i] = s.decodeNumSet(seqSet).(imap.SeqSet)
 	}
 
 	decoded.Not = make([]imap.SearchCriteria, len(criteria.Not))

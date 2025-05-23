@@ -87,7 +87,7 @@ func (w *UploadWorker) processPendingUploads(ctx context.Context) error {
 	var wg sync.WaitGroup
 
 	for {
-		uploads, err := w.db.ListPendingUploads(ctx, w.instanceID, consts.BATCH_SIZE)
+		uploads, err := w.db.AcquireAndLeasePendingUploads(ctx, w.instanceID, consts.BATCH_SIZE)
 		if err != nil {
 			return fmt.Errorf("failed to list pending uploads: %w", err)
 		}

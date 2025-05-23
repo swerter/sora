@@ -3,7 +3,7 @@ module github.com/migadu/sora
 go 1.23.1
 
 require (
-	github.com/emersion/go-imap/v2 v2.0.0-beta.5.0.20250414124145-ad3a71d773b0
+	github.com/emersion/go-imap/v2 v2.0.0-beta.5.0.20250515140551-a1e4f0b6eb30
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-smtp v0.21.3
 	github.com/foxcpp/go-sieve v0.0.0-20240130002450-72d6b002882a

@@ -98,7 +98,7 @@ func (db *Database) GetMailboxes(ctx context.Context, userID int64, subscribed b
 }
 
 // GetMailbox fetches the mailbox
-func (db *Database) GetMailbox(ctx context.Context, mailboxID int64) (*DBMailbox, error) {
+func (db *Database) GetMailbox(ctx context.Context, mailboxID int64, userID int64) (*DBMailbox, error) {
 	var dbParentID sql.NullInt64
 	var mailboxName string
 	var hasChildren bool
@@ -114,8 +114,8 @@ func (db *Database) GetMailbox(ctx context.Context, mailboxID int64) (*DBMailbox
 				WHERE child.parent_id = m.id
 			) AS has_children
 		FROM mailboxes m
-		WHERE id = $1
-	`, mailboxID).Scan(&mailboxID, &mailboxName, &uidValidityInt64, &dbParentID, &subscribed, &hasChildren)
+		WHERE id = $1 AND user_id = $2
+	`, mailboxID, userID).Scan(&mailboxID, &mailboxName, &uidValidityInt64, &dbParentID, &subscribed, &hasChildren)
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -218,8 +218,8 @@ func (db *Database) CreateDefaultMailbox(ctx context.Context, userID int64, name
 }
 
 // DeleteMailbox deletes a mailbox for a specific user by id
-func (db *Database) DeleteMailbox(ctx context.Context, mailboxID int64) error {
-	mbox, err := db.GetMailbox(ctx, mailboxID)
+func (db *Database) DeleteMailbox(ctx context.Context, mailboxID int64, userID int64) error {
+	mbox, err := db.GetMailbox(ctx, mailboxID, userID)
 	if err != nil {
 		log.Printf("Failed to fetch mailbox %d: %v", mailboxID, err)
 		return consts.ErrMailboxNotFound
@@ -360,9 +360,9 @@ func (d *Database) GetMailboxMessageCountAndSizeSum(ctx context.Context, mailbox
 }
 
 // SetSubscribed updates the subscription status of a mailbox, but ignores unsubscribing for root folders.
-func (db *Database) SetMailboxSubscribed(ctx context.Context, mailboxID int64, subscribed bool) error {
+func (db *Database) SetMailboxSubscribed(ctx context.Context, mailboxID int64, userID int64, subscribed bool) error {
 	// Update the subscription status only if the mailbox is not a root folder
-	mailbox, err := db.GetMailbox(ctx, mailboxID)
+	mailbox, err := db.GetMailbox(ctx, mailboxID, userID)
 	if err != nil {
 		log.Printf("Failed to fetch mailbox %d: %v", mailboxID, err)
 		return consts.ErrMailboxNotFound
@@ -399,7 +399,7 @@ func (db *Database) RenameMailbox(ctx context.Context, mailboxID int64, userID i
 	defer tx.Rollback(ctx)
 
 	// Fetch the mailbox to rename
-	mailbox, err := db.GetMailbox(ctx, mailboxID)
+	mailbox, err := db.GetMailbox(ctx, mailboxID, userID)
 	if err != nil {
 		return consts.ErrMailboxNotFound
 	}

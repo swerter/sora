@@ -1,7 +1,6 @@
 package imap
 
 import (
-	"log"
 	"time"
 
 	"github.com/emersion/go-imap/v2/imapserver"
@@ -10,7 +9,7 @@ import (
 var idlePollInterval = 15 * time.Second
 
 func (s *IMAPSession) Idle(w *imapserver.UpdateWriter, done <-chan struct{}) error {
-	log.Println("Client entered IDLE mode")
+	s.Log("client entered IDLE mode")
 
 	for {
 		if stop, err := s.idleLoop(w, done); err != nil {

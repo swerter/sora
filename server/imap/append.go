@@ -2,11 +2,9 @@ package imap
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 
 	"github.com/emersion/go-imap/v2"
@@ -21,10 +19,10 @@ import (
 )
 
 func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *imap.AppendOptions) (*imap.AppendData, error) {
-	ctx := context.Background()
-	mailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), mboxName)
+	mailbox, err := s.server.db.GetMailboxByName(s.ctx, s.UserID(), mboxName)
 	if err != nil {
 		if err == consts.ErrMailboxNotFound {
+			s.Log("[APPEND] mailbox '%s' does not exist", mboxName)
 			return nil, &imap.Error{
 				Type: imap.StatusResponseTypeNo,
 				Code: imap.ResponseCodeNonExistent,
@@ -70,7 +68,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 
 	plaintextBody, err := helpers.ExtractPlaintextBody(messageContent)
 	if err != nil {
-		log.Printf("Failed to extract plaintext body: %v", err)
+		s.Log("[APPEND] failed to extract plaintext body: %v", err)
 		// Continue with the append operation even if plaintext body extraction fails,
 		// it will default to an empty string if not present
 	}
@@ -84,7 +82,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 
 	size := int64(len(messageBytes))
 
-	_, messageUID, err := s.server.db.InsertMessage(ctx,
+	_, messageUID, err := s.server.db.InsertMessage(s.ctx,
 		&db.InsertMessageOptions{
 			UserID:        s.UserID(),
 			MailboxID:     mailbox.ID,
@@ -117,6 +115,9 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		}
 		return nil, s.internalError("failed to insert message metadata: %v", err)
 	}
+
+	s.currentNumMessages = s.currentNumMessages + 1
+	s.mailboxTracker.QueueNumMessages(s.currentNumMessages)
 
 	s.server.uploader.NotifyUploadQueued()
 

@@ -1,7 +1,6 @@
 package imap
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/emersion/go-imap/v2"
@@ -9,11 +8,10 @@ import (
 )
 
 func (s *IMAPSession) Status(mboxName string, options *imap.StatusOptions) (*imap.StatusData, error) {
-	ctx := context.Background()
-
-	mailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), mboxName)
+	mailbox, err := s.server.db.GetMailboxByName(s.ctx, s.UserID(), mboxName)
 	if err != nil {
 		if err == consts.ErrMailboxNotFound {
+			s.Log("[STATUS] mailbox '%s' does not exist", mboxName)
 			return nil, &imap.Error{
 				Type: imap.StatusResponseTypeNo,
 				Code: imap.ResponseCodeNonExistent,
@@ -23,7 +21,7 @@ func (s *IMAPSession) Status(mboxName string, options *imap.StatusOptions) (*ima
 		return nil, s.internalError("failed to fetch mailbox '%s': %v", mboxName, err)
 	}
 
-	summary, err := s.server.db.GetMailboxSummary(ctx, mailbox.ID)
+	summary, err := s.server.db.GetMailboxSummary(s.ctx, mailbox.ID)
 	if err != nil {
 		return nil, s.internalError("failed to get mailbox summary for '%s': %v", mboxName, err)
 	}
@@ -35,6 +33,7 @@ func (s *IMAPSession) Status(mboxName string, options *imap.StatusOptions) (*ima
 
 	if options.NumMessages {
 		num := uint32(summary.NumMessages)
+		s.currentNumMessages = num
 		statusData.NumMessages = &num
 	}
 	if options.UIDNext {
@@ -48,6 +47,15 @@ func (s *IMAPSession) Status(mboxName string, options *imap.StatusOptions) (*ima
 		num := uint32(summary.UnseenCount)
 		statusData.NumUnseen = &num
 	}
+	if options.HighestModSeq {
+		statusData.HighestModSeq = summary.HighestModSeq
+	}
+
+	s.Log("[STATUS] mailbox '%s': NumMessages=%v, UIDNext=%v, HighestModSeq=%v",
+		mboxName,
+		statusData.NumMessages,
+		statusData.UIDNext,
+		statusData.HighestModSeq)
 
 	return statusData, nil
 }

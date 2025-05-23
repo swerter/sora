@@ -2,52 +2,135 @@ package imap
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
-	"log"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/migadu/sora/db"
 )
 
-func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, seqSet imap.NumSet, options *imap.FetchOptions) error {
-	ctx := context.Background()
+func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+	s.mutex.Lock()
+	if s.selectedMailbox == nil {
+		s.mutex.Unlock()
+		s.Log("[FETCH] no mailbox selected")
+		return &imap.Error{
+			Type: imap.StatusResponseTypeNo,
+			Code: imap.ResponseCodeNonExistent,
+			Text: "No mailbox selected",
+		}
+	}
+	selectedMailboxID := s.selectedMailbox.ID
+	decodedNumSet := s.decodeNumSet(numSet)
+	s.mutex.Unlock()
 
-	seqSet = s.mailbox.decodeNumSet(seqSet)
-
-	messages, err := s.server.db.GetMessagesBySeqSet(ctx, s.mailbox.ID, seqSet)
+	messages, err := s.server.db.GetMessagesByNumSet(s.ctx, selectedMailboxID, decodedNumSet)
 	if err != nil {
 		return s.internalError("failed to retrieve messages: %v", err)
 	}
+	if len(messages) == 0 {
+		return nil
+	}
+
+	// // CONDSTORE filtering - does not require s.mutex
+	// _, hasCondStore := s.server.caps[imap.CapCondStore]
+	// if hasCondStore && options.ChangedSince > 0 {
+	// 	s.Log("[FETCH] CONDSTORE: FETCH with CHANGEDSINCE %d", options.ChangedSince)
+	// 	var filteredMessages []db.Message
+
+	// 	for _, msg := range messages {
+	// 		var highestModSeq int64
+	// 		highestModSeq = msg.CreatedModSeq
+
+	// 		if msg.UpdatedModSeq != nil && *msg.UpdatedModSeq > highestModSeq {
+	// 			highestModSeq = *msg.UpdatedModSeq
+	// 		}
+
+	// 		if msg.ExpungedModSeq != nil && *msg.ExpungedModSeq > highestModSeq {
+	// 			highestModSeq = *msg.ExpungedModSeq
+	// 		}
+
+	// 		if uint64(highestModSeq) > options.ChangedSince {
+	// 			s.Log("[FETCH] CONDSTORE: Including message UID %d with MODSEQ %d > CHANGEDSINCE %d",
+	// 				msg.UID, highestModSeq, options.ChangedSince)
+	// 			filteredMessages = append(filteredMessages, msg)
+	// 		} else {
+	// 			s.Log("[FETCH] CONDSTORE: Skipping message UID %d with MODSEQ %d <= CHANGEDSINCE %d",
+	// 				msg.UID, highestModSeq, options.ChangedSince)
+	// 		}
+	// 	}
+
+	// 	messages = filteredMessages
+	// }
 
 	for _, msg := range messages {
-		if err := s.fetchMessage(w, &msg, options); err != nil {
+		s.mutex.Lock()
+		sessionTrackerSnapshot := s.sessionTracker
+		if s.selectedMailbox == nil || s.selectedMailbox.ID != selectedMailboxID || sessionTrackerSnapshot == nil {
+			s.mutex.Unlock()
+			s.Log("[FETCH] mailbox unselected or changed during FETCH loop, aborting further messages.")
+			return nil
+		}
+		s.mutex.Unlock()
+
+		if err := s.fetchMessage(w, &msg, options, selectedMailboxID, sessionTrackerSnapshot); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
-func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, options *imap.FetchOptions) error {
-	m := w.CreateMessage(s.mailbox.sessionTracker.EncodeSeqNum(msg.Seq))
-	if m == nil {
-		return s.internalError("failed to begin message for UID %d", msg.UID)
+func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, options *imap.FetchOptions, selectedMailboxID int64, sessionTracker *imapserver.SessionTracker) error {
+	s.Log("[FETCH] fetching message UID %d SEQNUM %d", msg.UID, msg.Seq)
+	encodedSeqNum := sessionTracker.EncodeSeqNum(msg.Seq)
+
+	if encodedSeqNum == 0 {
+		return nil
 	}
+
+	markSeen := false
+	for _, bs := range options.BodySection {
+		if !bs.Peek {
+			markSeen = true
+			break
+		}
+	}
+	if markSeen {
+		// This DB call doesn't need s.mutex
+		_, err := s.server.db.AddMessageFlags(s.ctx, msg.UID, selectedMailboxID, []imap.Flag{imap.FlagSeen})
+		if err != nil {
+			s.Log("[FETCH] failed to set \\Seen flag for message UID %d: %v", msg.UID, err)
+		} else {
+			// Update the local copy of msg.BitwiseFlags so the current FETCH response reflects it.
+			// The Poll mechanism will handle propagating this to the sharedMailboxTracker for other sessions.
+			msg.BitwiseFlags |= db.FlagSeen
+		}
+	}
+
+	m := w.CreateMessage(encodedSeqNum)
+	if m == nil {
+		// This indicates an issue with the imapserver library or FetchWriter.
+		return fmt.Errorf("imapserver: FetchWriter.CreateMessage returned nil for seq %d (UID %d)", encodedSeqNum, msg.UID)
+	}
+	// Ensure m.Close() is called for this message, even if errors occur mid-processing.
+	defer func() {
+		if closeErr := m.Close(); closeErr != nil {
+			s.Log("[FETCH] error closing FetchResponseWriter for UID %d (seq %d): %v", msg.UID, encodedSeqNum, closeErr)
+		}
+	}()
 
 	if err := s.writeBasicMessageData(m, msg, options); err != nil {
 		return err
 	}
 
 	if !msg.IsUploaded {
-		log.Printf("UID %d is not yet uploaded, returning flags only", msg.UID)
-		return m.Close() // No body/envelope, but valid message record
+		s.Log("[FETCH] UID %d is not yet uploaded, returning flags only", msg.UID)
+		return nil
 	}
 
 	if options.Envelope {
-		if err := s.writeEnvelope(m, msg.UID, msg.MailboxID); err != nil {
+		if err := s.writeEnvelope(m, msg.UID, selectedMailboxID); err != nil {
 			return err
 		}
 	}
@@ -63,8 +146,7 @@ func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, o
 		var err error
 		bodyData, err = s.getMessageBody(msg)
 		if err != nil {
-			log.Printf("Skipping UID %d: %v", msg.UID, err)
-			return nil // fallback to FLAGS-only
+			s.Log("[FETCH] Failed to get message body for UID %d: %v", msg.UID, err)
 		}
 
 		if len(options.BodySection) > 0 {
@@ -86,11 +168,22 @@ func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, o
 		}
 	}
 
-	// TODO: Fetch ModSeq (if CONDSTORE is supported)
+	// if options.ModSeq {
+	// 	var highestModSeq int64
+	// 	highestModSeq = msg.CreatedModSeq
 
-	if err := m.Close(); err != nil {
-		return fmt.Errorf("failed to end message for UID %d: %v", msg.UID, err)
-	}
+	// 	if msg.UpdatedModSeq != nil && *msg.UpdatedModSeq > highestModSeq {
+	// 		highestModSeq = *msg.UpdatedModSeq
+	// 	}
+
+	// 	if msg.ExpungedModSeq != nil && *msg.ExpungedModSeq > highestModSeq {
+	// 		highestModSeq = *msg.ExpungedModSeq
+	// 	}
+
+	// 	s.Log("[FETCH] writing MODSEQ %d for message UID %d", highestModSeq, msg.UID)
+
+	// 	m.WriteModSeq(uint64(highestModSeq))
+	// }
 
 	return nil
 }
@@ -114,8 +207,7 @@ func (s *IMAPSession) writeBasicMessageData(m *imapserver.FetchResponseWriter, m
 
 // Fetch helper to write the envelope for a message
 func (s *IMAPSession) writeEnvelope(m *imapserver.FetchResponseWriter, messageUID imap.UID, mailboxID int64) error {
-	ctx := context.Background()
-	envelope, err := s.server.db.GetMessageEnvelope(ctx, messageUID, mailboxID)
+	envelope, err := s.server.db.GetMessageEnvelope(s.ctx, messageUID, mailboxID)
 	if err != nil {
 		return s.internalError("failed to retrieve envelope for message UID %d: %v", messageUID, err)
 	}
@@ -168,19 +260,6 @@ func (s *IMAPSession) handleBodySections(w *imapserver.FetchResponseWriter, body
 		if closeErr != nil {
 			return closeErr
 		}
-		// Set \Seen flag when BODY[] is requested (empty section means full body)
-		// According to IMAP RFC, fetching the full message body should set \Seen flag
-		// unless the PEEK option is specified (BODY.PEEK[])
-		if len(section.Part) == 0 && section.Specifier == "" {
-			ctx := context.Background()
-			// We need to get the message UID from the parent function
-			// The msg parameter is available in the parent fetchMessage function
-			_, err := s.server.db.AddMessageFlags(ctx, msg.UID, s.mailbox.ID, []imap.Flag{imap.FlagSeen})
-			if err != nil {
-				log.Printf("Failed to set \\Seen flag for message UID %d: %v", msg.UID, err)
-				// Continue despite error - fetching the body is more important than setting the flag
-			}
-		}
 	}
 	return nil
 }
@@ -190,12 +269,12 @@ func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 		// Try cache first
 		data, err := s.server.cache.Get(msg.ContentHash)
 		if err == nil && data != nil {
-			log.Printf("[CACHE] Hit for UID %d", msg.UID)
+			s.Log("[FETCH] cache hit for UID %d", msg.UID)
 			return data, nil
 		}
 
 		// Fallback to S3
-		log.Printf("[CACHE] Miss. Fetching UID %d from S3 (%s)", msg.UID, msg.ContentHash)
+		s.Log("[FETCH] cache miss fetching UID %d from S3 (%s)", msg.UID, msg.ContentHash)
 		reader, err := s.server.s3.Get(msg.ContentHash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to retrieve message UID %d from S3: %v", msg.UID, err)
@@ -210,7 +289,7 @@ func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 	}
 
 	// If not uploaded to S3, fetch from local disk
-	log.Printf("Fetching not yet uploaded message UID %d from disk", msg.UID)
+	s.Log("[FETCH] fetching not yet uploaded message UID %d from disk", msg.UID)
 	data, err := s.server.uploader.GetLocalFile(msg.ContentHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve message UID %d from disk: %v", msg.UID, err)

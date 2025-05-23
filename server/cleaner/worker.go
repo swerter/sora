@@ -25,8 +25,6 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
-const BATCH_PURGE_SIZE = 100
-
 type CleanupWorker struct {
 	db          *db.Database
 	s3          *storage.S3Storage
@@ -93,7 +91,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 		log.Printf("[CLEANUP] deleted %d old vacation responses", count)
 	}
 
-	candidates, err := w.db.ListS3ObjectsToDelete(ctx, w.gracePeriod, BATCH_PURGE_SIZE)
+	candidates, err := w.db.ListS3ObjectsToDelete(ctx, w.gracePeriod, db.BATCH_PURGE_SIZE)
 	if err != nil {
 		log.Println("[CLEANUP] failed to list delete candidates:", err)
 		return fmt.Errorf("failed to list S3 delete candidates: %w", err)

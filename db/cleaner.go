@@ -5,7 +5,8 @@ import (
 	"fmt"
 )
 
-const CLEANUP_LOCK_KEY = 987654321 // Used by all instances
+const CLEANUP_LOCK_KEY = 925955823 // Used by all instances
+const BATCH_PURGE_SIZE = 100
 
 func (d *Database) AcquireCleanupLock(ctx context.Context) (bool, error) {
 	var success bool

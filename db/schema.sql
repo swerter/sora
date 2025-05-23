@@ -105,6 +105,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_created_modseq ON messages (created_mods
 CREATE INDEX IF NOT EXISTS idx_messages_updated_modseq ON messages (updated_modseq);
 CREATE INDEX IF NOT EXISTS idx_messages_expunged_modseq ON messages (expunged_modseq);
 
+-- Index for PollMailbox: efficiently count non-expunged messages per mailbox
+CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id_expunged_at_is_null ON messages (mailbox_id) WHERE expunged_at IS NULL;
+
+-- Index for PollMailbox: efficiently filter messages by mailbox_id and expunged_modseq
+CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id_expunged_modseq ON messages (mailbox_id, expunged_modseq);
+
 -- Index for faster searches on the subject field
 -- This index uses the pg_trgm extension for trigram similarity searches
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -116,7 +122,6 @@ CREATE INDEX IF NOT EXISTS idx_messages_text_body_tsv ON messages USING GIN (tex
 -- Index recipients_json for faster searches on recipients
 -- This index uses the jsonb_path_ops for efficient querying
 CREATE INDEX IF NOT EXISTS idx_messages_recipients_json ON messages USING GIN (recipients_json jsonb_path_ops);
-
 
 -- Pending uploads table for processing messages at own pace
 CREATE TABLE IF NOT EXISTS pending_uploads (
@@ -172,6 +177,3 @@ CREATE INDEX IF NOT EXISTS idx_vacation_responses_user_sender ON vacation_respon
 
 -- Index for cleanup of old responses
 CREATE INDEX IF NOT EXISTS idx_vacation_responses_response_date ON vacation_responses (response_date);
-
--- Test user for development "user@domain.com" with password "password"
-INSERT into users (username, password) values ('user@domain.com', '$2a$10$59jW86pmlBLK2CF.hqmNpOWDPFRPKLWm4u6mpP/p.q1gtH3P0sqyK') ON CONFLICT (username) DO NOTHING;

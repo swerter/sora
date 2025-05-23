@@ -3,7 +3,6 @@ package server
 import (
 	"fmt"
 	"log"
-	"time"
 )
 
 type Session struct {
@@ -15,13 +14,11 @@ type Session struct {
 }
 
 func (s *Session) Log(format string, args ...interface{}) {
-	now := time.Now().Format("2006-01-02 15:04:05")
 	user := "none"
 	if s.User != nil {
 		user = fmt.Sprintf("%s/%d", s.FullAddress(), s.UserID())
 	}
-	log.Printf("%s %s remote=%s user=%s session=%s %s: %s",
-		now,
+	log.Printf("%s remote=%s user=%s session=%s %s: %s",
 		s.HostName,
 		s.RemoteIP,
 		user,

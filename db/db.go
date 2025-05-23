@@ -28,18 +28,6 @@ var schema string
 type Database struct {
 	Pool *pgxpool.Pool
 }
-type MessageUpdate struct {
-	UID          imap.UID
-	SeqNum       uint32
-	BitwiseFlags int
-	IsExpunge    bool
-}
-
-type MailboxPoll struct {
-	Updates     []MessageUpdate
-	NumMessages uint32
-	ModSeq      uint64
-}
 
 // NewDatabase initializes a new SQL database connection
 func NewDatabase(ctx context.Context, host, port, user, password, dbname string, debug bool) (*Database, error) {
@@ -372,7 +360,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 	return messageRowId, highestUID, nil
 }
 
-func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailboxID, destMailboxID int64) (map[imap.UID]imap.UID, error) {
+func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailboxID, destMailboxID int64, userID int64) (map[imap.UID]imap.UID, error) {
 	// Map to store the original UID to new UID mapping
 	messageUIDMap := make(map[imap.UID]imap.UID)
 
@@ -383,7 +371,7 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 	}
 
 	// Ensure the destination mailbox exists
-	_, err := db.GetMailbox(ctx, destMailboxID)
+	_, err := db.GetMailbox(ctx, destMailboxID, userID)
 	if err != nil {
 		log.Printf("Failed to fetch mailbox %d: %v", destMailboxID, err)
 		return nil, consts.ErrMailboxNotFound
@@ -591,263 +579,6 @@ func selectNumSet(numSet imap.NumSet, baseQuery string, args []any) (string, []a
 	}
 
 	return baseQuery + " (" + strings.Join(conditions, " OR ") + ")", args
-}
-
-// GetMessagesBySeqSet fetches messages from the database based on the NumSet and mailbox ID.
-// This works for both sequence numbers (SeqSet) and UIDs (UIDSet).
-func (db *Database) GetMessagesBySeqSet(ctx context.Context, mailboxID int64, numSet imap.NumSet) ([]Message, error) {
-	var messages []Message
-
-	// First, check if this is a UIDSet with a wildcard (e.g., "*" or "1:*")
-	// If so, we need to handle it specially to ensure we get all messages
-	if uidSet, ok := numSet.(imap.UIDSet); ok {
-		for _, uidRange := range uidSet {
-			if uidRange.Stop == imap.UID(4294967295) { // This is the max value for uint32, which represents "*"
-				// This is a wildcard query, so we'll fetch all messages
-				log.Printf("Detected wildcard UID query: %v", uidSet)
-
-				query := `
-					SELECT user_id, uid, mailbox_id, content_hash, uploaded, flags, internal_date, size, body_structure,
-						created_modseq, updated_modseq, expunged_modseq,
-						row_number() OVER (ORDER BY id) AS seqnum
-					FROM messages
-					WHERE
-						mailbox_id = $1 AND
-						expunged_at IS NULL
-					ORDER BY id
-				`
-
-				rows, err := db.Pool.Query(ctx, query, mailboxID)
-				if err != nil {
-					return nil, fmt.Errorf("failed to query messages with wildcard: %v", err)
-				}
-				defer rows.Close()
-
-				// Scan the results and append to the messages slice
-				for rows.Next() {
-					var msg Message
-					var bodyStructureBytes []byte
-					if err := rows.Scan(&msg.UserID, &msg.UID, &msg.MailboxID, &msg.ContentHash, &msg.IsUploaded,
-						&msg.BitwiseFlags, &msg.InternalDate, &msg.Size, &bodyStructureBytes, &msg.CreatedModSeq,
-						&msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.Seq); err != nil {
-						return nil, fmt.Errorf("failed to scan message: %v", err)
-					}
-					bodyStructure, err := helpers.DeserializeBodyStructureGob(bodyStructureBytes)
-					if err != nil {
-						return nil, fmt.Errorf("failed to deserialize BodyStructure: %v", err)
-					}
-					msg.BodyStructure = *bodyStructure
-					messages = append(messages, msg)
-				}
-
-				if err := rows.Err(); err != nil {
-					return nil, fmt.Errorf("error fetching messages with wildcard: %v", err)
-				}
-
-				// We've handled the wildcard case, so return the messages
-				log.Printf("Fetched %d messages with wildcard UID query", len(messages))
-				return messages, nil
-			}
-		}
-	}
-
-	// If we're fetching all messages (e.g., for a full sync)
-	if seqSet, ok := numSet.(imap.SeqSet); ok && len(seqSet) == 1 && seqSet[0].Start == 1 && seqSet[0].Stop == 0 {
-		log.Printf("Detected full mailbox fetch request (1:*)")
-
-		query := `
-			SELECT user_id, uid, mailbox_id, content_hash, uploaded, flags, internal_date, size, body_structure,
-				created_modseq, updated_modseq, expunged_modseq,
-				row_number() OVER (ORDER BY id) AS seqnum
-			FROM messages
-			WHERE
-				mailbox_id = $1 AND
-				expunged_at IS NULL
-			ORDER BY id
-		`
-
-		rows, err := db.Pool.Query(ctx, query, mailboxID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to query all messages: %v", err)
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var msg Message
-			var bodyStructureBytes []byte
-			if err := rows.Scan(&msg.UserID, &msg.UID, &msg.MailboxID, &msg.ContentHash, &msg.IsUploaded,
-				&msg.BitwiseFlags, &msg.InternalDate, &msg.Size, &bodyStructureBytes, &msg.CreatedModSeq,
-				&msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.Seq); err != nil {
-				return nil, fmt.Errorf("failed to scan message: %v", err)
-			}
-			bodyStructure, err := helpers.DeserializeBodyStructureGob(bodyStructureBytes)
-			if err != nil {
-				return nil, fmt.Errorf("failed to deserialize BodyStructure: %v", err)
-			}
-			msg.BodyStructure = *bodyStructure
-			messages = append(messages, msg)
-		}
-
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("error fetching all messages: %v", err)
-		}
-
-		log.Printf("Fetched %d messages for full mailbox request", len(messages))
-		return messages, nil
-	}
-
-	// Check if we need to do a direct query instead of using the subquery approach
-	// This is a workaround for potential issues with the row_number() window function
-	directQuery := false
-
-	if uidSet, ok := numSet.(imap.UIDSet); ok {
-		// For simple UID queries, use a direct approach
-		if len(uidSet) == 1 {
-			directQuery = true
-		}
-	}
-
-	var query string
-	var args []any
-
-	if directQuery {
-		// Direct query without subquery for better performance and reliability
-		query = `
-			SELECT user_id, uid, mailbox_id, content_hash, uploaded, flags, internal_date, size, body_structure,
-				created_modseq, updated_modseq, expunged_modseq,
-				row_number() OVER (ORDER BY id) AS seqnum
-			FROM messages
-			WHERE
-				mailbox_id = $1 AND
-				expunged_at IS NULL
-		`
-		args = []any{mailboxID}
-
-		// Add UID conditions directly
-		if uidSet, ok := numSet.(imap.UIDSet); ok && len(uidSet) == 1 {
-			uidRange := uidSet[0]
-			if uidRange.Start == uidRange.Stop {
-				args = append(args, uint32(uidRange.Start))
-				query += " AND uid = $2"
-			} else {
-				args = append(args, uint32(uidRange.Start), uint32(uidRange.Stop))
-				query += " AND uid BETWEEN $2 AND $3"
-			}
-		}
-
-		query += " ORDER BY id"
-	} else {
-		// Standard query with subquery for complex cases
-		query = `
-			SELECT * FROM (
-				SELECT user_id, uid, mailbox_id, content_hash, uploaded, flags, internal_date, size, body_structure,
-					created_modseq, updated_modseq, expunged_modseq,
-					row_number() OVER (ORDER BY id) AS seqnum
-				FROM messages
-				WHERE
-					mailbox_id = $1 AND
-					expunged_at IS NULL
-			) AS sub WHERE
-		`
-		args = []any{mailboxID}
-
-		query, args = selectNumSet(numSet, query, args)
-	}
-
-	// Log the query for debugging
-	log.Printf("GetMessagesBySeqSet query: %s, args: %v", query, args)
-
-	// Log the query for debugging
-	log.Printf("[GetMessagesBySeqSet] Query: %s, args: %v", query, args)
-
-	// Execute the query
-	rows, err := db.Pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query messages: %v", err)
-	}
-	defer rows.Close()
-
-	// Scan the results and append to the messages slice
-	for rows.Next() {
-		var msg Message
-		var bodyStructureBytes []byte
-		if err := rows.Scan(&msg.UserID, &msg.UID, &msg.MailboxID, &msg.ContentHash, &msg.IsUploaded,
-			&msg.BitwiseFlags, &msg.InternalDate, &msg.Size, &bodyStructureBytes, &msg.CreatedModSeq,
-			&msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.Seq); err != nil {
-			return nil, fmt.Errorf("failed to scan message: %v", err)
-		}
-		bodyStructure, err := helpers.DeserializeBodyStructureGob(bodyStructureBytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize BodyStructure: %v", err)
-		}
-		msg.BodyStructure = *bodyStructure
-		messages = append(messages, msg)
-
-		// Debug log each message found
-		log.Printf("[GetMessagesBySeqSet] Found message UID %d, Seq %d", msg.UID, msg.Seq)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error fetching messages: %v", err)
-	}
-
-	// If we didn't find any messages but we know there should be some (based on the logs),
-	// try a fallback query to get at least some messages
-	if len(messages) == 0 {
-		// Check if there are actually messages in this mailbox
-		var count int
-		err := db.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE mailbox_id = $1 AND expunged_at IS NULL", mailboxID).Scan(&count)
-		if err != nil {
-			log.Printf("Error checking message count: %v", err)
-		} else if count > 0 {
-			log.Printf("Warning: GetMessagesBySeqSet found 0 messages but count shows %d messages. Using fallback query.", count)
-
-			// Use a simple fallback query to get all messages
-			fallbackQuery := `
-				SELECT user_id, uid, mailbox_id, content_hash, uploaded, flags, internal_date, size, body_structure,
-					created_modseq, updated_modseq, expunged_modseq,
-					row_number() OVER (ORDER BY id) AS seqnum
-				FROM messages
-				WHERE
-					mailbox_id = $1 AND
-					expunged_at IS NULL
-				ORDER BY id
-			`
-
-			fallbackRows, err := db.Pool.Query(ctx, fallbackQuery, mailboxID)
-			if err != nil {
-				log.Printf("Fallback query failed: %v", err)
-			} else {
-				defer fallbackRows.Close()
-
-				for fallbackRows.Next() {
-					var msg Message
-					var bodyStructureBytes []byte
-					if err := fallbackRows.Scan(&msg.UserID, &msg.UID, &msg.MailboxID, &msg.ContentHash, &msg.IsUploaded,
-						&msg.BitwiseFlags, &msg.InternalDate, &msg.Size, &bodyStructureBytes, &msg.CreatedModSeq,
-						&msg.UpdatedModSeq, &msg.ExpungedModSeq, &msg.Seq); err != nil {
-						log.Printf("Failed to scan message in fallback query: %v", err)
-						continue
-					}
-					bodyStructure, err := helpers.DeserializeBodyStructureGob(bodyStructureBytes)
-					if err != nil {
-						log.Printf("Failed to deserialize BodyStructure in fallback query: %v", err)
-						continue
-					}
-					msg.BodyStructure = *bodyStructure
-					messages = append(messages, msg)
-				}
-
-				if err := fallbackRows.Err(); err != nil {
-					log.Printf("Error in fallback query: %v", err)
-				}
-
-				log.Printf("Fallback query found %d messages", len(messages))
-			}
-		}
-	}
-
-	log.Printf("GetMessagesBySeqSet found %d messages", len(messages))
-	return messages, nil
 }
 
 func (db *Database) SetMessageFlags(ctx context.Context, messageID imap.UID, mailboxID int64, newFlags []imap.Flag) (*[]imap.Flag, error) {
@@ -1286,7 +1017,7 @@ func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag
 	// Convert the IMAP flag to its corresponding bitwise value
 	bitwiseFlag := FlagToBitwise(flag)
 	rows, err := db.Pool.Query(ctx, `
-				SELECT uid, content_hash, seqnum FROM (
+		SELECT uid, content_hash, seqnum FROM (
 			SELECT uid, content_hash, ROW_NUMBER() OVER (ORDER BY id) AS seqnum
 			FROM messages
 			WHERE mailbox_id = $1 AND (flags & $2) != 0 AND expunged_at IS NULL
@@ -1309,160 +1040,12 @@ func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag
 	return messages, nil
 }
 
-func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSeq uint64) (*MailboxPoll, error) {
-	// Use a transaction to ensure we have a consistent view of the mailbox
-	tx, err := db.Pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	log.Printf("[POLL] Polling mailbox %d since modseq %d", mailboxID, sinceModSeq)
-
-	// First, check for any new or updated messages
-	// - For new messages: created_modseq >= sinceModSeq (to catch messages created at exactly sinceModSeq)
-	// - For updated messages: updated_modseq > sinceModSeq (strictly greater to avoid infinite loops)
-	newMsgRows, err := tx.Query(ctx, `
-		SELECT uid, ROW_NUMBER() OVER (ORDER BY id) AS seq_num, flags
-		FROM messages
-		WHERE 
-			mailbox_id = $1 AND 
-			expunged_at IS NULL AND
-			created_modseq >= $2
-		ORDER BY id
-	`, mailboxID, sinceModSeq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query new messages: %w", err)
-	}
-	defer newMsgRows.Close()
-
-	var updates []MessageUpdate
-	for newMsgRows.Next() {
-		var update MessageUpdate
-		if err := newMsgRows.Scan(&update.UID, &update.SeqNum, &update.BitwiseFlags); err != nil {
-			return nil, fmt.Errorf("failed to scan new message: %w", err)
-		}
-		update.IsExpunge = false
-		updates = append(updates, update)
-	}
-	if err := newMsgRows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating through new messages: %w", err)
-	}
-
-	log.Printf("[POLL] Found %d new messages in mailbox %d", len(updates), mailboxID)
-
-	// Now fetch messages updated or expunged since last poll
-	rows, err := tx.Query(ctx, `
-		SELECT uid, ROW_NUMBER() OVER (ORDER BY id) AS seq_num, flags, expunged_modseq FROM (
-			SELECT uid, id, flags, created_modseq, updated_modseq, expunged_modseq
-			FROM messages
-			WHERE 
-				mailbox_id = $1 AND 
-				created_modseq <= $2 AND
-				(
-					(updated_modseq IS NOT NULL AND updated_modseq > $2) OR
-					(expunged_modseq IS NOT NULL AND expunged_modseq > $2)
-				)
-		) AS sub
-		ORDER BY id
-	`, mailboxID, sinceModSeq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query mailbox updates: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var (
-			update         MessageUpdate
-			expungedModSeq *int64
-		)
-
-		if err := rows.Scan(&update.UID, &update.SeqNum, &update.BitwiseFlags, &expungedModSeq); err != nil {
-			return nil, fmt.Errorf("failed to scan mailbox updates: %w", err)
-		}
-
-		update.IsExpunge = expungedModSeq != nil
-		updates = append(updates, update)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating through mailbox updates: %w", err)
-	}
-
-	log.Printf("[POLL] Found %d total updates (new + changed) in mailbox %d", len(updates), mailboxID)
-
-	// Fetch the current number of non-expunged messages in the mailbox
-	var numMessages uint32
-	err = tx.QueryRow(ctx, `
-		SELECT
-			COUNT(*)
-		FROM
-			messages
-		WHERE
-			mailbox_id = $1 AND
-			expunged_at IS NULL
-	`, mailboxID).Scan(&numMessages)
-	if err != nil {
-		return nil, fmt.Errorf("failed to count messages in mailbox: %w", err)
-	}
-
-	var currentModSeq uint64
-	err = tx.QueryRow(ctx, `SELECT last_value FROM messages_modseq`).Scan(&currentModSeq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch current modseq: %w", err)
-	}
-
-	log.Printf("[POLL] Mailbox %d has %d messages, current modseq: %d", mailboxID, numMessages, currentModSeq)
-
-	// Add explicit expunge updates for messages that were moved or deleted
-	// This ensures clients are properly notified about messages that no longer exist
-	expungedRows, err := tx.Query(ctx, `
-		SELECT uid
-		FROM messages
-		WHERE 
-			mailbox_id = $1 AND 
-			expunged_at IS NOT NULL AND
-			expunged_modseq > $2
-		ORDER BY id
-	`, mailboxID, sinceModSeq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query expunged messages: %w", err)
-	}
-	defer expungedRows.Close()
-
-	var expungedUIDs []imap.UID
-	for expungedRows.Next() {
-		var uid imap.UID
-		if err := expungedRows.Scan(&uid); err != nil {
-			return nil, fmt.Errorf("failed to scan expunged message: %w", err)
-		}
-		expungedUIDs = append(expungedUIDs, uid)
-	}
-
-	if len(expungedUIDs) > 0 {
-		log.Printf("[POLL] Found %d explicitly expunged messages in mailbox %d: %v",
-			len(expungedUIDs), mailboxID, expungedUIDs)
-
-		// Add explicit expunge updates
-		for _, uid := range expungedUIDs {
-			update := MessageUpdate{
-				UID:       uid,
-				IsExpunge: true,
-			}
-			updates = append(updates, update)
-		}
-	}
-
-	return &MailboxPoll{
-		Updates:     updates,
-		NumMessages: numMessages,
-		ModSeq:      currentModSeq,
-	}, nil
-}
-
 func (db *Database) GetUserIDByAddress(ctx context.Context, username string) (int64, error) {
 	var userId int64
-	username = strings.ToLower(username)
+	username = strings.ToLower(strings.TrimSpace(username))
+	if username == "" {
+		return -1, nil
+	}
 	err := db.Pool.QueryRow(ctx, "SELECT id FROM users WHERE username = $1", username).Scan(&userId)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -1584,10 +1167,9 @@ func (d *Database) FindExistingContentHashes(ctx context.Context, ids []string) 
 func (db *Database) GetMessageSeqNum(ctx context.Context, uid imap.UID, mailboxID int64) (uint32, error) {
 	var seqNum uint32
 
-	// Calculate the sequence number as the row number when ordering by ID
-	// This matches how sequence numbers are assigned in other parts of the code
+	// Calculate the sequence number as the row number when ordering by UID
 	err := db.Pool.QueryRow(ctx, `
-		SELECT ROW_NUMBER() OVER (ORDER BY id) AS seq_num
+		SELECT ROW_NUMBER() OVER (ORDER BY uid) AS seq_num
 		FROM messages
 		WHERE uid = $1 AND mailbox_id = $2 AND expunged_at IS NULL
 	`, uid, mailboxID).Scan(&seqNum)

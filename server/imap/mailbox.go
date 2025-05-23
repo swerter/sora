@@ -63,28 +63,3 @@ func (m *Mailbox) PermittedFlags() []imap.Flag {
 	}
 	return permFlags
 }
-
-func (m *Mailbox) decodeNumSet(numSet imap.NumSet) imap.NumSet {
-	seqSet, ok := numSet.(imap.SeqSet)
-	if !ok {
-		return numSet
-	}
-
-	var out imap.SeqSet
-	for _, seqRange := range seqSet {
-		start := m.sessionTracker.DecodeSeqNum(seqRange.Start)
-		stop := m.sessionTracker.DecodeSeqNum(seqRange.Stop)
-
-		// Allow 0 as open-ended bound
-		if start == 0 && seqRange.Start != 0 {
-			continue // Invalid start
-		}
-		if stop == 0 && seqRange.Stop != 0 {
-			continue // Invalid stop
-		}
-
-		out = append(out, imap.SeqRange{Start: start, Stop: stop})
-	}
-
-	return out
-}

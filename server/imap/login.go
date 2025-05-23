@@ -1,9 +1,6 @@
 package imap
 
 import (
-	"context"
-	"log"
-
 	"github.com/emersion/go-imap/v2"
 	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/server"
@@ -13,7 +10,7 @@ func (s *IMAPSession) Login(address, password string) error {
 
 	addressSt, err := server.NewAddress(address)
 	if err != nil {
-		s.Log("Failed to parse address: %v", err)
+		s.Log("[LOGIN] failed to parse address: %v", err)
 		return &imap.Error{
 			Type: imap.StatusResponseTypeNo,
 			Code: imap.ResponseCodeAuthenticationFailed,
@@ -21,10 +18,10 @@ func (s *IMAPSession) Login(address, password string) error {
 		}
 	}
 
-	userID, err := s.server.db.GetUserIDByAddress(context.Background(), addressSt.FullAddress())
+	userID, err := s.server.db.GetUserIDByAddress(s.ctx, addressSt.FullAddress())
 	if err != nil {
 		if err == consts.ErrUserNotFound {
-			s.Log("Unknown user: %s", address)
+			s.Log("[LOGIN] unknown user: %s", address)
 			return &imap.Error{
 				Type: imap.StatusResponseTypeNo,
 				Code: imap.ResponseCodeAuthenticationFailed,
@@ -34,14 +31,12 @@ func (s *IMAPSession) Login(address, password string) error {
 		return s.internalError("failed to fetch user: %v", err)
 	}
 
-	log.Printf("Authentication attempt for user: %s", address)
-	ctx := context.Background()
+	s.Log("[LOGIN] authentication attempt for user %s", address)
 
-	err = s.server.db.Authenticate(ctx, userID, password)
+	err = s.server.db.Authenticate(s.ctx, userID, password)
 	if err != nil {
-		s.Log("Authentication failed: %v", err)
+		s.Log("[LOGIN] authentication failed: %v", err)
 
-		// Return a specific authentication error
 		return &imap.Error{
 			Type: imap.StatusResponseTypeNo,
 			Code: imap.ResponseCodeAuthenticationFailed,
@@ -50,17 +45,14 @@ func (s *IMAPSession) Login(address, password string) error {
 	}
 
 	// Ensure default mailboxes (INBOX/Drafts/Sent/Spam/Trash) exist
-	err = s.server.db.CreateDefaultMailboxes(ctx, userID)
+	err = s.server.db.CreateDefaultMailboxes(s.ctx, userID)
 	if err != nil {
 		return s.internalError("failed to create default mailboxes: %v", err)
 	}
 
 	s.IMAPUser = NewIMAPUser(addressSt, userID)
-
-	// Set the User field in the embedded Session struct
-	// This ensures that Session.Log() will properly show the user information
 	s.Session.User = &s.IMAPUser.User
 
-	s.Log("User %s successfully authenticated", address)
+	s.Log("[LOGIN] user %s authenticated", address)
 	return nil
 }

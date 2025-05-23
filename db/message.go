@@ -100,9 +100,6 @@ func BitwiseToFlags(bitwiseFlags int) []imap.Flag {
 	if bitwiseFlags&FlagDraft != 0 {
 		flags = append(flags, imap.FlagDraft)
 	}
-	// if bitwiseFlags&FlagRecent != 0 {
-	// 	flags = append(flags, imap.FlagRecent)
-	// }
 
 	return flags
 }
