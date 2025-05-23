@@ -3,3 +3,4 @@
 start-dev.sh
 certs/
 reset-db.sh
+config.toml

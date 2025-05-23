@@ -1,0 +1,59 @@
+# Sora Mail Server Configuration
+
+insecure_auth = false
+debug = false
+
+[database]
+host = "localhost"
+port = "5432"
+user = "postgres"
+password = ""
+name = "sora_mail_db"
+
+[s3]
+endpoint = "s3.amazonaws.com"
+access_key = "YOUR_S3_ACCESS_KEY_HERE"
+secret_key = "YOUR_S3_SECRET_KEY_HERE"
+bucket = "your-sora-mail-bucket"
+
+[servers]
+start_imap = true
+imap_addr = ":143" # Use ":993" for IMAPS default
+start_lmtp = true
+lmtp_addr = ":24"
+start_pop3 = true
+pop3_addr = ":110" # Use ":995" for POP3S default
+start_managesieve = true
+managesieve_addr = ":4190"
+
+[paths]
+uploader_temp_path = "/var/tmp/sora/uploads"
+cache_dir = "/var/tmp/sora/cache"
+max_cache_size_mb = 2048 # 2GB
+
+[lmtp]
+## The external relay is used in SIEVE redirect and vacation auto responses.
+# external_relay = "smtp.your-relay.com:25"
+
+[tls]
+insecure_skip_verify = false # Set to true for self-signed certs in dev
+
+  [tls.imap]
+  enable = false # Set to true to enable IMAPS
+  # cert_file = "/path/to/your/imap.crt"
+  # key_file = "/path/to/your/imap.key"
+
+  [tls.pop3]
+  enable = false # Set to true to enable POP3S
+  # cert_file = "/path/to/your/pop3.crt"
+  # key_file = "/path/to/your/pop3.key"
+
+  [tls.lmtp]
+  enable = false # Set to true to enable LMTPS (STARTTLS)
+  # cert_file = "/path/to/your/lmtp.crt"
+  # key_file = "/path/to/your/lmtp.key"
+
+  [tls.managesieve]
+  enable = false # Set to true to enable ManageSieve over TLS (STARTTLS)
+  # cert_file = "/path/to/your/managesieve.crt"
+  # key_file = "/path/to/your/managesieve.key"

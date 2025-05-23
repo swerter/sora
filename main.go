@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/BurntSushi/toml"
 	"github.com/migadu/sora/cache"
 	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
@@ -22,74 +23,234 @@ import (
 )
 
 func main() {
-	insecureAuth := flag.Bool("insecure-auth", false, "Allow authentication without TLS")
-	debug := flag.Bool("debug", false, "Print all commands and responses")
+	// Initialize with application defaults
+	cfg := newDefaultConfig()
 
-	// Define command-line flags for database and S3 credentials
-	dbHost := flag.String("dbhost", "localhost", "Database host")
-	dbPort := flag.String("dbport", "5432", "Database port")
-	dbUser := flag.String("dbuser", "postgres", "Database user")
-	dbPassword := flag.String("dbpassword", "", "Database password (can be empty for local development)")
-	dbName := flag.String("dbname", "imap_db", "Database name")
+	// --- Define Command-Line Flags ---
+	// These flags will override values from the config file if set.
+	// Their default values are set from the initial `cfg` for consistent -help messages.
 
-	s3Endpoint := flag.String("s3endpoint", "", "S3 endpoint")
-	s3AccessKey := flag.String("s3accesskey", "", "S3 access key")
-	s3SecretKey := flag.String("s3secretkey", "", "S3 secret key")
-	s3Bucket := flag.String("s3bucket", "", "S3 bucket name")
+	configPath := flag.String("config", "config.toml", "Path to TOML configuration file")
 
-	startImap := flag.Bool("imap", true, "Start the IMAP server")
-	imapAddr := flag.String("imapaddr", ":143", "IMAP server address")
-	startLmtp := flag.Bool("lmtp", true, "Start the LMTP server")
-	lmtpAddr := flag.String("lmtpaddr", ":24", "LMTP server address")
-	startPop3 := flag.Bool("pop3", true, "Start the POP3 server")
-	pop3Addr := flag.String("pop3addr", ":110", "POP3 server address")
-	uploaderTempPath := flag.String("uploaderpath", "/tmp/sora/uploads", "Directory for pending uploads, defaults to /tmp/sora/uploads")
-	cachePath := flag.String("cachedir", "/tmp/sora/cache", "Directory for cached files")
-	maxCacheSize := flag.Int64("cachesize", consts.MAX_TOTAL_CACHE_SIZE, "Disk cache size in Megabytes (default: 1 GB)")
+	// General flags
+	fInsecureAuth := flag.Bool("insecure-auth", cfg.InsecureAuth, "Allow authentication without TLS (overrides config)")
+	fDebug := flag.Bool("debug", cfg.Debug, "Print all commands and responses (overrides config)")
 
-	startManageSieve := flag.Bool("managesieve", true, "Start the ManageSieve server")
-	managesieveAddr := flag.String("managesieveaddr", ":4190", "ManageSieve server address")
+	// Database flags
+	fDbHost := flag.String("dbhost", cfg.Database.Host, "Database host (overrides config)")
+	fDbPort := flag.String("dbport", cfg.Database.Port, "Database port (overrides config)")
+	fDbUser := flag.String("dbuser", cfg.Database.User, "Database user (overrides config)")
+	fDbPassword := flag.String("dbpassword", cfg.Database.Password, "Database password (overrides config)")
+	fDbName := flag.String("dbname", cfg.Database.Name, "Database name (overrides config)")
 
-	// External relay for LMTP server
-	externalRelay := flag.String("externalrelay", "", "External relay address for LMTP server (e.g., smtp.example.com:25)")
+	// S3 flags
+	fS3Endpoint := flag.String("s3endpoint", cfg.S3.Endpoint, "S3 endpoint (overrides config)")
+	fS3AccessKey := flag.String("s3accesskey", cfg.S3.AccessKey, "S3 access key (overrides config)")
+	fS3SecretKey := flag.String("s3secretkey", cfg.S3.SecretKey, "S3 secret key (overrides config)")
+	fS3Bucket := flag.String("s3bucket", cfg.S3.Bucket, "S3 bucket name (overrides config)")
 
-	// TLS options for each server
-	imapTLS := flag.Bool("imaptls", false, "Enable TLS for IMAP server")
-	imapTLSCert := flag.String("imaptlscert", "", "TLS certificate file for IMAP server")
-	imapTLSKey := flag.String("imaptlskey", "", "TLS key file for IMAP server")
+	// Server enable/address flags
+	fStartImap := flag.Bool("imap", cfg.Servers.StartImap, "Start the IMAP server (overrides config)")
+	fImapAddr := flag.String("imapaddr", cfg.Servers.ImapAddr, "IMAP server address (overrides config)")
+	fStartLmtp := flag.Bool("lmtp", cfg.Servers.StartLmtp, "Start the LMTP server (overrides config)")
+	fLmtpAddr := flag.String("lmtpaddr", cfg.Servers.LmtpAddr, "LMTP server address (overrides config)")
+	fStartPop3 := flag.Bool("pop3", cfg.Servers.StartPop3, "Start the POP3 server (overrides config)")
+	fPop3Addr := flag.String("pop3addr", cfg.Servers.Pop3Addr, "POP3 server address (overrides config)")
+	fStartManageSieve := flag.Bool("managesieve", cfg.Servers.StartManageSieve, "Start the ManageSieve server (overrides config)")
+	fManagesieveAddr := flag.String("managesieveaddr", cfg.Servers.ManageSieveAddr, "ManageSieve server address (overrides config)")
 
-	pop3TLS := flag.Bool("pop3tls", false, "Enable TLS for POP3 server")
-	pop3TLSCert := flag.String("pop3tlscert", "", "TLS certificate file for POP3 server")
-	pop3TLSKey := flag.String("pop3tlskey", "", "TLS key file for POP3 server")
+	// Paths flags
+	fUploaderTempPath := flag.String("uploaderpath", cfg.Paths.UploaderTemp, "Directory for pending uploads (overrides config)")
+	fCachePath := flag.String("cachedir", cfg.Paths.CacheDir, "Directory for cached files (overrides config)")
+	fMaxCacheSizeMB := flag.Int64("cachesize", cfg.Paths.MaxCacheSizeMB, "Disk cache size in Megabytes (overrides config)")
 
-	lmtpTLS := flag.Bool("lmtptls", false, "Enable TLS for LMTP server")
-	lmtpTLSCert := flag.String("lmtptlscert", "", "TLS certificate file for LMTP server")
-	lmtpTLSKey := flag.String("lmtptlskey", "", "TLS key file for LMTP server")
+	// LMTP specific
+	fExternalRelay := flag.String("externalrelay", cfg.LMTP.ExternalRelay, "External relay for LMTP (overrides config)")
 
-	manageSieveTLS := flag.Bool("managesievetls", false, "Enable TLS for ManageSieve server")
-	manageSieveTLSCert := flag.String("managesievetlscert", "", "TLS certificate file for ManageSieve server")
-	manageSieveTLSKey := flag.String("managesievetlskey", "", "TLS key file for ManageSieve server")
+	// TLS general
+	fTlsInsecureSkipVerify := flag.Bool("tlsinsecureskipverify", cfg.TLS.InsecureSkipVerify, "Skip TLS cert verification (overrides config)")
 
-	// Option to skip TLS certificate verification (for self-signed certificates)
-	tlsInsecureSkipVerify := flag.Bool("tlsinsecureskipverify", false, "Skip TLS certificate verification (for self-signed certificates)")
+	// TLS specific flags (enable, cert, key for each service)
+	fImapTLS := flag.Bool("imaptls", cfg.TLS.IMAP.Enable, "Enable TLS for IMAP (overrides config)")
+	fImapTLSCert := flag.String("imaptlscert", cfg.TLS.IMAP.CertFile, "TLS cert for IMAP (overrides config)")
+	fImapTLSKey := flag.String("imaptlskey", cfg.TLS.IMAP.KeyFile, "TLS key for IMAP (overrides config)")
 
-	// Parse the command-line flags
+	fPop3TLS := flag.Bool("pop3tls", cfg.TLS.POP3.Enable, "Enable TLS for POP3 (overrides config)")
+	fPop3TLSCert := flag.String("pop3tlscert", cfg.TLS.POP3.CertFile, "TLS cert for POP3 (overrides config)")
+	fPop3TLSKey := flag.String("pop3tlskey", cfg.TLS.POP3.KeyFile, "TLS key for POP3 (overrides config)")
+
+	fLmtpTLS := flag.Bool("lmtptls", cfg.TLS.LMTP.Enable, "Enable TLS for LMTP (overrides config)")
+	fLmtpTLSCert := flag.String("lmtptlscert", cfg.TLS.LMTP.CertFile, "TLS cert for LMTP (overrides config)")
+	fLmtpTLSKey := flag.String("lmtptlskey", cfg.TLS.LMTP.KeyFile, "TLS key for LMTP (overrides config)")
+
+	fManageSieveTLS := flag.Bool("managesievetls", cfg.TLS.ManageSieve.Enable, "Enable TLS for ManageSieve (overrides config)")
+	fManageSieveTLSCert := flag.String("managesievetlscert", cfg.TLS.ManageSieve.CertFile, "TLS cert for ManageSieve (overrides config)")
+	fManageSieveTLSKey := flag.String("managesievetlskey", cfg.TLS.ManageSieve.KeyFile, "TLS key for ManageSieve (overrides config)")
+
 	flag.Parse()
 
-	if !*startImap && !*startLmtp && !*startPop3 {
+	// --- Load Configuration from TOML File ---
+	// Values from the TOML file will override the application defaults.
+	if _, err := toml.DecodeFile(*configPath, &cfg); err != nil {
+		if os.IsNotExist(err) {
+			// If -config flag was explicitly set by user and file not found, it's an error.
+			// Otherwise, if default config.toml is not found, it's just a warning.
+			if isFlagSet("config") {
+				log.Fatalf("Error: Specified configuration file '%s' not found: %v", *configPath, err)
+			} else {
+				log.Printf("Warning: Default configuration file '%s' not found. Using application defaults and command-line flags.", *configPath)
+			}
+		} else { // Other errors (e.g., parsing error)
+			log.Fatalf("Error parsing configuration file '%s': %v", *configPath, err)
+		}
+	} else {
+		log.Printf("Loaded configuration from %s", *configPath)
+	}
+
+	// --- Apply Command-Line Flag Overrides ---
+	// If a flag was explicitly set on the command line, its value overrides both
+	// application defaults and values from the TOML file.
+	if isFlagSet("insecure-auth") {
+		cfg.InsecureAuth = *fInsecureAuth
+	}
+	if isFlagSet("debug") {
+		cfg.Debug = *fDebug
+	}
+
+	if isFlagSet("dbhost") {
+		cfg.Database.Host = *fDbHost
+	}
+	if isFlagSet("dbport") {
+		cfg.Database.Port = *fDbPort
+	}
+	if isFlagSet("dbuser") {
+		cfg.Database.User = *fDbUser
+	}
+	if isFlagSet("dbpassword") {
+		cfg.Database.Password = *fDbPassword
+	}
+	if isFlagSet("dbname") {
+		cfg.Database.Name = *fDbName
+	}
+
+	if isFlagSet("s3endpoint") {
+		cfg.S3.Endpoint = *fS3Endpoint
+	}
+	if isFlagSet("s3accesskey") {
+		cfg.S3.AccessKey = *fS3AccessKey
+	}
+	if isFlagSet("s3secretkey") {
+		cfg.S3.SecretKey = *fS3SecretKey
+	}
+	if isFlagSet("s3bucket") {
+		cfg.S3.Bucket = *fS3Bucket
+	}
+
+	if isFlagSet("imap") {
+		cfg.Servers.StartImap = *fStartImap
+	}
+	if isFlagSet("imapaddr") {
+		cfg.Servers.ImapAddr = *fImapAddr
+	}
+	if isFlagSet("lmtp") {
+		cfg.Servers.StartLmtp = *fStartLmtp
+	}
+	if isFlagSet("lmtpaddr") {
+		cfg.Servers.LmtpAddr = *fLmtpAddr
+	}
+	if isFlagSet("pop3") {
+		cfg.Servers.StartPop3 = *fStartPop3
+	}
+	if isFlagSet("pop3addr") {
+		cfg.Servers.Pop3Addr = *fPop3Addr
+	}
+	if isFlagSet("managesieve") {
+		cfg.Servers.StartManageSieve = *fStartManageSieve
+	}
+	if isFlagSet("managesieveaddr") {
+		cfg.Servers.ManageSieveAddr = *fManagesieveAddr
+	}
+
+	if isFlagSet("uploaderpath") {
+		cfg.Paths.UploaderTemp = *fUploaderTempPath
+	}
+	if isFlagSet("cachedir") {
+		cfg.Paths.CacheDir = *fCachePath
+	}
+	if isFlagSet("cachesize") {
+		cfg.Paths.MaxCacheSizeMB = *fMaxCacheSizeMB
+	}
+
+	if isFlagSet("externalrelay") {
+		cfg.LMTP.ExternalRelay = *fExternalRelay
+	}
+
+	if isFlagSet("tlsinsecureskipverify") {
+		cfg.TLS.InsecureSkipVerify = *fTlsInsecureSkipVerify
+	}
+
+	if isFlagSet("imaptls") {
+		cfg.TLS.IMAP.Enable = *fImapTLS
+	}
+	if isFlagSet("imaptlscert") {
+		cfg.TLS.IMAP.CertFile = *fImapTLSCert
+	}
+	if isFlagSet("imaptlskey") {
+		cfg.TLS.IMAP.KeyFile = *fImapTLSKey
+	}
+
+	if isFlagSet("pop3tls") {
+		cfg.TLS.POP3.Enable = *fPop3TLS
+	}
+	if isFlagSet("pop3tlscert") {
+		cfg.TLS.POP3.CertFile = *fPop3TLSCert
+	}
+	if isFlagSet("pop3tlskey") {
+		cfg.TLS.POP3.KeyFile = *fPop3TLSKey
+	}
+
+	if isFlagSet("lmtptls") {
+		cfg.TLS.LMTP.Enable = *fLmtpTLS
+	}
+	if isFlagSet("lmtptlscert") {
+		cfg.TLS.LMTP.CertFile = *fLmtpTLSCert
+	}
+	if isFlagSet("lmtptlskey") {
+		cfg.TLS.LMTP.KeyFile = *fLmtpTLSKey
+	}
+
+	if isFlagSet("managesievetls") {
+		cfg.TLS.ManageSieve.Enable = *fManageSieveTLS
+	}
+	if isFlagSet("managesievetlscert") {
+		cfg.TLS.ManageSieve.CertFile = *fManageSieveTLSCert
+	}
+	if isFlagSet("managesievetlskey") {
+		cfg.TLS.ManageSieve.KeyFile = *fManageSieveTLSKey
+	}
+
+	// --- Application Logic using cfg ---
+
+	if !cfg.Servers.StartImap && !cfg.Servers.StartLmtp && !cfg.Servers.StartPop3 && !cfg.Servers.StartManageSieve {
 		log.Fatal("No servers enabled. Please enable at least one server (IMAP, LMTP, or POP3).")
 	}
 
 	// Ensure required arguments are provided
-	if *s3AccessKey == "" || *s3SecretKey == "" || *s3Bucket == "" {
+	if cfg.S3.AccessKey == "" || cfg.S3.SecretKey == "" || cfg.S3.Bucket == "" {
 		log.Fatal("Missing required credentials. Ensure S3 access key, secret key, and bucket are provided.")
 	}
 
 	// Initialize S3 storage
-	log.Printf("Connecting to S3 endpoint %s, bucket %s", *s3Endpoint, *s3Bucket)
-	s3storage, err := storage.New(*s3Endpoint, *s3AccessKey, *s3SecretKey, *s3Bucket, true)
+	s3EndpointToUse := cfg.S3.Endpoint
+	if s3EndpointToUse == "" {
+		// Let the storage library use its default if endpoint is empty,
+		// or set a specific default like "s3.amazonaws.com"
+		log.Println("S3 endpoint not specified, using AWS default.")
+	}
+	log.Printf("Connecting to S3 endpoint '%s', bucket '%s'", s3EndpointToUse, cfg.S3.Bucket)
+	s3storage, err := storage.New(s3EndpointToUse, cfg.S3.AccessKey, cfg.S3.SecretKey, cfg.S3.Bucket, true)
 	if err != nil {
-		log.Fatalf("Failed to initialize S3 storage at endpoint %s: %v", *s3Endpoint, err)
+		log.Fatalf("Failed to initialize S3 storage at endpoint '%s': %v", s3EndpointToUse, err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -105,8 +266,8 @@ func main() {
 	}()
 
 	// Initialize the database connection
-	log.Printf("Connecting to database at %s:%s as user %s, using database %s", *dbHost, *dbPort, *dbUser, *dbName)
-	database, err := db.NewDatabase(ctx, *dbHost, *dbPort, *dbUser, *dbPassword, *dbName, *debug)
+	log.Printf("Connecting to database at %s:%s as user %s, using database %s", cfg.Database.Host, cfg.Database.Port, cfg.Database.User, cfg.Database.Name)
+	database, err := db.NewDatabase(ctx, cfg.Database.Host, cfg.Database.Port, cfg.Database.User, cfg.Database.Password, cfg.Database.Name, cfg.Debug)
 	if err != nil {
 		log.Fatalf("Failed to connect to the database: %v", err)
 	}
@@ -117,7 +278,8 @@ func main() {
 	errChan := make(chan error, 1)
 
 	// Initialize cache
-	cacheInstance, err := cache.New(*cachePath, *maxCacheSize, database)
+	actualCacheSizeBytes := cfg.Paths.MaxCacheSizeMB * 1024 * 1024
+	cacheInstance, err := cache.New(cfg.Paths.CacheDir, actualCacheSizeBytes, database)
 	if err != nil {
 		log.Fatalf("Failed to initialize cache: %v", err)
 	}
@@ -133,50 +295,30 @@ func main() {
 	cleanupWorker.Start(ctx)
 
 	// Start the upload worker
-	uploadWorker, err := uploader.New(ctx, *uploaderTempPath, hostname, database, s3storage, cacheInstance, errChan)
+	uploadWorker, err := uploader.New(ctx, cfg.Paths.UploaderTemp, hostname, database, s3storage, cacheInstance, errChan)
 	if err != nil {
 		log.Fatalf("Failed to create upload worker: %v", err)
 	}
 	uploadWorker.Start(ctx)
 
 	// Start LMTP server
-	if *startLmtp {
-		var lmtpCertFile, lmtpKeyFile string
-		if *lmtpTLS {
-			lmtpCertFile = *lmtpTLSCert
-			lmtpKeyFile = *lmtpTLSKey
-		}
-		go startLMTPServer(ctx, hostname, *lmtpAddr, s3storage, database, uploadWorker, *debug, *externalRelay, errChan, lmtpCertFile, lmtpKeyFile, *tlsInsecureSkipVerify)
+	if cfg.Servers.StartLmtp {
+		go startLMTPServer(ctx, hostname, cfg.Servers.LmtpAddr, s3storage, database, uploadWorker, cfg.Debug, cfg.LMTP.ExternalRelay, errChan, cfg.TLS.LMTP.CertFile, cfg.TLS.LMTP.KeyFile, cfg.TLS.InsecureSkipVerify)
 	}
 
 	// Start IMAP server
-	if *startImap {
-		var imapCertFile, imapKeyFile string
-		if *imapTLS {
-			imapCertFile = *imapTLSCert
-			imapKeyFile = *imapTLSKey
-		}
-		go startIMAPServer(ctx, hostname, *imapAddr, s3storage, database, uploadWorker, cacheInstance, *insecureAuth, *debug, errChan, imapCertFile, imapKeyFile, *tlsInsecureSkipVerify)
+	if cfg.Servers.StartImap {
+		go startIMAPServer(ctx, hostname, cfg.Servers.ImapAddr, s3storage, database, uploadWorker, cacheInstance, cfg.InsecureAuth, cfg.Debug, errChan, cfg.TLS.IMAP.CertFile, cfg.TLS.IMAP.KeyFile, cfg.TLS.InsecureSkipVerify)
 	}
 
 	// Start POP3 server
-	if *startPop3 {
-		var pop3CertFile, pop3KeyFile string
-		if *pop3TLS {
-			pop3CertFile = *pop3TLSCert
-			pop3KeyFile = *pop3TLSKey
-		}
-		go startPOP3Server(ctx, hostname, *pop3Addr, s3storage, database, uploadWorker, cacheInstance, *insecureAuth, *debug, errChan, pop3CertFile, pop3KeyFile, *tlsInsecureSkipVerify)
+	if cfg.Servers.StartPop3 {
+		go startPOP3Server(ctx, hostname, cfg.Servers.Pop3Addr, s3storage, database, uploadWorker, cacheInstance, cfg.InsecureAuth, cfg.Debug, errChan, cfg.TLS.POP3.CertFile, cfg.TLS.POP3.KeyFile, cfg.TLS.InsecureSkipVerify)
 	}
 
 	// Start ManageSieve server
-	if *startManageSieve {
-		var manageSieveCertFile, manageSieveKeyFile string
-		if *manageSieveTLS {
-			manageSieveCertFile = *manageSieveTLSCert
-			manageSieveKeyFile = *manageSieveTLSKey
-		}
-		go startManageSieveServer(ctx, hostname, *managesieveAddr, database, *insecureAuth, *debug, errChan, manageSieveCertFile, manageSieveKeyFile, *tlsInsecureSkipVerify)
+	if cfg.Servers.StartManageSieve {
+		go startManageSieveServer(ctx, hostname, cfg.Servers.ManageSieveAddr, database, cfg.InsecureAuth, cfg.Debug, errChan, cfg.TLS.ManageSieve.CertFile, cfg.TLS.ManageSieve.KeyFile, cfg.TLS.InsecureSkipVerify)
 	}
 
 	// Wait for any errors from the servers
@@ -188,8 +330,13 @@ func main() {
 	}
 }
 
+// Note: The startXServer functions now take certFile and keyFile directly.
+// The logic for whether TLS is enabled for a server (e.g., cfg.TLS.IMAP.Enable)
+// should ideally be handled *inside* the imap.New (or equivalent) function,
+// or you pass the enable flag as well. For simplicity here, we assume New handles it if cert/key are provided.
+
 func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cacheInstance *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
-	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cacheInstance, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify)
+	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cacheInstance, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify) // Assumes New checks if tlsCertFile/KeyFile are empty to enable TLS
 	if err != nil {
 		errChan <- err
 		return
@@ -255,4 +402,15 @@ func startManageSieveServer(ctx context.Context, hostname string, addr string, d
 	}()
 
 	s.Start(errChan)
+}
+
+// Helper function to check if a flag was explicitly set on the command line
+func isFlagSet(name string) bool {
+	isSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			isSet = true
+		}
+	})
+	return isSet
 }

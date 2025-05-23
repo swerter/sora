@@ -20,6 +20,7 @@ require (
 replace github.com/foxcpp/go-sieve => github.com/migadu/go-sieve v0.0.0-20240130002450-72d6b002882a
 
 require (
+	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
