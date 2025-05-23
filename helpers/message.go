@@ -1,7 +1,6 @@
 package helpers
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/mail"
 	"github.com/k3a/html2text"
+	"lukechampine.com/blake3"
 )
 
 func ExtractPlaintextBody(msg *message.Entity) (*string, error) {
@@ -90,9 +90,6 @@ func DecodeToBinary(part *message.Entity) (io.Reader, error) {
 }
 
 func HashContent(content []byte) string {
-	sha256 := sha256.New()
-	sha256.Write(content)
-	content = sha256.Sum(nil)
-	// Convert the hash to a hexadecimal string
-	return fmt.Sprintf("%x", content)
+	hash := blake3.Sum256(content)
+	return fmt.Sprintf("%x", hash)
 }
