@@ -2,6 +2,7 @@
 
 insecure_auth = false
 debug = false
+log_output = "stderr"
 
 [database]
 host = "localhost"

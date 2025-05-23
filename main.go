@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/syslog" // Added for syslog logging
 	"os"
 	"os/signal"
 	"syscall"
@@ -29,6 +30,9 @@ func main() {
 	// --- Define Command-Line Flags ---
 	// These flags will override values from the config file if set.
 	// Their default values are set from the initial `cfg` for consistent -help messages.
+
+	// Logging flag - its default comes from cfg.LogOutput
+	fLogOutput := flag.String("logoutput", cfg.LogOutput, "Log output destination: 'syslog' or 'stderr' (overrides config)")
 
 	configPath := flag.String("config", "config.toml", "Path to TOML configuration file")
 
@@ -91,21 +95,56 @@ func main() {
 
 	// --- Load Configuration from TOML File ---
 	// Values from the TOML file will override the application defaults.
+	// This is done *before* applying command-line flag overrides for logging,
+	// so the TOML value for LogOutput can be used if the flag isn't set.
 	if _, err := toml.DecodeFile(*configPath, &cfg); err != nil {
 		if os.IsNotExist(err) {
-			// If -config flag was explicitly set by user and file not found, it's an error.
-			// Otherwise, if default config.toml is not found, it's just a warning.
-			if isFlagSet("config") {
+			if isFlagSet("config") { // User explicitly set -config
 				log.Fatalf("Error: Specified configuration file '%s' not found: %v", *configPath, err)
 			} else {
 				log.Printf("Warning: Default configuration file '%s' not found. Using application defaults and command-line flags.", *configPath)
 			}
-		} else { // Other errors (e.g., parsing error)
+		} else {
 			log.Fatalf("Error parsing configuration file '%s': %v", *configPath, err)
 		}
 	} else {
 		log.Printf("Loaded configuration from %s", *configPath)
 	}
+
+	// --- Determine Final Log Output ---
+	// Precedence: 1. Command-line flag, 2. TOML config, 3. Default
+	finalLogOutput := cfg.LogOutput // Start with config file value (or default if no config file)
+	if isFlagSet("logoutput") {
+		finalLogOutput = *fLogOutput // Command-line flag overrides
+	}
+
+	// --- Initialize Logging ---
+	// This must be done *after* flags are parsed and config is loaded.
+	var initialLogMessage string
+
+	switch finalLogOutput {
+	case "syslog":
+		syslogWriter, err := syslog.New(syslog.LOG_INFO|syslog.LOG_DAEMON, "sora")
+		if err != nil {
+			log.Printf("WARNING: Failed to connect to syslog (specified by '%s'): %v. Logging will fall back to standard error.", finalLogOutput, err)
+			initialLogMessage = fmt.Sprintf("SORA application starting. Logging to standard error (syslog connection failed, selected by '%s').", finalLogOutput)
+		} else {
+			log.SetOutput(syslogWriter)
+			log.SetFlags(0)
+			defer syslogWriter.Close()
+			initialLogMessage = fmt.Sprintf("SORA application starting. Logging initialized to syslog (selected by '%s').", finalLogOutput)
+		}
+	case "stderr":
+		initialLogMessage = fmt.Sprintf("SORA application starting. Logging initialized to standard error (selected by '%s').", finalLogOutput)
+	default:
+		log.Printf("WARNING: Invalid logoutput value '%s' (from config or flag). Application will log to standard error.", finalLogOutput)
+		initialLogMessage = fmt.Sprintf("SORA application starting. Logging to standard error (invalid logoutput '%s').", finalLogOutput)
+	}
+	log.Println(initialLogMessage)
+
+	// --- Apply Command-Line Flag Overrides (for flags other than logoutput) ---
+	// If a flag was explicitly set on the command line, its value overrides both
+	// application defaults and values from the TOML file.
 
 	// --- Apply Command-Line Flag Overrides ---
 	// If a flag was explicitly set on the command line, its value overrides both
