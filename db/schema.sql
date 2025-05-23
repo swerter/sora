@@ -1,8 +1,21 @@
 CREATE TABLE IF NOT EXISTS users (
 	id BIGSERIAL PRIMARY KEY,
-	username TEXT UNIQUE NOT NULL, -- Already indexed because of the UNIQUE constraint
-	password TEXT NOT NULL
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
+
+-- A table to store user passwords and identities
+CREATE TABLE IF NOT EXISTS passwords (
+	id BIGSERIAL PRIMARY KEY,
+	user_id BIGINT REFERENCES users(id),
+	username TEXT UNIQUE NOT NULL, 	
+	password TEXT NOT NULL,
+	primary_identity BOOLEAN DEFAULT FALSE, -- Flag to indicate if this is the primary identity
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+);
+
+-- Index to ensure that a user can have at most one primary identity.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_passwords_user_id_one_primary ON passwords (user_id) WHERE primary_identity IS TRUE;
 
 CREATE TABLE IF NOT EXISTS mailboxes (
 	id BIGSERIAL PRIMARY KEY,	
@@ -12,7 +25,9 @@ CREATE TABLE IF NOT EXISTS mailboxes (
 	uid_validity BIGINT NOT NULL,                                -- Include uid_validity column for IMAP
 	parent_id BIGINT REFERENCES mailboxes(id) ON DELETE CASCADE, -- Self-referencing for parent mailbox	
 	subscribed BOOLEAN DEFAULT TRUE,  							 -- New field to track mailbox subscription status
-	UNIQUE (user_id, name, parent_id)  							 -- Enforce unique mailbox names per user and parent mailbox
+	UNIQUE (user_id, name, parent_id), 							 -- Enforce unique mailbox names per user and parent mailbox
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
 -- Index for faster mailbox lookups by user_id and case insensitive name
@@ -70,7 +85,9 @@ CREATE TABLE IF NOT EXISTS messages (
 
 	created_modseq BIGINT NOT NULL,
 	updated_modseq BIGINT,
-	expunged_modseq BIGINT
+	expunged_modseq BIGINT,
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
 -- Index for faster lookups by user_id and mailbox_id
@@ -131,7 +148,8 @@ CREATE TABLE IF NOT EXISTS pending_uploads (
 	attempts INTEGER DEFAULT 0,
 	last_attempt TIMESTAMPTZ,
 	size INTEGER NOT NULL,
-	created_at TIMESTAMPTZ DEFAULT now()
+	created_at TIMESTAMPTZ DEFAULT now(),
+	updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- Index for retry loop: ordered by creation time
@@ -157,11 +175,17 @@ CREATE TABLE IF NOT EXISTS sieve_scripts (
 	user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
 	active BOOLEAN NOT NULL DEFAULT TRUE,
 	name TEXT NOT NULL,
-	script TEXT NOT NULL
+	script TEXT NOT NULL,
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	UNIQUE (user_id, name) 	-- Enforce unique script name per user
 );
 
 -- Index to speed up sieve script lookups by user_id
 CREATE INDEX IF NOT EXISTS idx_sieve_scripts_user_id ON sieve_scripts (user_id);
+
+-- Index to ensure that a user can have at most one active sieve script.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sieve_scripts_user_id_one_active ON sieve_scripts (user_id) WHERE active IS TRUE;
 
 -- Vacation responses tracking table
 CREATE TABLE IF NOT EXISTS vacation_responses (
@@ -169,7 +193,9 @@ CREATE TABLE IF NOT EXISTS vacation_responses (
 	user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
 	sender_address TEXT NOT NULL,
 	response_date TIMESTAMPTZ NOT NULL,
-	created_at TIMESTAMPTZ DEFAULT now() NOT NULL
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	UNIQUE (user_id, sender_address, response_date) -- Enforce unique responses per user and sender
 );
 
 -- Index for faster lookups by user_id and sender_address

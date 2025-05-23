@@ -11,7 +11,6 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/google/uuid"
 	"github.com/migadu/sora/db"
-	"github.com/migadu/sora/server/sieveengine"
 	"github.com/migadu/sora/server/uploader"
 	"github.com/migadu/sora/storage"
 )
@@ -21,12 +20,11 @@ type LMTPServerBackend struct {
 	hostname      string
 	db            *db.Database
 	s3            *storage.S3Storage
-	appCtx        context.Context
 	uploader      *uploader.UploadWorker
-	sieve         sieveengine.Executor
 	server        *smtp.Server
+	appCtx        context.Context
 	externalRelay string
-	tlsConfig     *tls.Config // TLS configuration
+	tlsConfig     *tls.Config
 }
 
 func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, db *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string, tlsCertFile, tlsKeyFile string, insecureSkipVerify ...bool) (*LMTPServerBackend, error) {
@@ -40,7 +38,6 @@ func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, d
 		externalRelay: externalRelay,
 	}
 
-	// Setup TLS if certificate and key files are provided
 	if tlsCertFile != "" && tlsKeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
 		if err != nil {
@@ -48,16 +45,15 @@ func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, d
 		}
 		backend.tlsConfig = &tls.Config{
 			Certificates:             []tls.Certificate{cert},
-			MinVersion:               tls.VersionTLS12, // Allow older TLS versions for better compatibility
+			MinVersion:               tls.VersionTLS12,
 			ClientAuth:               tls.NoClientCert,
 			ServerName:               hostname,
-			PreferServerCipherSuites: true, // Prefer server cipher suites over client cipher suites
+			PreferServerCipherSuites: true,
 		}
 
-		// Set InsecureSkipVerify if requested (for self-signed certificates)
 		if len(insecureSkipVerify) > 0 && insecureSkipVerify[0] {
 			backend.tlsConfig.InsecureSkipVerify = true
-			log.Printf("WARNING: TLS certificate verification disabled for LMTP server")
+			log.Printf("[LMTP] WARNING: TLS certificate verification disabled for LMTP server")
 		}
 	}
 
@@ -68,10 +64,8 @@ func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, d
 	s.LMTP = true
 	s.TLSConfig = backend.tlsConfig
 
-	// Save the server instance in the backend
 	backend.server = s
 
-	// This server supports only TCP connections
 	s.Network = "tcp"
 
 	var debugWriter io.Writer
@@ -84,26 +78,25 @@ func New(appCtx context.Context, hostname, addr string, s3 *storage.S3Storage, d
 }
 
 func (b *LMTPServerBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
-	// Create a new cancellable context for this session, derived from the server's application context.
-	// This ensures the session context is cancelled when the main application context is cancelled.
 	sessionCtx, sessionCancel := context.WithCancel(b.appCtx)
 	s := &LMTPSession{
 		backend: b,
 		conn:    c,
 		ctx:     sessionCtx,
-		cancel:  sessionCancel, // Store the cancel function
+		cancel:  sessionCancel,
 	}
 	s.RemoteIP = c.Conn().RemoteAddr().String()
 	s.Id = uuid.New().String()
 	s.HostName = b.hostname
 	s.Protocol = "LMTP"
 
-	s.Log("New session")
+	s.Log("[LMTP] new session remote=%s id=%s", s.RemoteIP, s.Id)
+
 	return s, nil
 }
 
 func (b *LMTPServerBackend) Start(errChan chan error) {
-	log.Printf("LMTP listening on %s", b.server.Addr)
+	log.Printf("[LMTP]listening on %s", b.server.Addr)
 	if err := b.server.ListenAndServe(); err != nil {
 		// Check if the error is due to context cancellation (graceful shutdown)
 		// b.appCtx.Err() will be non-nil if the context was canceled.
@@ -113,7 +106,6 @@ func (b *LMTPServerBackend) Start(errChan chan error) {
 	}
 }
 
-// Close stops the LMTP server.
 func (b *LMTPServerBackend) Close() error {
 	if b.server != nil {
 		return b.server.Close()

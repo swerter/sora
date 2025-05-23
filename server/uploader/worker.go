@@ -46,7 +46,7 @@ func New(ctx context.Context, tempPath string, instanceID string, db *db.Databas
 }
 
 func (w *UploadWorker) Start(ctx context.Context) {
-	log.Println("Starting upload worker")
+	log.Println("[UPLOADER] starting worker")
 
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -181,7 +181,7 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 
 	err = w.db.CompleteS3Upload(ctx, upload.ContentHash)
 	if err != nil {
-		log.Printf("[UPLOADER] - Warning: failed to finalize S3 upload for hash %s: %v", upload.ContentHash, err)
+		log.Printf("[UPLOADER] - WARNING: failed to finalize S3 upload for hash %s: %v", upload.ContentHash, err)
 	} else {
 		log.Printf("[UPLOADER] upload completed for hash %s, ", upload.ContentHash)
 	}
@@ -204,7 +204,7 @@ func (w *UploadWorker) StoreLocally(contentHash string, data []byte) (*string, e
 
 func (w *UploadWorker) RemoveLocalFile(path string) error {
 	if err := os.Remove(path); err != nil {
-		log.Printf("[UPLOADER] - Warning: uploaded but could not delete file %s: %v", path, err)
+		log.Printf("[UPLOADER] - WARNING: uploaded but could not delete file %s: %v", path, err)
 	} else {
 		stopAt, _ := filepath.Abs(w.tempPath)
 		removeEmptyParents(path, stopAt)

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -15,7 +16,8 @@ type PendingUpload struct {
 	Size        int64
 	Attempts    int
 	CreatedAt   time.Time
-	LastAttempt time.Time
+	UpdatedAt   time.Time
+	LastAttempt sql.NullTime
 }
 
 // AcquireAndLeasePendingUploads selects pending uploads for a given instance,
@@ -32,7 +34,7 @@ func (db *Database) AcquireAndLeasePendingUploads(ctx context.Context, instanceI
 	retryTasksLastAttemptBefore := time.Now().Add(-consts.PENDING_UPLOAD_RETRY_INTERVAL)
 
 	rows, err := tx.Query(ctx, `
-		SELECT id, content_hash, size, instance_id, attempts
+		SELECT id, content_hash, size, instance_id, attempts, created_at, updated_at, last_attempt
 		FROM pending_uploads
 		WHERE instance_id = $1
 		  AND (attempts < $2)
@@ -50,7 +52,7 @@ func (db *Database) AcquireAndLeasePendingUploads(ctx context.Context, instanceI
 	var acquiredIDs []int64
 	for rows.Next() {
 		var u PendingUpload
-		if err := rows.Scan(&u.ID, &u.ContentHash, &u.Size, &u.InstanceID, &u.Attempts); err != nil {
+		if err := rows.Scan(&u.ID, &u.ContentHash, &u.Size, &u.InstanceID, &u.Attempts, &u.CreatedAt, &u.UpdatedAt, &u.LastAttempt); err != nil {
 			return nil, fmt.Errorf("failed to scan pending upload: %w", err)
 		}
 		uploads = append(uploads, u)
