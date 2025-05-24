@@ -106,13 +106,3 @@ func (s *IMAPSession) decodeNumSet(numSet imap.NumSet) imap.NumSet {
 	}
 	return out
 }
-
-func (s *IMAPSession) PermittedFlags() []imap.Flag {
-	if s.selectedMailbox == nil {
-		return []imap.Flag{}
-	}
-	return []imap.Flag{
-		imap.FlagSeen, imap.FlagAnswered, imap.FlagFlagged,
-		imap.FlagDeleted, imap.FlagDraft,
-	}
-}

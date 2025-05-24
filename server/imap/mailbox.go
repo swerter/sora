@@ -1,12 +1,13 @@
 package imap
 
 import (
-	"strings"
+	"context"
+	"log"
+	"sort"
 	"sync"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
-	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
 )
 
@@ -32,34 +33,62 @@ func NewMailbox(dbmbx *db.DBMailbox, numMessages uint32, highestModSeq uint64) *
 	}
 }
 
-func (m *Mailbox) PermittedFlags() []imap.Flag {
-	var permFlags []imap.Flag
-	switch strings.ToUpper(m.Name) {
-	case strings.ToUpper(consts.MAILBOX_DRAFTS):
-		// Special case for the Drafts folder
-		permFlags = []imap.Flag{
-			imap.FlagSeen,     // Messages can be marked as read
-			imap.FlagAnswered, // Messages can be marked as answered
-			imap.FlagFlagged,  // Messages can be flagged
-			imap.FlagDeleted,  // Messages can be marked for deletion
-			imap.FlagDraft,    // Special Draft flag for drafts
-		}
-	case strings.ToUpper(consts.MAILBOX_INBOX):
-		// Common flags for INBOX, excluding the Draft flag
-		permFlags = []imap.Flag{
-			imap.FlagSeen,
-			imap.FlagAnswered,
-			imap.FlagFlagged,
-			imap.FlagDeleted,
-		}
-	default:
-		// General case for other mailboxes like Sent, Trash, etc.
-		permFlags = []imap.Flag{
-			imap.FlagSeen,
-			imap.FlagAnswered,
-			imap.FlagFlagged,
-			imap.FlagDeleted,
+// GetPermanentFlags returns flags that can be permanently changed, including \* for custom flags.
+func getPermanentFlags() []imap.Flag {
+	// All mailboxes allow standard system flags to be set.
+	// The \* indicates that clients can define their own keywords.
+	return []imap.Flag{
+		imap.FlagSeen, imap.FlagAnswered, imap.FlagFlagged, imap.FlagDeleted, imap.FlagDraft, imap.FlagWildcard,
+	}
+}
+
+// GetDisplayFlags returns flags that are "defined" for this mailbox.
+// This includes standard system flags, common keywords, and any custom flags
+// found to be in use within this specific mailbox.
+// This is used for the FLAGS response in SELECT/EXAMINE.
+func getDisplayFlags(ctx context.Context, dbInstance *db.Database, dbMbox *db.DBMailbox) []imap.Flag {
+	// Start with a base set of system flags and common keywords
+	// Using a map to ensure uniqueness
+	flagsMap := make(map[imap.Flag]struct{})
+
+	baseFlags := []imap.Flag{
+		// Standard system flags
+		imap.FlagSeen,
+		imap.FlagAnswered,
+		imap.FlagFlagged,
+		imap.FlagDeleted,
+		imap.FlagDraft,
+		// Common custom flags (keywords) that clients might expect or use
+		imap.FlagForwarded, // $Forwarded
+		imap.FlagImportant, // $Important (RFC 8457)
+		imap.FlagPhishing,  // $Phishing
+		imap.FlagJunk,      // $Junk
+		imap.FlagNotJunk,   // $NotJunk
+	}
+
+	for _, f := range baseFlags {
+		flagsMap[f] = struct{}{}
+	}
+
+	// Fetch custom flags actually used in this mailbox from the database
+	// m.DBMailbox is embedded, so m.ID gives the mailbox ID.
+	if dbInstance != nil && dbMbox.ID > 0 {
+		customFlagsFromDB, err := dbInstance.GetUniqueCustomFlagsForMailbox(ctx, dbMbox.ID)
+		if err != nil {
+			// Log the error, but don't fail the SELECT/EXAMINE.
+			// The client will still get the base set of flags.
+			log.Printf("Error fetching custom flags for mailbox %d (%s): %v", dbMbox.ID, dbMbox.Name, err)
+		} else {
+			for _, cf := range customFlagsFromDB {
+				flagsMap[imap.Flag(cf)] = struct{}{}
+			}
 		}
 	}
-	return permFlags
+
+	finalFlagsList := make([]imap.Flag, 0, len(flagsMap))
+	for f := range flagsMap {
+		finalFlagsList = append(finalFlagsList, f)
+	}
+	sort.Slice(finalFlagsList, func(i, j int) bool { return finalFlagsList[i] < finalFlagsList[j] }) // For consistent order
+	return finalFlagsList
 }

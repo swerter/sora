@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"database/sql"
@@ -13,8 +14,9 @@ import (
 type MessageUpdate struct {
 	UID          imap.UID
 	SeqNum       uint32
-	BitwiseFlags uint64
+	BitwiseFlags int // Matches the 'flags' column type in messages table (INTEGER)
 	IsExpunge    bool
+	CustomFlags  []string
 }
 
 type MailboxPoll struct {
@@ -44,6 +46,7 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 			        m.uid,
 			        ROW_NUMBER() OVER (ORDER BY m.id) AS seq_num,
 			        m.flags,
+			        m.custom_flags,
 			        m.created_modseq,
 			        m.updated_modseq,
 			        m.expunged_modseq
@@ -55,6 +58,7 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 			        cms.uid,
 			        cms.seq_num,
 			        cms.flags,
+			        cms.custom_flags,
 			        cms.expunged_modseq,
 			        true AS is_message_update
 			    FROM current_mailbox_state cms
@@ -66,6 +70,7 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 			    cm.uid,
 			    cm.seq_num,
 			    cm.flags,
+			    cm.custom_flags,
 			    cm.expunged_modseq,
 			    cm.is_message_update,
 			    gs.total_messages,
@@ -76,6 +81,7 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 			    NULL AS uid,
 			    NULL AS seq_num,
 			    NULL AS flags,
+			    NULL AS custom_flags,
 			    NULL AS expunged_modseq,
 			    false AS is_message_update,
 			    gs.total_messages,
@@ -101,8 +107,9 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 		var (
 			uidScannable          sql.NullInt32 // imap.UID is uint32
 			seqNumScannable       sql.NullInt32 // uint32
-			bitwiseFlagsScannable sql.NullInt64 // uint64
+			bitwiseFlagsScannable sql.NullInt32 // INTEGER in DB
 			expungedModSeqPtr     *int64
+			customFlagsJSON       []byte
 			isMessageUpdate       bool
 			rowTotalMessages      uint32
 			rowCurrentModSeq      uint64
@@ -112,6 +119,7 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 			&uidScannable,
 			&seqNumScannable,
 			&bitwiseFlagsScannable,
+			&customFlagsJSON,
 			&expungedModSeqPtr,
 			&isMessageUpdate,
 			&rowTotalMessages,
@@ -131,11 +139,18 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 			if !uidScannable.Valid || !seqNumScannable.Valid || !bitwiseFlagsScannable.Valid {
 				return nil, fmt.Errorf("unexpected NULL value in message update row: uid_valid=%v, seq_valid=%v, flags_valid=%v", uidScannable.Valid, seqNumScannable.Valid, bitwiseFlagsScannable.Valid)
 			}
+			var customFlags []string
+			if customFlagsJSON != nil { // Will be []byte("[]") if empty, or []byte("null")
+				if err := json.Unmarshal(customFlagsJSON, &customFlags); err != nil {
+					return nil, fmt.Errorf("failed to unmarshal custom_flags in poll: %w, json: %s", err, string(customFlagsJSON))
+				}
+			}
 			updates = append(updates, MessageUpdate{
 				UID:          imap.UID(uidScannable.Int32),
 				SeqNum:       uint32(seqNumScannable.Int32),
-				BitwiseFlags: uint64(bitwiseFlagsScannable.Int64),
+				BitwiseFlags: int(bitwiseFlagsScannable.Int32),
 				IsExpunge:    expungedModSeqPtr != nil,
+				CustomFlags:  customFlags,
 			})
 		}
 	}

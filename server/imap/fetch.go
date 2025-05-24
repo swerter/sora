@@ -150,7 +150,7 @@ func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, o
 		}
 
 		if len(options.BodySection) > 0 {
-			if err := s.handleBodySections(m, bodyData, options, msg); err != nil {
+			if err := s.handleBodySections(m, bodyData, options, msg, selectedMailboxID); err != nil {
 				return err
 			}
 		}
@@ -191,7 +191,12 @@ func (s *IMAPSession) fetchMessage(w *imapserver.FetchWriter, msg *db.Message, o
 // Fetch helper to write basic message data (FLAGS, UID, INTERNALDATE, RFC822.SIZE)
 func (s *IMAPSession) writeBasicMessageData(m *imapserver.FetchResponseWriter, msg *db.Message, options *imap.FetchOptions) error {
 	if options.Flags {
-		m.WriteFlags(db.BitwiseToFlags(msg.BitwiseFlags))
+		allFlags := db.BitwiseToFlags(msg.BitwiseFlags) // System flags
+
+		for _, customFlag := range msg.CustomFlags {
+			allFlags = append(allFlags, imap.Flag(customFlag))
+		}
+		m.WriteFlags(allFlags)
 	}
 	if options.UID {
 		m.WriteUID(msg.UID)
@@ -248,11 +253,64 @@ func (s *IMAPSession) handleBinarySectionSize(w *imapserver.FetchResponseWriter,
 }
 
 // Fetch helper to handle BODY sections for a message
-func (s *IMAPSession) handleBodySections(w *imapserver.FetchResponseWriter, bodyData []byte, options *imap.FetchOptions, msg *db.Message) error {
+func (s *IMAPSession) handleBodySections(w *imapserver.FetchResponseWriter, bodyData []byte, options *imap.FetchOptions, msg *db.Message, selectedMailboxID int64) error {
 	for _, section := range options.BodySection {
-		buf := imapserver.ExtractBodySection(bytes.NewReader(bodyData), section)
-		wc := w.WriteBodySection(section, int64(len(buf)))
-		_, writeErr := wc.Write(buf)
+		var sectionContent []byte
+
+		// Check if this is a request for the main BODY[HEADER] (i.e., section specifier is HEADER and part is empty)
+		isMainHeaderRequest := section.Specifier == imap.PartSpecifierHeader && (len(section.Part) == 0)
+
+		// Check if this is a request for the main BODY[TEXT] (i.e., section specifier is TEXT and part is empty)
+		isMainBodyTextRequest := section.Specifier == imap.PartSpecifierText && (len(section.Part) == 0)
+
+		if isMainHeaderRequest {
+			// Attempt to use the pre-extracted headers from message_contents
+			headersText, dbErr := s.server.db.GetMessageHeaders(s.ctx, msg.UID, selectedMailboxID)
+			if dbErr == nil && headersText != "" {
+				sectionContent = []byte(headersText)
+				s.Log("[FETCH] UID %d: Served BODY[HEADER] from message_contents.headers", msg.UID)
+			} else {
+				if dbErr != nil {
+					s.Log("[FETCH] UID %d: Failed to get headers from DB for BODY[HEADER] ('%v'). Falling back to raw extraction.", msg.UID, dbErr)
+				} else {
+					s.Log("[FETCH] UID %d: Headers from DB for BODY[HEADER] are empty. Falling back to raw extraction.", msg.UID)
+				}
+				if bodyData != nil {
+					sectionContent = imapserver.ExtractBodySection(bytes.NewReader(bodyData), section)
+				} else {
+					s.Log("[FETCH] UID %d: Cannot fall back to raw extraction for BODY[HEADER] because raw bodyData is nil.", msg.UID)
+					sectionContent = []byte{} // IMAP expects NIL or empty literal for missing part
+				}
+			}
+		} else if isMainBodyTextRequest {
+			// Attempt to use the pre-extracted text_body from message_contents
+			textBody, dbErr := s.server.db.GetMessageTextBody(s.ctx, msg.UID, selectedMailboxID)
+			if dbErr == nil {
+				sectionContent = []byte(textBody)
+				s.Log("[FETCH] UID %d: Served BODY[TEXT] from message_contents.text_body", msg.UID)
+			} else {
+				// Log the error and fall back to extracting from the raw message body (bodyData)
+				s.Log("[FETCH] UID %d: Failed to get text_body from DB for BODY[TEXT] ('%v'). Falling back to raw extraction.", msg.UID, dbErr)
+				if bodyData != nil {
+					sectionContent = imapserver.ExtractBodySection(bytes.NewReader(bodyData), section)
+				} else {
+					s.Log("[FETCH] UID %d: Cannot fall back to raw extraction for BODY[TEXT] because raw bodyData is nil.", msg.UID)
+					sectionContent = []byte{} // IMAP expects NIL or empty literal for missing part
+				}
+			}
+		} else {
+			// For all other body sections (e.g., BODY[HEADER], BODY[1.MIME], BODY[<n>.TEXT])
+			// use the raw message data and the library's extraction logic.
+			if bodyData != nil {
+				sectionContent = imapserver.ExtractBodySection(bytes.NewReader(bodyData), section)
+			} else {
+				s.Log("[FETCH] UID %d: Cannot extract body section %v because raw bodyData is nil.", msg.UID, section)
+				sectionContent = []byte{} // IMAP expects NIL or empty literal for missing part
+			}
+		}
+
+		wc := w.WriteBodySection(section, int64(len(sectionContent)))
+		_, writeErr := wc.Write(sectionContent)
 		closeErr := wc.Close()
 		if writeErr != nil {
 			return writeErr

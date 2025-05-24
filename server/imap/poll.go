@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/migadu/sora/db"
 )
@@ -34,8 +35,11 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 			s.mailboxTracker.QueueExpunge(update.SeqNum)
 			s.currentNumMessages = s.currentNumMessages - 1
 		} else {
-			flags := db.BitwiseToFlags(int(update.BitwiseFlags))
-			s.mailboxTracker.QueueMessageFlags(update.SeqNum, update.UID, flags, nil)
+			allFlags := db.BitwiseToFlags(update.BitwiseFlags)
+			for _, customFlag := range update.CustomFlags {
+				allFlags = append(allFlags, imap.Flag(customFlag))
+			}
+			s.mailboxTracker.QueueMessageFlags(update.SeqNum, update.UID, allFlags, nil)
 		}
 	}
 

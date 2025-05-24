@@ -10,12 +10,31 @@ port = "5432"
 user = "postgres"
 password = ""
 name = "sora_mail_db"
+tls = false
+log_queries = false
 
 [s3]
 endpoint = "s3.amazonaws.com"
 access_key = "YOUR_S3_ACCESS_KEY_HERE"
 secret_key = "YOUR_S3_SECRET_KEY_HERE"
 bucket = "your-sora-mail-bucket"
+trace = false
+
+[local_cache]
+path = "/tmp/sora/cache"
+capacity = "1gb"
+max_object_size = "5mb"
+
+[uploader]
+path = "/tmp/sora/uploads"
+batch_size = 20
+concurrency = 10
+max_attempts = 5
+retry_interval = "30s"
+
+[cleanup]
+grace_period = "14d"
+wake_interval = "1h"
 
 [servers]
 start_imap = true
@@ -26,11 +45,6 @@ start_pop3 = true
 pop3_addr = ":110" # Use ":995" for POP3S default
 start_managesieve = true
 managesieve_addr = ":4190"
-
-[paths]
-uploader_temp_path = "/var/tmp/sora/uploads"
-cache_dir = "/var/tmp/sora/cache"
-max_cache_size_mb = 2048 # 2GB
 
 [lmtp]
 ## The external relay is used in SIEVE redirect and vacation auto responses.

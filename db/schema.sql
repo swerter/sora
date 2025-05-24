@@ -65,10 +65,9 @@ CREATE TABLE IF NOT EXISTS messages (
 	sent_date TIMESTAMPTZ NOT NULL,		-- The date the message was sent
 	internal_date TIMESTAMPTZ NOT NULL, -- The date the message was received
 	flags INTEGER NOT NULL,				-- Bitwise flags for the message (e.g., \Seen, \Flagged)
+	custom_flags JSONB DEFAULT '[]'::jsonb NOT NULL, -- Custom flags as a JSON array of strings (e.g., ["$Important", "$Label1"])
 	size INTEGER NOT NULL,				-- Size of the message in bytes
 	body_structure BYTEA NOT NULL,      -- Serialized BodyStructure of the message
-	text_body TEXT NOT NULL, 			-- Text body of the message
-	text_body_tsv tsvector,				-- Full-text search index for text_body
 
 	--
 	-- Keep messages if mailbox is deleted by nullifying the mailbox_id
@@ -87,7 +86,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	updated_modseq BIGINT,
 	expunged_modseq BIGINT,
 	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
-	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	CONSTRAINT max_custom_flags_check CHECK (jsonb_array_length(custom_flags) <= 50) -- Limit to 50 custom flags
 );
 
 -- Index for faster lookups by user_id and mailbox_id
@@ -133,12 +133,29 @@ CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id_expunged_modseq ON messages (
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS idx_messages_subject_trgm ON messages USING gin (LOWER(subject) gin_trgm_ops);
 
--- Index for full-text search on the text_body field
-CREATE INDEX IF NOT EXISTS idx_messages_text_body_tsv ON messages USING GIN (text_body_tsv);
+-- Index for custom_flags to speed up searches for messages with specific custom flags
+CREATE INDEX IF NOT EXISTS idx_messages_custom_flags ON messages USING GIN (custom_flags);
 
 -- Index recipients_json for faster searches on recipients
 -- This index uses the jsonb_path_ops for efficient querying
 CREATE INDEX IF NOT EXISTS idx_messages_recipients_json ON messages USING GIN (recipients_json jsonb_path_ops);
+
+-- Table to store message bodies, separated for performance
+CREATE TABLE IF NOT EXISTS message_contents (
+	content_hash VARCHAR(64) PRIMARY KEY, -- This is the same content_hash as in the messages table
+	text_body TEXT NOT NULL, 			  -- Text body of the message
+	text_body_tsv tsvector,			   	  -- Full-text search index for text_body
+	headers TEXT DEFAULT '' NOT NULL,     -- Raw message headers
+	headers_tsv tsvector,			      -- Full-text search index for headers
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+	-- No direct FK to messages.id. The link is implicit:
+	-- messages.content_hash = message_contents.content_hash
+);
+
+-- Index for full-text search on the text_body field in message_contents
+CREATE INDEX IF NOT EXISTS idx_message_contents_text_body_tsv ON message_contents USING GIN (text_body_tsv);
+CREATE INDEX IF NOT EXISTS idx_message_contents_headers_tsv ON message_contents USING GIN (headers_tsv);
 
 -- Pending uploads table for processing messages at own pace
 CREATE TABLE IF NOT EXISTS pending_uploads (

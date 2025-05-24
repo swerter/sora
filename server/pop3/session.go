@@ -18,6 +18,10 @@ import (
 	"github.com/migadu/sora/server"
 )
 
+const Pop3MaxErrorsAllowed = 3          // Maximum number of errors tolerated before the connection is terminated
+const Pop3ErrorDelay = 3 * time.Second  // Wait for this many seconds before allowing another command
+const Pop3IdleTimeout = 5 * time.Minute // Maximum duration of inactivity before the connection is closed
+
 type POP3Session struct {
 	server.Session
 	server         *POP3Server
@@ -48,7 +52,7 @@ func (s *POP3Session) handleConnection() {
 	var userAddress *server.Address
 
 	for {
-		(*s.conn).SetReadDeadline(time.Now().Add(consts.POP3_IDLE_TIMEOUT))
+		(*s.conn).SetReadDeadline(time.Now().Add(Pop3IdleTimeout))
 
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -118,7 +122,7 @@ func (s *POP3Session) handleConnection() {
 
 			// No auto-creation of mailboxes, they have to exist
 
-			inboxMailboxID, err := s.server.db.GetMailboxByName(ctx, userID, consts.MAILBOX_INBOX)
+			inboxMailboxID, err := s.server.db.GetMailboxByName(ctx, userID, consts.MailboxInbox)
 			if err != nil {
 				if err == consts.ErrMailboxNotFound {
 					if s.handleClientError(writer, fmt.Sprintf("-ERR %s\r\n", err.Error())) {
@@ -217,7 +221,7 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			msg := s.messages[msgNumber-1]
-			if msg == (db.Message{}) {
+			if msg.UID == 0 {
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
 					return
 				}
@@ -295,7 +299,7 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			msg := s.messages[msgNumber-1]
-			if msg == (db.Message{}) {
+			if msg.UID == 0 {
 				s.Log("[POP3] DELE error: no such message %d", msgNumber)
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
 					return
@@ -351,13 +355,13 @@ func isNotExist(err error) bool {
 
 func (s *POP3Session) handleClientError(writer *bufio.Writer, errMsg string) bool {
 	s.errorsCount++
-	if s.errorsCount > consts.POP3_MAX_ERRORS_ALLOWED {
+	if s.errorsCount > Pop3MaxErrorsAllowed {
 		writer.WriteString("-ERR Too many errors, closing connection\r\n")
 		writer.Flush()
 		return true
 	}
 	// Make a delay to prevent brute force attacks
-	time.Sleep(time.Duration(s.errorsCount) * consts.POP3_ERROR_DELAY)
+	time.Sleep(time.Duration(s.errorsCount) * Pop3ErrorDelay)
 	writer.WriteString(errMsg)
 	writer.Flush()
 	return false

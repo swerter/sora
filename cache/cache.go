@@ -9,12 +9,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
 )
 
@@ -25,23 +25,29 @@ const CACHE_PURGE_TICK = 12 * time.Hour
 const BATCH_PURGE_SIZE = 1000
 
 type Cache struct {
-	basePath         string
-	maxSizeMegaBytes int64
-	db               *sql.DB
-	mu               sync.Mutex
-	sourceDB         *db.Database
+	basePath      string
+	capacity      int64
+	maxObjectSize int64
+	db            *sql.DB
+	mu            sync.Mutex
+	sourceDB      *db.Database
 }
 
 // Close closes the cache database connection
 func (c *Cache) Close() error {
 	if c.db != nil {
-		log.Println("[CACHE] Closing cache database connection")
+		log.Println("[CACHE] closing cache database connection")
 		return c.db.Close()
 	}
 	return nil
 }
 
-func New(basePath string, maxSizeMegaBytes int64, sourceDb *db.Database) (*Cache, error) {
+func New(basePath string, maxSizeBytes int64, maxObjectSize int64, sourceDb *db.Database) (*Cache, error) {
+	basePath = filepath.Clean(strings.TrimSpace(basePath))
+	if basePath == "" {
+		return nil, fmt.Errorf("cache base path cannot be empty")
+	}
+
 	// Ensure data subdirectory exists
 	dataDir := filepath.Join(basePath, DATA_DIR)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -56,7 +62,7 @@ func New(basePath string, maxSizeMegaBytes int64, sourceDb *db.Database) (*Cache
 
 	if _, err := db.Exec(`PRAGMA journal_mode = WAL;`); err != nil {
 		// Log the warning, but allow to proceed as WAL is an optimization.
-		log.Printf("[CACHE] WARNING: Failed to set PRAGMA journal_mode = WAL: %v", err)
+		log.Printf("[CACHE] WARNING: failed to set PRAGMA journal_mode = WAL: %v", err)
 	}
 
 	schema := `
@@ -76,10 +82,11 @@ func New(basePath string, maxSizeMegaBytes int64, sourceDb *db.Database) (*Cache
 		return nil, fmt.Errorf("cache DB ping failed: %w", err)
 	}
 	return &Cache{
-		basePath:         basePath,
-		maxSizeMegaBytes: maxSizeMegaBytes,
-		db:               db,
-		sourceDB:         sourceDb,
+		basePath:      basePath,
+		capacity:      maxSizeBytes,
+		maxObjectSize: maxObjectSize,
+		db:            db,
+		sourceDB:      sourceDb,
 	}, nil
 }
 
@@ -92,8 +99,8 @@ func (c *Cache) Put(contentHash string, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if int64(len(data)) > int64(consts.MAX_CACHE_OBJECT_SIZE)*1024*1024 {
-		return fmt.Errorf("data size %d exceeds MAX_MESSAGE_SIZE %d MB", len(data), consts.MAX_CACHE_OBJECT_SIZE)
+	if int64(len(data)) > c.maxObjectSize {
+		return fmt.Errorf("data size %d exceeds object limit %d", len(data), c.maxObjectSize)
 	}
 
 	path := c.GetPathForContentHash(contentHash)
@@ -104,14 +111,14 @@ func (c *Cache) Put(contentHash string, data []byte) error {
 		return fmt.Errorf("failed to write cache file: %w", err)
 	}
 	if err := c.trackFile(path); err != nil {
-		log.Printf("[CACHE] Put: failed to track file %s: %v. Attempting to remove.\n", path, err)
+		log.Printf("[CACHE] failed to track file %s: %v. Attempting to remove.\n", path, err)
 		// Attempt to clean up the file if tracking failed to avoid untracked files
 		if remErr := os.Remove(path); remErr != nil && !os.IsNotExist(remErr) {
-			log.Printf("[CACHE] Put: failed to remove untracked file %s after tracking error: %v\n", path, remErr)
+			log.Printf("[CACHE] failed to remove untracked file %s after tracking error: %v\n", path, remErr)
 		}
 		return fmt.Errorf("failed to track cache file %s: %w", path, err)
 	}
-	log.Printf("[CACHE] Put: successfully cached %s", path)
+	log.Printf("[CACHE] successfully cached %s", path)
 	return nil
 }
 
@@ -135,14 +142,14 @@ func (c *Cache) Delete(contentHash string) error {
 	if err := os.Remove(path); err != nil {
 		// If the file doesn't exist, we can consider the delete successful for the cache's state.
 		if !errors.Is(err, os.ErrNotExist) {
-			log.Printf("[CACHE] Delete: failed to remove cache file %s: %v\n", path, err)
+			log.Printf("[CACHE] failed to remove cache file %s: %v\n", path, err)
 			return fmt.Errorf("failed to remove cache file %s: %w", path, err)
 		}
 	}
 	// Always try to remove from index, even if file was already gone.
 	if _, err := c.db.Exec(`DELETE FROM cache_index WHERE path = ?`, path); err != nil {
 		// Log the error, as this means the index might be out of sync.
-		log.Printf("[CACHE] Delete: failed to remove index entry for path %s: %v\n", path, err)
+		log.Printf("[CACHE] failed to remove index entry for path %s: %v\n", path, err)
 		return fmt.Errorf("failed to remove index entry for path %s: %w", path, err)
 	}
 	return nil
@@ -153,15 +160,15 @@ func (c *Cache) MoveIn(path string, contentHash string) error {
 	defer c.mu.Unlock()
 	target := c.GetPathForContentHash(contentHash)
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		log.Printf("[CACHE] MoveIn: failed to create target directory %s: %v\n", filepath.Dir(target), err)
+		log.Printf("[CACHE] failed to create target directory %s: %v\n", filepath.Dir(target), err)
 		return fmt.Errorf("failed to create target directory: %w", err)
 	}
 	if err := os.Rename(path, target); err != nil {
-		log.Printf("[CACHE] MoveIn: failed to move file %s to %s: %v\n", path, target, err)
+		log.Printf("[CACHE] failed to move file %s to %s: %v\n", path, target, err)
 		return fmt.Errorf("failed to move file into cache: %w", err)
 	}
 	if err := c.trackFile(target); err != nil {
-		log.Printf("[CACHE] MoveIn: failed to track file %s: %v. The file was moved but not tracked.", target, err)
+		log.Printf("[CACHE] failed to track file %s: %v. The file was moved but not tracked.", target, err)
 		// The file is already moved. If tracking fails, the cache is inconsistent.
 		// This might be caught by RemoveStaleDBEntries if the file exists but isn't in DB,
 		// or SyncFromDisk might re-track it.
@@ -195,14 +202,12 @@ func (c *Cache) PurgeIfNeeded(ctx context.Context) error {
 		totalSize = nullTotalSize.Int64
 	}
 
-	totalSizeMB := totalSize / (1024 * 1024)
-
-	if totalSize <= c.maxSizeMegaBytes*1024*1024 {
-		log.Printf("[CACHE] size: %d MB, within limit: %d MB\n", totalSizeMB, c.maxSizeMegaBytes)
+	if totalSize <= c.capacity {
+		log.Printf("[CACHE] size: %d, within capacity: %d\n", totalSize, c.capacity)
 		return nil
 	}
 
-	log.Printf("[CACHE] size: %d MB, exceeds limit: %d MB\n", totalSizeMB, c.maxSizeMegaBytes)
+	log.Printf("[CACHE] size: %d, exceeds capacity: %d\n", totalSize, c.capacity)
 
 	rows, err := c.db.Query(`SELECT path, size FROM cache_index ORDER BY mod_time ASC`)
 	if err != nil {
@@ -215,23 +220,23 @@ func (c *Cache) PurgeIfNeeded(ctx context.Context) error {
 		var path string
 		var size int64
 		if err := rows.Scan(&path, &size); err != nil { // Log if scan fails
-			log.Printf("[CACHE] PurgeIfNeeded: error scanning row during purge: %v\n", err)
+			log.Printf("[CACHE] error scanning row during purge: %v\n", err)
 			continue
 		}
 		if err := os.Remove(path); err == nil {
 			if _, dbErr := c.db.Exec(`DELETE FROM cache_index WHERE path = ?`, path); dbErr != nil {
-				log.Printf("[CACHE] PurgeIfNeeded: failed to delete index entry for %s: %v", path, dbErr)
+				log.Printf("[CACHE] failed to delete index entry for %s: %v", path, dbErr)
 			}
 			freed += size
 			removeEmptyParents(path, dataDir)
-			if (totalSize - freed) <= (c.maxSizeMegaBytes * 1024 * 1024) {
+			if (totalSize - freed) <= c.capacity {
 				log.Printf("[CACHE] freed %d bytes, total size now: %d bytes\n", freed, totalSize-freed)
 				break
 			}
 		}
 	}
 	if err := c.cleanupStaleDirectories(); err != nil {
-		log.Printf("[CACHE] PurgeIfNeeded: error during cleanupStaleDirectories: %v", err)
+		log.Printf("[CACHE] error during cleanupStaleDirectories: %v", err)
 	}
 	return nil
 }
@@ -271,7 +276,7 @@ func (c *Cache) SyncFromDisk() error {
 	for _, path := range filePaths {
 		c.mu.Lock()
 		if err := c.trackFile(path); err != nil {
-			log.Printf("[CACHE] SyncFromDisk: error tracking file %s: %v", path, err)
+			log.Printf("[CACHE] error tracking file %s: %v", path, err)
 		}
 		c.mu.Unlock()
 	}
@@ -317,7 +322,6 @@ func (c *Cache) runPurgeCycle(ctx context.Context) {
 }
 
 func (c *Cache) cleanupStaleDirectories() error {
-	log.Println("[CACHE] cleaning up stale directories in cache")
 	dataDir := filepath.Join(c.basePath, DATA_DIR)
 	return filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -326,11 +330,11 @@ func (c *Cache) cleanupStaleDirectories() error {
 			// We want to log this but continue the walk if it's an ErrNotExist for the current path.
 			var pathError *fs.PathError
 			if errors.As(err, &pathError) && errors.Is(pathError.Err, os.ErrNotExist) && pathError.Path == path {
-				log.Printf("[CACHE] cleanupStaleDirectories: WalkDir: path %s no longer exists, skipping: %v", path, err)
+				log.Printf("[CACHE] path %s no longer exists, skipping: %v", path, err)
 				return nil // Treat as skippable for this specific entry and continue walk
 			}
 			// For other errors encountered by WalkDir, propagate them to stop the walk.
-			log.Printf("[CACHE] cleanupStaleDirectories: WalkDir error for path %s: %v", path, err)
+			log.Printf("[CACHE] error walking path %s: %v", path, err)
 			return err // Propagate other errors
 		}
 		if !d.IsDir() || path == dataDir {
@@ -341,14 +345,13 @@ func (c *Cache) cleanupStaleDirectories() error {
 		removeErr := os.Remove(path)
 		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) && !isDirNotEmptyError(removeErr) {
 			// Log unexpected errors during removal, but don't stop the walk.
-			log.Printf("[CACHE] cleanupStaleDirectories: error removing directory %s: %v", path, removeErr)
+			log.Printf("[CACHE] error removing directory %s: %v", path, removeErr)
 		}
 		return nil
 	})
 }
 
 func (c *Cache) PurgeOrphanedContentHashes(ctx context.Context) error {
-	log.Println("[CACHE] purging orphaned content hashes from cache")
 	threshold := time.Now().Add(-30 * 24 * time.Hour) // Example: filter entries older than 30 days
 	rows, err := c.db.Query(`SELECT path FROM cache_index WHERE mod_time < ?`, threshold)
 	if err != nil {
@@ -362,13 +365,13 @@ func (c *Cache) PurgeOrphanedContentHashes(ctx context.Context) error {
 	for rows.Next() {
 		var path string
 		if err := rows.Scan(&path); err != nil {
-			log.Printf("[CACHE] PurgeOrphanedContentHashes: error scanning path: %v", err)
+			log.Printf("[CACHE] error scanning path: %v", err)
 			continue
 		}
 		contentHash := filepath.Base(path)
 		// Basic validation for a hash-like string, adjust if needed
 		if len(contentHash) < 32 || len(contentHash) > 128 { // Example length check for typical hashes
-			log.Printf("[CACHE] PurgeOrphanedContentHashes: suspicious content hash from path %s: %s", path, contentHash)
+			log.Printf("[CACHE] suspicious content hash from path %s: %s", path, contentHash)
 			continue
 		}
 
@@ -393,11 +396,10 @@ func (c *Cache) PurgeOrphanedContentHashes(ctx context.Context) error {
 }
 
 func (c *Cache) purgeHashBatch(ctx context.Context, contentHashes []string, paths []string) int {
-	log.Println("[CACHE] purging batch of", len(contentHashes), "content hashes")
 	dataDir := filepath.Join(c.basePath, DATA_DIR)
 	existingDBHashes, err := c.sourceDB.FindExistingContentHashes(ctx, contentHashes) // This DB method needs to be created
 	if err != nil {
-		log.Printf("[CACHE] purgeHashBatch: error finding existing content hashes from sourceDB: %v", err)
+		log.Printf("[CACHE] error finding existing content hashes from sourceDB: %v", err)
 		return 0
 	}
 
@@ -407,7 +409,7 @@ func (c *Cache) purgeHashBatch(ctx context.Context, contentHashes []string, path
 	}
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
-		log.Printf("[CACHE] purgeHashBatch: error beginning transaction: %v\n", err)
+		log.Printf("[CACHE] error beginning transaction: %v\n", err)
 		return 0 // Cannot proceed without a transaction for DB deletes
 	}
 	defer tx.Rollback() // Rollback if not committed
@@ -420,7 +422,7 @@ func (c *Cache) purgeHashBatch(ctx context.Context, contentHashes []string, path
 			fileRemovedOrNotExists := err == nil || os.IsNotExist(err)
 
 			if err != nil && !os.IsNotExist(err) {
-				log.Printf("[CACHE] purgeHashBatch: error removing cached file %s: %v\n", paths[i], err)
+				log.Printf("[CACHE] error removing cached file %s: %v\n", paths[i], err)
 				// If file removal failed for a reason other than "not exist",
 				// skip deleting the DB entry to avoid orphaning the DB record.
 				continue
@@ -430,7 +432,7 @@ func (c *Cache) purgeHashBatch(ctx context.Context, contentHashes []string, path
 			if fileRemovedOrNotExists {
 				_, dbErr := tx.ExecContext(ctx, `DELETE FROM cache_index WHERE path = ?`, paths[i])
 				if dbErr != nil {
-					log.Printf("[CACHE] purgeHashBatch: error deleting cache index entry for path %s: %v\n", paths[i], dbErr)
+					log.Printf("[CACHE] error deleting cache index entry for path %s: %v\n", paths[i], dbErr)
 					// Log the error and continue. The transaction will attempt to commit other successful deletes.
 					// This might leave an orphaned file if os.Remove succeeded but DB delete failed,
 					// but RemoveStaleDBEntries might catch it later if the file is truly gone.
@@ -443,7 +445,7 @@ func (c *Cache) purgeHashBatch(ctx context.Context, contentHashes []string, path
 	}
 
 	if err := tx.Commit(); err != nil {
-		log.Printf("[CACHE] purgeHashBatch: error committing transaction: %v\n", err)
+		log.Printf("[CACHE] error committing transaction: %v\n", err)
 		return 0 // Return 0 as the batch operation wasn't fully successful
 	}
 	return purged
@@ -468,13 +470,13 @@ func (c *Cache) RemoveStaleDBEntries(ctx context.Context) error {
 	for rows.Next() {
 		var path string
 		if err := rows.Scan(&path); err != nil {
-			log.Printf("[CACHE] RemoveStaleDBEntries: error scanning path: %v\n", err)
+			log.Printf("[CACHE] error scanning path: %v\n", err)
 			continue
 		}
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			_, err = tx.ExecContext(ctx, `DELETE FROM cache_index WHERE path = ?`, path)
 			if err != nil {
-				log.Printf("[CACHE] RemoveStaleDBEntries: failed to delete index entry for path %s: %v\n", path, err)
+				log.Printf("[CACHE] failed to delete index entry for path %s: %v\n", path, err)
 				// Continue to try and remove other stale entries
 			}
 			removed++
@@ -496,7 +498,7 @@ func (c *Cache) RemoveStaleDBEntries(ctx context.Context) error {
 func (c *Cache) GetPathForContentHash(contentHash string) string {
 	// Require a minimum length for the hash to be splittable as intended.
 	if len(contentHash) < 4 { // Adjusted minimum length
-		log.Printf("[CACHE] GetPathForContentHash: received short contentHash '%s', using directly in data_dir path construction\n", contentHash)
+		log.Printf("[CACHE] received short contentHash '%s', using directly in data_dir path construction\n", contentHash)
 		return filepath.Join(c.basePath, DATA_DIR, contentHash) // Or return an error
 	}
 	return filepath.Join(c.basePath, DATA_DIR, contentHash[:2], contentHash[2:4], contentHash[4:])

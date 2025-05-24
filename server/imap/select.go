@@ -51,7 +51,7 @@ func (s *IMAPSession) Select(mboxName string, options *imap.SelectOptions) (*ima
 
 	s.mutex.Lock()
 	if isReselecting && previouslySelectedMailboxID != 0 && previouslySelectedMailboxID != mailbox.ID {
-		s.Log("[SELECT] WARNING: reselecting mailbox '%s', but its ID changed from %d to %d. Proceeding with new ID.", mboxName, previouslySelectedMailboxID, mailbox.ID)
+		s.Log("[SELECT] WARNING: reselecting mailbox '%s', ID changed from %d to %d", mboxName, previouslySelectedMailboxID, mailbox.ID)
 	}
 	s.currentNumMessages = uint32(currentSummary.NumMessages)
 	s.currentHighestModSeq = currentSummary.HighestModSeq
@@ -60,16 +60,19 @@ func (s *IMAPSession) Select(mboxName string, options *imap.SelectOptions) (*ima
 	s.mailboxTracker = imapserver.NewMailboxTracker(s.currentNumMessages)
 	s.sessionTracker = s.mailboxTracker.NewSession()
 
-	s.Log("[SELECT] mailbox '%s' (ID: %d) selected. Session initial state: NumMessages=%d, HighestModSeqForPolling=%d. Current summary: UIDNext=%d, UIDValidity=%d, ReportedHighestModSeq=%d",
+	s.Log("[SELECT] mailbox '%s' (ID: %d)  NumMessages=%d HighestModSeqForPolling=%d UIDNext=%d UIDValidity=%d ReportedHighestModSeq=%d",
 		mboxName, mailbox.ID, s.currentNumMessages, s.currentHighestModSeq, currentSummary.UIDNext, s.selectedMailbox.UIDValidity, currentSummary.HighestModSeq)
 
 	selectData := &imap.SelectData{
-		Flags:         s.PermittedFlags(),
-		NumMessages:   s.currentNumMessages,
-		UIDNext:       imap.UID(currentSummary.UIDNext),
-		UIDValidity:   s.selectedMailbox.UIDValidity,
-		NumRecent:     uint32(currentSummary.RecentCount),
-		HighestModSeq: s.currentHighestModSeq,
+		// Flags defined for this mailbox (system flags, common keywords, and in-use custom flags)
+		Flags: getDisplayFlags(s.ctx, s.server.db, mailbox),
+		// Flags that can be changed, including \* for custom
+		PermanentFlags: getPermanentFlags(),
+		NumMessages:    s.currentNumMessages,
+		UIDNext:        imap.UID(currentSummary.UIDNext),
+		UIDValidity:    s.selectedMailbox.UIDValidity,
+		NumRecent:      uint32(currentSummary.RecentCount),
+		HighestModSeq:  s.currentHighestModSeq,
 	}
 
 	return selectData, nil

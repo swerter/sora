@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-
-	"github.com/migadu/sora/consts"
 )
 
 type PendingUpload struct {
@@ -24,14 +22,14 @@ type PendingUpload struct {
 // locks them to prevent concurrent processing by other workers, and updates their
 // last_attempt timestamp to "lease" them to the current worker.
 // This is the recommended method for workers to fetch tasks.
-func (db *Database) AcquireAndLeasePendingUploads(ctx context.Context, instanceId string, limit int) ([]PendingUpload, error) {
+func (db *Database) AcquireAndLeasePendingUploads(ctx context.Context, instanceId string, limit int, retryInterval time.Duration, maxAttempts int) ([]PendingUpload, error) {
 	tx, err := db.Pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	retryTasksLastAttemptBefore := time.Now().Add(-consts.PENDING_UPLOAD_RETRY_INTERVAL)
+	retryTasksLastAttemptBefore := time.Now().Add(-retryInterval)
 
 	rows, err := tx.Query(ctx, `
 		SELECT id, content_hash, size, instance_id, attempts, created_at, updated_at, last_attempt
@@ -42,7 +40,7 @@ func (db *Database) AcquireAndLeasePendingUploads(ctx context.Context, instanceI
 		ORDER BY created_at
 		LIMIT $4
 		FOR UPDATE SKIP LOCKED
-	`, instanceId, consts.MAX_UPLOAD_ATTEMPTS, retryTasksLastAttemptBefore, limit)
+	`, instanceId, maxAttempts, retryTasksLastAttemptBefore, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query pending uploads for acquisition: %w", err)
 	}

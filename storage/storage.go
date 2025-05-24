@@ -18,7 +18,7 @@ type S3Storage struct {
 	BucketName string
 }
 
-func New(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool) (*S3Storage, error) {
+func New(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool, debug bool) (*S3Storage, error) {
 	// Initialize the MinIO client
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
@@ -30,7 +30,9 @@ func New(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool)
 	}
 
 	// Enable detailed tracing of requests and responses for debugging
-	client.TraceOn(os.Stdout)
+	if debug {
+		client.TraceOn(os.Stdout)
+	}
 
 	// Return the initialized storage client
 	return &S3Storage{

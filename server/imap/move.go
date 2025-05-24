@@ -71,7 +71,7 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 		s.Log("[MOVE] no messages were moved (potentially already expunged), skipping COPYUID response")
 	}
 
-	isTrashFolder := strings.EqualFold(dest, "Trash") || dest == consts.MAILBOX_TRASH
+	isTrashFolder := strings.EqualFold(dest, "Trash") || dest == consts.MailboxTrash
 	if isTrashFolder && len(mappedDestUIDs) > 0 {
 		s.Log("[MOVE] automatically marking %d moved messages as seen in Trash folder", len(mappedDestUIDs))
 

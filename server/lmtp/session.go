@@ -103,7 +103,7 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 		s.Log("[LMTP] invalid to address: %v", err)
 		return &smtp.SMTPError{
 			Code:         513,
-			EnhancedCode: smtp.EnhancedCode{5, 0, 1}, // TODO: Check the correct code
+			EnhancedCode: smtp.EnhancedCode{5, 0, 1},
 			Message:      "Invalid recipient",
 		}
 	}
@@ -138,15 +138,27 @@ func (s *LMTPSession) Data(r io.Reader) error {
 	}
 	s.Log("[LMTP] message data read successfully (%d bytes)", buf.Len())
 
-	// Trim the message to remove any leading CRLF characters
-	messageBytes := bytes.TrimLeft(buf.Bytes(), "\r\n")
+	// Use the full message bytes as received for hashing, size, and header extraction.
+	fullMessageBytes := buf.Bytes()
 
-	messageContent, err := server.ParseMessage(bytes.NewReader(messageBytes))
+	// Extract raw headers string.
+	// Headers are typically terminated by a double CRLF (\r\n\r\n).
+	var rawHeadersText string
+	headerEndIndex := bytes.Index(fullMessageBytes, []byte("\r\n\r\n"))
+	if headerEndIndex != -1 {
+		rawHeadersText = string(fullMessageBytes[:headerEndIndex])
+	} else {
+		// Log if headers are not clearly separated. rawHeadersText will be empty.
+		// This might indicate a malformed email or an email with only headers and no body separator.
+		s.Log("[LMTP] WARNING: could not find standard header/body separator (\\r\\n\\r\\n) in message. Raw headers field will be empty.")
+	}
+
+	messageContent, err := server.ParseMessage(bytes.NewReader(fullMessageBytes))
 	if err != nil {
 		return s.InternalError("failed to parse message: %v", err)
 	}
 
-	contentHash := helpers.HashContent(messageBytes)
+	contentHash := helpers.HashContent(fullMessageBytes)
 	s.Log("[LMTP] message parsed with content hash: %s", contentHash)
 
 	// Parse message headers (this does not consume the body)
@@ -172,7 +184,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 
 	recipients := helpers.ExtractRecipients(messageContent.Header)
 
-	filePath, err := s.backend.uploader.StoreLocally(contentHash, messageBytes)
+	filePath, err := s.backend.uploader.StoreLocally(contentHash, fullMessageBytes)
 	if err != nil {
 		return s.InternalError("failed to save message to disk: %v", err)
 	}
@@ -283,20 +295,23 @@ func (s *LMTPSession) Data(r io.Reader) error {
 
 	// Process the result
 	s.Log("[LMTP] processing final SIEVE action: %v", result.Action)
+
 	switch result.Action {
 	case sieveengine.ActionDiscard:
 		s.Log("[LMTP] message discarded by SIEVE - message will not be delivered")
 		return nil
+
 	case sieveengine.ActionFileInto:
 		mailboxName = result.Mailbox
 		s.Log("[LMTP] SIEVE fileinto action - delivering message to mailbox: %s", mailboxName)
+
 	case sieveengine.ActionRedirect:
 		s.Log("[LMTP] SIEVE redirect action - redirecting message to: %s", result.RedirectTo)
 
 		// Send the message to the external relay if configured
 		if s.backend.externalRelay != "" {
 			s.Log("[LMTP] redirected message via external relay: %s", s.backend.externalRelay)
-			err := s.sendToExternalRelay(s.sender.FullAddress(), result.RedirectTo, messageBytes)
+			err := s.sendToExternalRelay(s.sender.FullAddress(), result.RedirectTo, fullMessageBytes)
 			if err != nil {
 				s.Log("[LMTP] error sending redirected message to external relay: %v", err)
 				s.Log("[LMTP] falling back to local delivery to INBOX")
@@ -312,27 +327,29 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		}
 
 		// Fallback: store in INBOX if relay is not configured or fails
-		mailboxName = consts.MAILBOX_INBOX
+		mailboxName = consts.MailboxInbox
+
 	case sieveengine.ActionVacation:
 		s.Log("[LMTP] SIEVE vacation action - sending auto-response and delivering original message to INBOX")
 		// Handle vacation response
-		err := s.handleVacationResponse(s.ctx, result, messageContent)
+		err := s.handleVacationResponse(result, messageContent)
 		if err != nil {
 			s.Log("[LMTP] error handling vacation response: %v", err)
 			// Continue processing even if vacation response fails
 		}
 		// Store the original message in INBOX
-		mailboxName = consts.MAILBOX_INBOX
+		mailboxName = consts.MailboxInbox
+
 	default:
 		s.Log("[LMTP] SIEVE keep action (default) - delivering message to INBOX")
-		mailboxName = consts.MAILBOX_INBOX
+		mailboxName = consts.MailboxInbox
 	}
 
 	mailbox, err := s.backend.db.GetMailboxByName(s.ctx, s.UserID(), mailboxName)
 	if err != nil {
 		if err == consts.ErrMailboxNotFound {
 			s.Log("[LMTP] mailbox '%s' not found, falling back to INBOX", mailboxName)
-			mailbox, err = s.backend.db.GetMailboxByName(s.ctx, s.UserID(), consts.MAILBOX_INBOX)
+			mailbox, err = s.backend.db.GetMailboxByName(s.ctx, s.UserID(), consts.MailboxInbox)
 			if err != nil {
 				return s.InternalError("failed to get INBOX mailbox: %v", err)
 			}
@@ -340,6 +357,8 @@ func (s *LMTPSession) Data(r io.Reader) error {
 			return s.InternalError("failed to get mailbox '%s': %v", mailboxName, err)
 		}
 	}
+
+	size := int64(len(fullMessageBytes))
 
 	_, messageUID, err := s.backend.db.InsertMessage(s.ctx,
 		&db.InsertMessageOptions{
@@ -349,19 +368,20 @@ func (s *LMTPSession) Data(r io.Reader) error {
 			ContentHash:   contentHash, // The S3 key is the content hash of the message
 			MessageID:     messageID,
 			InternalDate:  time.Now(),
-			Size:          int64(len(messageBytes)),
+			Size:          size,
 			Subject:       subject,
-			PlaintextBody: plaintextBody,
+			PlaintextBody: *plaintextBody,
 			SentDate:      sentDate,
 			InReplyTo:     inReplyTo,
 			BodyStructure: &bodyStructure,
 			Recipients:    recipients,
 			Flags:         []imap.Flag{}, // Explicitly set empty flags to mark as unread
+			RawHeaders:    rawHeadersText,
 		},
 		db.PendingUpload{ // This struct is used to pass data to InsertMessage, not directly inserted into DB here
 			ContentHash: contentHash,
 			InstanceID:  s.backend.hostname,
-			Size:        int64(len(messageBytes)),
+			Size:        size,
 		})
 	if err != nil {
 		_ = os.Remove(*filePath) // cleanup file on failure
@@ -424,7 +444,7 @@ func (s *LMTPSession) InternalError(format string, a ...interface{}) error {
 // handleVacationResponse constructs and sends a vacation auto-response.
 // The decision to send and the recording of the response event are handled
 // by the Sieve engine's policy, using the VacationOracle.
-func (s *LMTPSession) handleVacationResponse(ctx context.Context, result sieveengine.Result, originalMessage *message.Entity) error {
+func (s *LMTPSession) handleVacationResponse(result sieveengine.Result, originalMessage *message.Entity) error {
 	if s.backend.externalRelay == "" {
 		s.Log("[LMTP] external relay not configured, cannot send vacation response for sender: %s", s.sender.FullAddress())
 		// Do not return error, as the Sieve engine might have already recorded the attempt.

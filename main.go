@@ -12,7 +12,6 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/migadu/sora/cache"
-	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/server/cleaner"
 	"github.com/migadu/sora/server/imap"
@@ -46,12 +45,15 @@ func main() {
 	fDbUser := flag.String("dbuser", cfg.Database.User, "Database user (overrides config)")
 	fDbPassword := flag.String("dbpassword", cfg.Database.Password, "Database password (overrides config)")
 	fDbName := flag.String("dbname", cfg.Database.Name, "Database name (overrides config)")
+	fDbTLS := flag.Bool("dbtls", cfg.Database.TLSMode, "Enable TLS for database connection (overrides config)")
+	fDbLogQueries := flag.Bool("dblogqueries", cfg.Database.LogQueries, "Log all database queries (overrides config)")
 
 	// S3 flags
 	fS3Endpoint := flag.String("s3endpoint", cfg.S3.Endpoint, "S3 endpoint (overrides config)")
 	fS3AccessKey := flag.String("s3accesskey", cfg.S3.AccessKey, "S3 access key (overrides config)")
 	fS3SecretKey := flag.String("s3secretkey", cfg.S3.SecretKey, "S3 secret key (overrides config)")
 	fS3Bucket := flag.String("s3bucket", cfg.S3.Bucket, "S3 bucket name (overrides config)")
+	fS3Trace := flag.Bool("s3trace", cfg.S3.Trace, "Trace S3 operations (overrides config)")
 
 	// Server enable/address flags
 	fStartImap := flag.Bool("imap", cfg.Servers.StartImap, "Start the IMAP server (overrides config)")
@@ -63,10 +65,17 @@ func main() {
 	fStartManageSieve := flag.Bool("managesieve", cfg.Servers.StartManageSieve, "Start the ManageSieve server (overrides config)")
 	fManagesieveAddr := flag.String("managesieveaddr", cfg.Servers.ManageSieveAddr, "ManageSieve server address (overrides config)")
 
-	// Paths flags
-	fUploaderTempPath := flag.String("uploaderpath", cfg.Paths.UploaderTemp, "Directory for pending uploads (overrides config)")
-	fCachePath := flag.String("cachedir", cfg.Paths.CacheDir, "Directory for cached files (overrides config)")
-	fMaxCacheSizeMB := flag.Int64("cachesize", cfg.Paths.MaxCacheSizeMB, "Disk cache size in Megabytes (overrides config)")
+	// Uploader flags
+	fUploaderPath := flag.String("uploaderpath", cfg.Uploader.Path, "Directory for pending uploads (overrides config)")
+	fUploaderBatchSize := flag.Int("uploaderbatchsize", cfg.Uploader.BatchSize, "Number of files to upload in a single batch (overrides config)")
+	fUploaderConcurrency := flag.Int("uploaderconcurrency", cfg.Uploader.Concurrency, "Number of concurrent upload workers (overrides config)")
+	fUploaderMaxAttempts := flag.Int("uploadermaxattempts", cfg.Uploader.MaxAttempts, "Maximum number of attempts to upload a file (overrides config)")
+	fUploaderRetryInterval := flag.String("uploaderretryinterval", cfg.Uploader.RetryInterval, "Retry interval for failed uploads")
+
+	// Cache flags
+	fCachePath := flag.String("cachedir", cfg.LocalCache.Path, "Local path for storing cached files (overrides config)")
+	fCacheCapacity := flag.String("cachesize", cfg.LocalCache.Capacity, "Disk cache size in Megabytes (overrides config)")
+	fCacheMaxObjectSize := flag.String("cachemaxobject", cfg.LocalCache.MaxObjectSize, "Maximum object size accepted in cache (overrides config)")
 
 	// LMTP specific
 	fExternalRelay := flag.String("externalrelay", cfg.LMTP.ExternalRelay, "External relay for LMTP (overrides config)")
@@ -102,7 +111,7 @@ func main() {
 			if isFlagSet("config") { // User explicitly set -config
 				log.Fatalf("Error: Specified configuration file '%s' not found: %v", *configPath, err)
 			} else {
-				log.Printf("Warning: Default configuration file '%s' not found. Using application defaults and command-line flags.", *configPath)
+				log.Printf("WARNING: Default configuration file '%s' not found. Using application defaults and command-line flags.", *configPath)
 			}
 		} else {
 			log.Fatalf("Error parsing configuration file '%s': %v", *configPath, err)
@@ -171,7 +180,25 @@ func main() {
 	if isFlagSet("dbname") {
 		cfg.Database.Name = *fDbName
 	}
+	if isFlagSet("dbtls") {
+		cfg.Database.TLSMode = *fDbTLS
+	}
+	if isFlagSet("dblogqueries") {
+		cfg.Database.LogQueries = *fDbLogQueries
+	}
 
+	// Cache
+	if isFlagSet("cachesize") {
+		cfg.LocalCache.Capacity = *fCacheCapacity
+	}
+	if isFlagSet("cachedir") {
+		cfg.LocalCache.Path = *fCachePath
+	}
+	if isFlagSet("cachemaxobject") {
+		cfg.LocalCache.MaxObjectSize = *fCacheMaxObjectSize
+	}
+
+	// S3 Config
 	if isFlagSet("s3endpoint") {
 		cfg.S3.Endpoint = *fS3Endpoint
 	}
@@ -183,6 +210,9 @@ func main() {
 	}
 	if isFlagSet("s3bucket") {
 		cfg.S3.Bucket = *fS3Bucket
+	}
+	if isFlagSet("s3trace") {
+		cfg.S3.Trace = *fS3Trace
 	}
 
 	if isFlagSet("imap") {
@@ -210,20 +240,29 @@ func main() {
 		cfg.Servers.ManageSieveAddr = *fManagesieveAddr
 	}
 
+	// Upload worker
 	if isFlagSet("uploaderpath") {
-		cfg.Paths.UploaderTemp = *fUploaderTempPath
+		cfg.Uploader.Path = *fUploaderPath
 	}
-	if isFlagSet("cachedir") {
-		cfg.Paths.CacheDir = *fCachePath
+	if isFlagSet("uploaderbatchsize") {
+		cfg.Uploader.BatchSize = *fUploaderBatchSize
 	}
-	if isFlagSet("cachesize") {
-		cfg.Paths.MaxCacheSizeMB = *fMaxCacheSizeMB
+	if isFlagSet("uploaderconcurrency") {
+		cfg.Uploader.Concurrency = *fUploaderConcurrency
+	}
+	if isFlagSet("uploadermaxattempts") {
+		cfg.Uploader.MaxAttempts = *fUploaderMaxAttempts
+	}
+	if isFlagSet("uploaderretryinterval") {
+		cfg.Uploader.RetryInterval = *fUploaderRetryInterval
 	}
 
+	// LMTP
 	if isFlagSet("externalrelay") {
 		cfg.LMTP.ExternalRelay = *fExternalRelay
 	}
 
+	// TLS Setup
 	if isFlagSet("tlsinsecureskipverify") {
 		cfg.TLS.InsecureSkipVerify = *fTlsInsecureSkipVerify
 	}
@@ -285,7 +324,8 @@ func main() {
 		log.Fatal("S3 endpoint not specified")
 	}
 	log.Printf("Connecting to S3 endpoint '%s', bucket '%s'", s3EndpointToUse, cfg.S3.Bucket)
-	s3storage, err := storage.New(s3EndpointToUse, cfg.S3.AccessKey, cfg.S3.SecretKey, cfg.S3.Bucket, true)
+	// TLS is always enabled for S3
+	s3storage, err := storage.New(s3EndpointToUse, cfg.S3.AccessKey, cfg.S3.SecretKey, cfg.S3.Bucket, true, cfg.S3.Trace)
 	if err != nil {
 		log.Fatalf("Failed to initialize S3 storage at endpoint '%s': %v", s3EndpointToUse, err)
 	}
@@ -304,32 +344,51 @@ func main() {
 
 	// Initialize the database connection
 	log.Printf("Connecting to database at %s:%s as user %s, using database %s", cfg.Database.Host, cfg.Database.Port, cfg.Database.User, cfg.Database.Name)
-	database, err := db.NewDatabase(ctx, cfg.Database.Host, cfg.Database.Port, cfg.Database.User, cfg.Database.Password, cfg.Database.Name, cfg.Debug)
+	database, err := db.NewDatabase(ctx, cfg.Database.Host, cfg.Database.Port, cfg.Database.User, cfg.Database.Password, cfg.Database.Name, cfg.Database.TLSMode, cfg.Database.LogQueries)
 	if err != nil {
 		log.Fatalf("Failed to connect to the database: %v", err)
 	}
-	defer database.Close() // Ensure the database is closed on exit
+	defer database.Close()
 
 	hostname, _ := os.Hostname()
 
 	errChan := make(chan error, 1)
 
-	actualCacheSizeBytes := cfg.Paths.MaxCacheSizeMB * 1024 * 1024
-	cacheInstance, err := cache.New(cfg.Paths.CacheDir, actualCacheSizeBytes, database)
+	// Initialize the local cache
+	cacheSizeBytes, err := cfg.LocalCache.GetCapacity()
+	if err != nil {
+		log.Fatalf("Invalid cache size: %v", err)
+	}
+	maxObjectSizeBytes, err := cfg.LocalCache.GetMaxObjectSize()
+	if err != nil {
+		log.Fatalf("Invalid cache max object size: %v", err)
+	}
+	cacheInstance, err := cache.New(cfg.LocalCache.Path, cacheSizeBytes, maxObjectSizeBytes, database)
 	if err != nil {
 		log.Fatalf("Failed to initialize cache: %v", err)
 	}
-	defer cacheInstance.Close() // Ensure the cache is closed on exit
-
+	defer cacheInstance.Close()
 	if err := cacheInstance.SyncFromDisk(); err != nil {
 		log.Fatalf("Failed to sync cache from disk: %v", err)
 	}
 	cacheInstance.StartPurgeLoop(ctx)
 
-	cleanupWorker := cleaner.New(database, s3storage, cacheInstance, consts.CLEANUP_INTERVAL, consts.CLEANUP_GRACE_PERIOD)
+	gracePeriod, err := cfg.Cleanup.GetGracePeriod()
+	if err != nil {
+		log.Fatalf("Invalid cleanup grace_period duration: %v", err)
+	}
+	wakeInterval, err := cfg.Cleanup.GetWakeInterval()
+	if err != nil {
+		log.Fatalf("Invalid cleanup wake_interval duration: %v", err)
+	}
+	cleanupWorker := cleaner.New(database, s3storage, cacheInstance, wakeInterval, gracePeriod)
 	cleanupWorker.Start(ctx)
 
-	uploadWorker, err := uploader.New(ctx, cfg.Paths.UploaderTemp, hostname, database, s3storage, cacheInstance, errChan)
+	retryInterval, err := cfg.Uploader.GetRetryInterval()
+	if err != nil {
+		log.Fatalf("Invalid uploader retry_interval duration: %v", err)
+	}
+	uploadWorker, err := uploader.New(ctx, cfg.Uploader.Path, cfg.Uploader.BatchSize, cfg.Uploader.Concurrency, cfg.Uploader.MaxAttempts, retryInterval, hostname, database, s3storage, cacheInstance, errChan)
 	if err != nil {
 		log.Fatalf("Failed to create upload worker: %v", err)
 	}

@@ -11,37 +11,44 @@ import (
 	"time"
 
 	"github.com/migadu/sora/cache"
-	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/storage"
 )
 
 type UploadWorker struct {
-	db         *db.Database
-	s3         *storage.S3Storage
-	cache      *cache.Cache
-	tempPath   string
-	instanceID string // New field
-	notifyCh   chan struct{}
-	errCh      chan<- error
+	db            *db.Database
+	s3            *storage.S3Storage
+	cache         *cache.Cache
+	path          string
+	batchSize     int
+	concurrency   int
+	maxAttempts   int
+	retryInterval time.Duration
+	instanceID    string
+	notifyCh      chan struct{}
+	errCh         chan<- error
 }
 
-func New(ctx context.Context, tempPath string, instanceID string, db *db.Database, s3 *storage.S3Storage, cache *cache.Cache, errCh chan<- error) (*UploadWorker, error) {
-	if _, err := os.Stat(tempPath); os.IsNotExist(err) {
-		if err := os.MkdirAll(tempPath, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create local path %s: %w", tempPath, err)
+func New(ctx context.Context, path string, batchSize int, concurrency int, maxAttempts int, retryInterval time.Duration, instanceID string, db *db.Database, s3 *storage.S3Storage, cache *cache.Cache, errCh chan<- error) (*UploadWorker, error) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create local path %s: %w", path, err)
 		}
 	}
 	notifyCh := make(chan struct{}, 1)
 
 	return &UploadWorker{
-		db:         db,
-		s3:         s3,
-		cache:      cache,
-		errCh:      errCh,
-		tempPath:   tempPath,
-		instanceID: instanceID,
-		notifyCh:   notifyCh,
+		db:            db,
+		s3:            s3,
+		cache:         cache,
+		errCh:         errCh,
+		path:          path,
+		batchSize:     batchSize,
+		concurrency:   concurrency,
+		maxAttempts:   maxAttempts,
+		retryInterval: retryInterval,
+		instanceID:    instanceID,
+		notifyCh:      notifyCh,
 	}, nil
 }
 
@@ -83,11 +90,11 @@ func (w *UploadWorker) NotifyUploadQueued() {
 }
 
 func (w *UploadWorker) processPendingUploads(ctx context.Context) error {
-	sem := make(chan struct{}, consts.MAX_CONCURRENCY)
+	sem := make(chan struct{}, w.concurrency)
 	var wg sync.WaitGroup
 
 	for {
-		uploads, err := w.db.AcquireAndLeasePendingUploads(ctx, w.instanceID, consts.BATCH_SIZE)
+		uploads, err := w.db.AcquireAndLeasePendingUploads(ctx, w.instanceID, w.batchSize, w.retryInterval, w.maxAttempts)
 		if err != nil {
 			return fmt.Errorf("failed to list pending uploads: %w", err)
 		}
@@ -99,8 +106,8 @@ func (w *UploadWorker) processPendingUploads(ctx context.Context) error {
 
 		for _, upload := range uploads {
 			// Check if this upload has exceeded max attempts before processing
-			if upload.Attempts >= consts.MAX_UPLOAD_ATTEMPTS {
-				log.Printf("[UPLOADER] Skipping upload for hash %s (ID %d) due to excessive failed attempts (%d)", upload.ContentHash, upload.ID, upload.Attempts)
+			if upload.Attempts >= w.maxAttempts {
+				log.Printf("[UPLOADER] skipping upload for hash %s (ID %d) due to excessive failed attempts (%d)", upload.ContentHash, upload.ID, upload.Attempts)
 				continue // Skip this upload and move to the next one in the batch
 			}
 
@@ -139,14 +146,14 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 		// Content is already in S3. Mark this specific message instance as uploaded
 		// and delete the pending upload record.
 		if err := w.db.CompleteS3Upload(ctx, upload.ContentHash); err != nil {
-			log.Printf("[UPLOADER] - Warning: failed to finalize S3 upload for hash %s: %v", upload.ContentHash, err)
+			log.Printf("[UPLOADER] WARNING: failed to finalize S3 upload for hash %s: %v", upload.ContentHash, err)
 		} else {
 			log.Printf("[UPLOADER] upload completed (already uploaded hash) for hash %s", upload.ContentHash)
 		}
 		// Still remove the local file as it's no longer needed on this instance
 		filePath := w.FilePath(upload.ContentHash)
 		if err := w.RemoveLocalFile(filePath); err != nil {
-			log.Printf("[UPLOADER]- Warning: uploaded but could not delete file %s: %v", filePath, err)
+			log.Printf("[UPLOADER] WARNING: uploaded but could not delete file %s: %v", filePath, err)
 		}
 		return // Done with this upload record
 	}
@@ -167,28 +174,23 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 		return
 	}
 
-	if upload.Size <= consts.MAX_CACHE_OBJECT_SIZE {
-		if err := w.cache.MoveIn(filePath, upload.ContentHash); err != nil {
-			log.Printf("[UPLOADER] failed to move uploaded hash %s to cache: %v", upload.ContentHash, err)
-		} else {
-			log.Printf("[UPLOADER] moved hash %s to cache after upload", upload.ContentHash)
-		}
+	// Regardless of the size of the message, always move into cache message
+	if err := w.cache.MoveIn(filePath, upload.ContentHash); err != nil {
+		log.Printf("[UPLOADER] failed to move uploaded hash %s to cache: %v", upload.ContentHash, err)
 	} else {
-		if err := w.RemoveLocalFile(filePath); err != nil {
-			log.Printf("[UPLOADER]- Warning: uploaded but could not delete file %s: %v", filePath, err)
-		}
+		log.Printf("[UPLOADER] moved hash %s to cache after upload", upload.ContentHash)
 	}
 
 	err = w.db.CompleteS3Upload(ctx, upload.ContentHash)
 	if err != nil {
-		log.Printf("[UPLOADER] - WARNING: failed to finalize S3 upload for hash %s: %v", upload.ContentHash, err)
+		log.Printf("[UPLOADER] WARNING: failed to finalize S3 upload for hash %s: %v", upload.ContentHash, err)
 	} else {
-		log.Printf("[UPLOADER] upload completed for hash %s, ", upload.ContentHash)
+		log.Printf("[UPLOADER] upload completed for hash %s", upload.ContentHash)
 	}
 }
 
 func (w *UploadWorker) FilePath(contentHash string) string {
-	return filepath.Join(w.tempPath, contentHash)
+	return filepath.Join(w.path, contentHash)
 }
 
 func (w *UploadWorker) StoreLocally(contentHash string, data []byte) (*string, error) {
@@ -204,9 +206,9 @@ func (w *UploadWorker) StoreLocally(contentHash string, data []byte) (*string, e
 
 func (w *UploadWorker) RemoveLocalFile(path string) error {
 	if err := os.Remove(path); err != nil {
-		log.Printf("[UPLOADER] - WARNING: uploaded but could not delete file %s: %v", path, err)
+		log.Printf("[UPLOADER] WARNING: uploaded but could not delete file %s: %v", path, err)
 	} else {
-		stopAt, _ := filepath.Abs(w.tempPath)
+		stopAt, _ := filepath.Abs(w.path)
 		removeEmptyParents(path, stopAt)
 	}
 	return nil
