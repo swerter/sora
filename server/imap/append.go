@@ -128,8 +128,20 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		return nil, s.internalError("failed to insert message metadata: %v", err)
 	}
 
-	s.currentNumMessages = s.currentNumMessages + 1
-	s.mailboxTracker.QueueNumMessages(s.currentNumMessages)
+	// If the message was appended to the currently selected mailbox,
+	// update the session's message count and notify the tracker.
+	// This requires protecting access to session state like s.selectedMailbox.
+	s.mutex.Lock()
+	if s.selectedMailbox != nil && s.selectedMailbox.ID == mailbox.ID {
+		s.currentNumMessages++ // Increment the count for the selected mailbox
+		if s.mailboxTracker != nil {
+			s.mailboxTracker.QueueNumMessages(s.currentNumMessages)
+		} else {
+			// This would indicate an inconsistent state if a mailbox is selected but has no tracker.
+			s.Log("[APPEND] Inconsistent state: selectedMailbox ID %d is set, but mailboxTracker is nil.", s.selectedMailbox.ID)
+		}
+	}
+	s.mutex.Unlock()
 
 	s.server.uploader.NotifyUploadQueued()
 

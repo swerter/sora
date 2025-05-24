@@ -18,11 +18,11 @@ import (
 	"github.com/migadu/sora/db"
 )
 
-const DATA_DIR = "data"
-const INDEX_DB = "cache_index.db"
-const CACHE_PURGE_TICK = 12 * time.Hour
+const DataDir = "data"
+const IndexDB = "cache_index.db"
+const PurgeTick = 12 * time.Hour
 
-const BATCH_PURGE_SIZE = 1000
+const PurgeBatchSize = 1000
 
 type Cache struct {
 	basePath      string
@@ -49,12 +49,12 @@ func New(basePath string, maxSizeBytes int64, maxObjectSize int64, sourceDb *db.
 	}
 
 	// Ensure data subdirectory exists
-	dataDir := filepath.Join(basePath, DATA_DIR)
+	dataDir := filepath.Join(basePath, DataDir)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create cache data path %s: %w", dataDir, err)
 	}
 
-	dbPath := filepath.Join(basePath, INDEX_DB)
+	dbPath := filepath.Join(basePath, IndexDB)
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open cache index DB: %w", err)
@@ -190,7 +190,7 @@ func (c *Cache) PurgeIfNeeded(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	dataDir := filepath.Join(c.basePath, DATA_DIR)
+	dataDir := filepath.Join(c.basePath, DataDir)
 	var nullTotalSize sql.NullInt64
 	row := c.db.QueryRow(`SELECT SUM(size) FROM cache_index`)
 	if err := row.Scan(&nullTotalSize); err != nil {
@@ -259,7 +259,7 @@ func removeEmptyParents(path string, stopAt string) {
 func (c *Cache) SyncFromDisk() error {
 	var filePaths []string
 
-	dataDir := filepath.Join(c.basePath, DATA_DIR)
+	dataDir := filepath.Join(c.basePath, DataDir)
 	err := filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -294,7 +294,7 @@ func (c *Cache) StartPurgeLoop(ctx context.Context) {
 		// Run immediately on startup
 		c.runPurgeCycle(ctx)
 
-		ticker := time.NewTicker(CACHE_PURGE_TICK)
+		ticker := time.NewTicker(PurgeTick)
 		defer ticker.Stop()
 
 		for {
@@ -322,7 +322,7 @@ func (c *Cache) runPurgeCycle(ctx context.Context) {
 }
 
 func (c *Cache) cleanupStaleDirectories() error {
-	dataDir := filepath.Join(c.basePath, DATA_DIR)
+	dataDir := filepath.Join(c.basePath, DataDir)
 	return filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// If WalkDir itself encounters an error trying to read a directory or stat an entry
@@ -378,7 +378,7 @@ func (c *Cache) PurgeOrphanedContentHashes(ctx context.Context) error {
 		batch = append(batch, contentHash)
 		paths = append(paths, path)
 
-		if len(batch) == BATCH_PURGE_SIZE {
+		if len(batch) == PurgeBatchSize {
 			purged += c.purgeHashBatch(ctx, batch, paths)
 			batch = nil
 			paths = nil
@@ -396,7 +396,7 @@ func (c *Cache) PurgeOrphanedContentHashes(ctx context.Context) error {
 }
 
 func (c *Cache) purgeHashBatch(ctx context.Context, contentHashes []string, paths []string) int {
-	dataDir := filepath.Join(c.basePath, DATA_DIR)
+	dataDir := filepath.Join(c.basePath, DataDir)
 	existingDBHashes, err := c.sourceDB.FindExistingContentHashes(ctx, contentHashes) // This DB method needs to be created
 	if err != nil {
 		log.Printf("[CACHE] error finding existing content hashes from sourceDB: %v", err)
@@ -499,9 +499,9 @@ func (c *Cache) GetPathForContentHash(contentHash string) string {
 	// Require a minimum length for the hash to be splittable as intended.
 	if len(contentHash) < 4 { // Adjusted minimum length
 		log.Printf("[CACHE] received short contentHash '%s', using directly in data_dir path construction\n", contentHash)
-		return filepath.Join(c.basePath, DATA_DIR, contentHash) // Or return an error
+		return filepath.Join(c.basePath, DataDir, contentHash) // Or return an error
 	}
-	return filepath.Join(c.basePath, DATA_DIR, contentHash[:2], contentHash[2:4], contentHash[4:])
+	return filepath.Join(c.basePath, DataDir, contentHash[:2], contentHash[2:4], contentHash[4:])
 }
 
 // isDirNotEmptyError checks if an error is due to a directory not being empty.
