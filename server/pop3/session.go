@@ -18,6 +18,10 @@ import (
 	"github.com/migadu/sora/server"
 )
 
+const Pop3MaxErrorsAllowed = 3          // Maximum number of errors tolerated before the connection is terminated
+const Pop3ErrorDelay = 3 * time.Second  // Wait for this many seconds before allowing another command
+const Pop3IdleTimeout = 5 * time.Minute // Maximum duration of inactivity before the connection is closed
+
 type POP3Session struct {
 	server.Session
 	server         *POP3Server
@@ -33,9 +37,7 @@ type POP3Session struct {
 }
 
 func (s *POP3Session) handleConnection() {
-	// Ensure the session context is cancelled when the connection handler exits
-	// This is important if handleConnection exits for reasons other than s.Close() being called.
-	defer s.cancel() // This will cancel s.ctx
+	defer s.cancel()
 
 	defer s.Close()
 	reader := bufio.NewReader(*s.conn)
@@ -46,11 +48,11 @@ func (s *POP3Session) handleConnection() {
 
 	s.Log("[POP3] connected")
 
-	ctx := s.ctx // Use the session's context for operations
+	ctx := s.ctx
+	var userAddress *server.Address
 
 	for {
-		// Set a read deadline for the connection
-		(*s.conn).SetReadDeadline(time.Now().Add(IDLE_TIMEOUT))
+		(*s.conn).SetReadDeadline(time.Now().Add(Pop3IdleTimeout))
 
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -72,7 +74,6 @@ func (s *POP3Session) handleConnection() {
 		cmd := strings.ToUpper(parts[0])
 
 		switch cmd {
-		// --------------------------------------------------------------------------------------------
 		case "USER":
 			if s.authenticated {
 				if s.handleClientError(writer, "-ERR Already authenticated\r\n") {
@@ -82,37 +83,49 @@ func (s *POP3Session) handleConnection() {
 				continue
 			}
 
-			// While POP3 accepts any kind of username, we will only accept email addresses
-			address, err := server.NewAddress(parts[1])
+			// We will only accept email addresses as address
+			newUserAddress, err := server.NewAddress(parts[1])
 			if err != nil {
 				s.Log("[POP3] error: %v", err)
 				if s.handleClientError(writer, fmt.Sprintf("-ERR %s\r\n", err.Error())) {
-					// Close the connection if too many errors are encountered
+					return
+				}
+				continue
+			}
+			userAddress = &newUserAddress
+			writer.WriteString("+OK User accepted\r\n")
+
+		case "PASS":
+			if s.authenticated {
+				writer.WriteString("-ERR Already authenticated\r\n")
+				writer.Flush()
+				continue
+			}
+
+			if userAddress == nil {
+				s.Log("[POP3] PASS without USER")
+				writer.WriteString("-ERR Must provide USER first\r\n")
+				writer.Flush()
+				continue
+			}
+
+			s.Log("[POP3] authentication attempt for %s", userAddress.FullAddress())
+
+			userID, err := s.server.db.Authenticate(ctx, userAddress.FullAddress(), parts[1])
+			if err != nil {
+				if s.handleClientError(writer, "-ERR Authentication failed\r\n") {
+					s.Log("[POP3] authentication failed")
 					return
 				}
 				continue
 			}
 
-			userID, err := s.server.db.GetUserIDByAddress(ctx, address.FullAddress())
-			if err != nil {
-				if err == consts.ErrUserNotFound {
-					if s.handleClientError(writer, fmt.Sprintf("-ERR %s\r\n", err.Error())) {
-						// Close the connection if too many errors are encountered
-						return
-					}
-					continue
-				}
-				s.Log("[POP3] USER error: %v", err)
-				writer.WriteString("-ERR Internal server error\r\n")
-				writer.Flush()
-				continue
-			}
+			// No auto-creation of mailboxes, they have to exist
 
-			inboxMailboxID, err := s.server.db.GetMailboxByName(ctx, userID, consts.MAILBOX_INBOX)
+			inboxMailboxID, err := s.server.db.GetMailboxByName(ctx, userID, consts.MailboxInbox)
 			if err != nil {
 				if err == consts.ErrMailboxNotFound {
 					if s.handleClientError(writer, fmt.Sprintf("-ERR %s\r\n", err.Error())) {
-						// Close the connection if too many errors are encountered
 						return
 					}
 					continue
@@ -124,32 +137,10 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			s.inboxMailboxID = inboxMailboxID.ID
-			s.User = server.NewUser(address, userID)
-			writer.WriteString("+OK User accepted\r\n")
-
-		// --------------------------------------------------------------------------------------------
-		case "PASS":
-			if s.authenticated {
-				writer.WriteString("-ERR Already authenticated\r\n")
-				writer.Flush()
-				continue
-			}
-
-			s.Log("[POP3] authentication attempt")
-			err := s.server.db.Authenticate(ctx, s.UserID(), parts[1])
-			if err != nil {
-				if s.handleClientError(writer, "-ERR Authentication failed\r\n") {
-					s.Log("[POP3] authentication failed")
-					// Close the connection if too many errors are encountered
-					return
-				}
-				continue
-			}
 			s.Log("[POP3] authenticated")
 			s.authenticated = true
 			writer.WriteString("+OK Password accepted\r\n")
 
-		// --------------------------------------------------------------------------------------------
 		case "STAT":
 			messagesCount, size, err := s.server.db.GetMailboxMessageCountAndSizeSum(ctx, s.inboxMailboxID)
 			if err != nil {
@@ -160,11 +151,9 @@ func (s *POP3Session) handleConnection() {
 			}
 			writer.WriteString(fmt.Sprintf("+OK %d %d\r\n", messagesCount, size))
 
-		// --------------------------------------------------------------------------------------------
 		case "LIST":
 			if !s.authenticated {
 				if s.handleClientError(writer, "-ERR Not authenticated\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
@@ -191,11 +180,9 @@ func (s *POP3Session) handleConnection() {
 			}
 			s.Log("[POP3] listed %d messages", len(s.messages))
 
-		// --------------------------------------------------------------------------------------------
 		case "RETR":
 			if !s.authenticated {
 				if s.handleClientError(writer, "-ERR Not authenticated\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
@@ -203,7 +190,6 @@ func (s *POP3Session) handleConnection() {
 
 			if len(parts) < 2 {
 				if s.handleClientError(writer, "-ERR Missing message number\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
@@ -212,7 +198,6 @@ func (s *POP3Session) handleConnection() {
 			msgNumber, err := strconv.Atoi(parts[1])
 			if err != nil || msgNumber < 1 {
 				if s.handleClientError(writer, "-ERR Invalid message number\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
@@ -230,16 +215,14 @@ func (s *POP3Session) handleConnection() {
 
 			if msgNumber > len(s.messages) {
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
 			}
 
 			msg := s.messages[msgNumber-1]
-			if msg == (db.Message{}) {
+			if msg.UID == 0 {
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
@@ -263,19 +246,18 @@ func (s *POP3Session) handleConnection() {
 			writer.WriteString(string(bodyData))
 			writer.WriteString("\r\n.\r\n")
 			s.Log("[POP3] retrieved message %d", msg.UID)
-		// --------------------------------------------------------------------------------------------
+
 		case "NOOP":
 			writer.WriteString("+OK\r\n")
-		// --------------------------------------------------------------------------------------------
+
 		case "RSET":
 			s.deleted = make(map[int]bool)
 			writer.WriteString("+OK\r\n")
 			s.Log("[POP3] reset")
-		// --------------------------------------------------------------------------------------------
+
 		case "DELE":
 			if !s.authenticated {
 				if s.handleClientError(writer, "-ERR Not authenticated\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
@@ -284,7 +266,6 @@ func (s *POP3Session) handleConnection() {
 			if len(parts) < 2 {
 				log.Printf("[POP3] Missing message number")
 				if s.handleClientError(writer, "-ERR Missing message number\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
@@ -294,7 +275,6 @@ func (s *POP3Session) handleConnection() {
 			if err != nil || msgNumber < 1 {
 				s.Log("[POP3] DELE error: %v", err)
 				if s.handleClientError(writer, "-ERR Invalid message number\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
@@ -313,17 +293,15 @@ func (s *POP3Session) handleConnection() {
 			if msgNumber > len(s.messages) {
 				s.Log("[POP3] DELE error: no such message %d", msgNumber)
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
 			}
 
 			msg := s.messages[msgNumber-1]
-			if msg == (db.Message{}) {
+			if msg.UID == 0 {
 				s.Log("[POP3] DELE error: no such message %d", msgNumber)
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
-					// Close the connection if too many errors are encountered
 					return
 				}
 				continue
@@ -333,7 +311,6 @@ func (s *POP3Session) handleConnection() {
 			writer.WriteString("+OK Message deleted\r\n")
 			s.Log("[POP3] marked message %d for deletion", msg.UID)
 
-		// --------------------------------------------------------------------------------------------
 		case "QUIT":
 
 			var expungeUIDs []imap.UID
@@ -357,11 +334,13 @@ func (s *POP3Session) handleConnection() {
 				s.Log("[POP3] error expunging messages: %v", err)
 			}
 
+			userAddress = nil
+
 			writer.WriteString("+OK Goodbye\r\n")
 			writer.Flush()
 			s.Close()
 			return
-		// --------------------------------------------------------------------------------------------
+
 		default:
 			writer.WriteString(fmt.Sprintf("-ERR Unknown command: %s\r\n", cmd))
 			s.Log("[POP3] unknown command: %s", cmd)
@@ -376,13 +355,13 @@ func isNotExist(err error) bool {
 
 func (s *POP3Session) handleClientError(writer *bufio.Writer, errMsg string) bool {
 	s.errorsCount++
-	if s.errorsCount > MAX_ERRORS_ALLOWED {
+	if s.errorsCount > Pop3MaxErrorsAllowed {
 		writer.WriteString("-ERR Too many errors, closing connection\r\n")
 		writer.Flush()
 		return true
 	}
 	// Make a delay to prevent brute force attacks
-	time.Sleep(time.Duration(s.errorsCount) * ERROR_DELAY)
+	time.Sleep(time.Duration(s.errorsCount) * Pop3ErrorDelay)
 	writer.WriteString(errMsg)
 	writer.Flush()
 	return false
@@ -397,7 +376,7 @@ func (s *POP3Session) Close() error {
 		s.messages = nil
 		s.deleted = nil
 		s.authenticated = false
-		if s.cancel != nil { // Ensure cancel is called if not already
+		if s.cancel != nil { // Ensure session cancel is called if not already
 			s.cancel()
 		}
 	}

@@ -1,7 +1,8 @@
 package imap
 
 func (s *IMAPSession) Capabilities() []string {
-	var caps []string
+	caps := make([]string, 0, len(s.server.caps))
+
 	for cap := range s.server.caps {
 		caps = append(caps, string(cap))
 	}

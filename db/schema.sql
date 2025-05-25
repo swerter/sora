@@ -1,8 +1,21 @@
 CREATE TABLE IF NOT EXISTS users (
 	id BIGSERIAL PRIMARY KEY,
-	username TEXT UNIQUE NOT NULL, -- Already indexed because of the UNIQUE constraint
-	password TEXT NOT NULL
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
+
+-- A table to store user passwords and identities
+CREATE TABLE IF NOT EXISTS passwords (
+	id BIGSERIAL PRIMARY KEY,
+	user_id BIGINT REFERENCES users(id),
+	username TEXT UNIQUE NOT NULL, 	
+	password TEXT NOT NULL,
+	primary_identity BOOLEAN DEFAULT FALSE, -- Flag to indicate if this is the primary identity
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+);
+
+-- Index to ensure that a user can have at most one primary identity.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_passwords_user_id_one_primary ON passwords (user_id) WHERE primary_identity IS TRUE;
 
 CREATE TABLE IF NOT EXISTS mailboxes (
 	id BIGSERIAL PRIMARY KEY,	
@@ -12,7 +25,9 @@ CREATE TABLE IF NOT EXISTS mailboxes (
 	uid_validity BIGINT NOT NULL,                                -- Include uid_validity column for IMAP
 	parent_id BIGINT REFERENCES mailboxes(id) ON DELETE CASCADE, -- Self-referencing for parent mailbox	
 	subscribed BOOLEAN DEFAULT TRUE,  							 -- New field to track mailbox subscription status
-	UNIQUE (user_id, name, parent_id)  							 -- Enforce unique mailbox names per user and parent mailbox
+	UNIQUE (user_id, name, parent_id), 							 -- Enforce unique mailbox names per user and parent mailbox
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
 -- Index for faster mailbox lookups by user_id and case insensitive name
@@ -50,10 +65,9 @@ CREATE TABLE IF NOT EXISTS messages (
 	sent_date TIMESTAMPTZ NOT NULL,		-- The date the message was sent
 	internal_date TIMESTAMPTZ NOT NULL, -- The date the message was received
 	flags INTEGER NOT NULL,				-- Bitwise flags for the message (e.g., \Seen, \Flagged)
+	custom_flags JSONB DEFAULT '[]'::jsonb NOT NULL, -- Custom flags as a JSON array of strings (e.g., ["$Important", "$Label1"])
 	size INTEGER NOT NULL,				-- Size of the message in bytes
 	body_structure BYTEA NOT NULL,      -- Serialized BodyStructure of the message
-	text_body TEXT NOT NULL, 			-- Text body of the message
-	text_body_tsv tsvector,				-- Full-text search index for text_body
 
 	--
 	-- Keep messages if mailbox is deleted by nullifying the mailbox_id
@@ -70,7 +84,10 @@ CREATE TABLE IF NOT EXISTS messages (
 
 	created_modseq BIGINT NOT NULL,
 	updated_modseq BIGINT,
-	expunged_modseq BIGINT
+	expunged_modseq BIGINT,
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	CONSTRAINT max_custom_flags_check CHECK (jsonb_array_length(custom_flags) <= 50) -- Limit to 50 custom flags
 );
 
 -- Index for faster lookups by user_id and mailbox_id
@@ -105,18 +122,40 @@ CREATE INDEX IF NOT EXISTS idx_messages_created_modseq ON messages (created_mods
 CREATE INDEX IF NOT EXISTS idx_messages_updated_modseq ON messages (updated_modseq);
 CREATE INDEX IF NOT EXISTS idx_messages_expunged_modseq ON messages (expunged_modseq);
 
+-- Index for PollMailbox: efficiently count non-expunged messages per mailbox
+CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id_expunged_at_is_null ON messages (mailbox_id) WHERE expunged_at IS NULL;
+
+-- Index for PollMailbox: efficiently filter messages by mailbox_id and expunged_modseq
+CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id_expunged_modseq ON messages (mailbox_id, expunged_modseq);
+
 -- Index for faster searches on the subject field
 -- This index uses the pg_trgm extension for trigram similarity searches
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS idx_messages_subject_trgm ON messages USING gin (LOWER(subject) gin_trgm_ops);
 
--- Index for full-text search on the text_body field
-CREATE INDEX IF NOT EXISTS idx_messages_text_body_tsv ON messages USING GIN (text_body_tsv);
+-- Index for custom_flags to speed up searches for messages with specific custom flags
+CREATE INDEX IF NOT EXISTS idx_messages_custom_flags ON messages USING GIN (custom_flags);
 
 -- Index recipients_json for faster searches on recipients
 -- This index uses the jsonb_path_ops for efficient querying
 CREATE INDEX IF NOT EXISTS idx_messages_recipients_json ON messages USING GIN (recipients_json jsonb_path_ops);
 
+-- Table to store message bodies, separated for performance
+CREATE TABLE IF NOT EXISTS message_contents (
+	content_hash VARCHAR(64) PRIMARY KEY, -- This is the same content_hash as in the messages table
+	text_body TEXT NOT NULL, 			  -- Text body of the message
+	text_body_tsv tsvector,			   	  -- Full-text search index for text_body
+	headers TEXT DEFAULT '' NOT NULL,     -- Raw message headers
+	headers_tsv tsvector,			      -- Full-text search index for headers
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+	-- No direct FK to messages.id. The link is implicit:
+	-- messages.content_hash = message_contents.content_hash
+);
+
+-- Index for full-text search on the text_body field in message_contents
+CREATE INDEX IF NOT EXISTS idx_message_contents_text_body_tsv ON message_contents USING GIN (text_body_tsv);
+CREATE INDEX IF NOT EXISTS idx_message_contents_headers_tsv ON message_contents USING GIN (headers_tsv);
 
 -- Pending uploads table for processing messages at own pace
 CREATE TABLE IF NOT EXISTS pending_uploads (
@@ -126,7 +165,8 @@ CREATE TABLE IF NOT EXISTS pending_uploads (
 	attempts INTEGER DEFAULT 0,
 	last_attempt TIMESTAMPTZ,
 	size INTEGER NOT NULL,
-	created_at TIMESTAMPTZ DEFAULT now()
+	created_at TIMESTAMPTZ DEFAULT now(),
+	updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- Index for retry loop: ordered by creation time
@@ -152,11 +192,17 @@ CREATE TABLE IF NOT EXISTS sieve_scripts (
 	user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
 	active BOOLEAN NOT NULL DEFAULT TRUE,
 	name TEXT NOT NULL,
-	script TEXT NOT NULL
+	script TEXT NOT NULL,
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	UNIQUE (user_id, name) 	-- Enforce unique script name per user
 );
 
 -- Index to speed up sieve script lookups by user_id
 CREATE INDEX IF NOT EXISTS idx_sieve_scripts_user_id ON sieve_scripts (user_id);
+
+-- Index to ensure that a user can have at most one active sieve script.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sieve_scripts_user_id_one_active ON sieve_scripts (user_id) WHERE active IS TRUE;
 
 -- Vacation responses tracking table
 CREATE TABLE IF NOT EXISTS vacation_responses (
@@ -164,7 +210,9 @@ CREATE TABLE IF NOT EXISTS vacation_responses (
 	user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
 	sender_address TEXT NOT NULL,
 	response_date TIMESTAMPTZ NOT NULL,
-	created_at TIMESTAMPTZ DEFAULT now() NOT NULL
+	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+	UNIQUE (user_id, sender_address, response_date) -- Enforce unique responses per user and sender
 );
 
 -- Index for faster lookups by user_id and sender_address
@@ -172,6 +220,3 @@ CREATE INDEX IF NOT EXISTS idx_vacation_responses_user_sender ON vacation_respon
 
 -- Index for cleanup of old responses
 CREATE INDEX IF NOT EXISTS idx_vacation_responses_response_date ON vacation_responses (response_date);
-
--- Test user for development "user@domain.com" with password "password"
-INSERT into users (username, password) values ('user@domain.com', '$2a$10$59jW86pmlBLK2CF.hqmNpOWDPFRPKLWm4u6mpP/p.q1gtH3P0sqyK') ON CONFLICT (username) DO NOTHING;

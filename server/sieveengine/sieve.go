@@ -2,6 +2,7 @@ package sieveengine
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -38,17 +39,34 @@ type Context struct {
 	Body         string
 }
 
+// VacationOracle defines the methods SievePolicy needs to interact with
+// persistent storage for vacation response tracking.
+type VacationOracle interface {
+	// IsVacationResponseAllowed checks if a vacation response is allowed to be sent
+	// to the given originalSender for the specified user and handle,
+	// considering the duration since the last response.
+	IsVacationResponseAllowed(ctx context.Context, userID int64, originalSender string, handle string, duration time.Duration) (bool, error)
+	// RecordVacationResponseSent records that a vacation response has been sent
+	// to the originalSender for the specified user and handle.
+	RecordVacationResponseSent(ctx context.Context, userID int64, originalSender string, handle string) error
+}
+
 type Executor interface {
-	Evaluate(ctx Context) (Result, error)
+	Evaluate(evalCtx context.Context, ctx Context) (Result, error)
 }
 
 // SieveExecutor implements the Executor interface using the go-sieve library
 type SieveExecutor struct {
 	script *sieve.Script
+	// policy is now initialized with userID and vacationOracle
 	policy *SievePolicy
 }
 
-// NewSieveExecutor creates a new SieveExecutor with the given script content
+// NewSieveExecutor creates a new SieveExecutor with the given script content.
+// This version initializes a SievePolicy without a VacationOracle or a specific userID.
+// It's suitable for scripts that do not use vacation actions requiring persistent state,
+// or for contexts like syntax validation where policy interaction is minimal or doesn't require user context.
+// For scripts that may use vacation with persistence, use NewSieveExecutorWithOracle.
 func NewSieveExecutor(scriptContent string) (Executor, error) {
 	// Load the script
 	scriptReader := strings.NewReader(scriptContent)
@@ -58,8 +76,27 @@ func NewSieveExecutor(scriptContent string) (Executor, error) {
 		return nil, err
 	}
 
-	// Create a policy
-	policy := &SievePolicy{}
+	policy := &SievePolicy{} // Basic policy, no oracle, no userID by default.
+
+	return &SieveExecutor{
+		script: script,
+		policy: policy,
+	}, nil
+}
+
+// NewSieveExecutor creates a new SieveExecutor with the given script content, userID, and vacation oracle.
+func NewSieveExecutorWithOracle(scriptContent string, userID int64, oracle VacationOracle) (Executor, error) {
+	scriptReader := strings.NewReader(scriptContent)
+	options := sieve.DefaultOptions()
+	script, err := sieve.Load(scriptReader, options)
+	if err != nil {
+		return nil, err
+	}
+
+	policy := &SievePolicy{
+		userID:         userID,
+		vacationOracle: oracle,
+	}
 
 	return &SieveExecutor{
 		script: script,
@@ -68,7 +105,7 @@ func NewSieveExecutor(scriptContent string) (Executor, error) {
 }
 
 // Evaluate evaluates the Sieve script with the given context
-func (e *SieveExecutor) Evaluate(ctx Context) (Result, error) {
+func (e *SieveExecutor) Evaluate(evalCtx context.Context, ctx Context) (Result, error) {
 	// Create envelope and message implementations
 	envelope := &SieveEnvelope{
 		From: ctx.EnvelopeFrom,
@@ -82,11 +119,10 @@ func (e *SieveExecutor) Evaluate(ctx Context) (Result, error) {
 	}
 
 	// Create runtime data
-	runtimeCtx := context.Background()
-	data := sieve.NewRuntimeData(e.script, e.policy, envelope, message)
+	data := sieve.NewRuntimeData(e.script, e.policy, envelope, message) // RuntimeData holds policy
 
 	// Execute the script
-	err := e.script.Execute(runtimeCtx, data)
+	err := e.script.Execute(evalCtx, data) // Pass the evaluation context
 	if err != nil {
 		return Result{Action: ActionKeep}, err
 	}
@@ -139,47 +175,72 @@ func (e *SieveExecutor) Evaluate(ctx Context) (Result, error) {
 
 // SievePolicy implements the PolicyReader interface
 type SievePolicy struct {
-	// Add fields for tracking vacation responses, etc.
-	vacationResponses map[string]time.Time
-	// Track the last vacation response that was triggered
+	vacationResponses  map[string]time.Time
 	lastVacationFrom   string
 	lastVacationSubj   string
 	lastVacationMsg    string
 	lastVacationIsMime bool
+	lastVacationHandle string // Stores the handle of the currently allowed vacation
 	vacationTriggered  bool
+
+	userID         int64
+	vacationOracle VacationOracle
 }
 
-// RedirectAllowed checks if the redirect action is allowed
 func (p *SievePolicy) RedirectAllowed(ctx context.Context, d *interp.RuntimeData, addr string) (bool, error) {
-	// Implement your policy for redirects
 	// For now, always allow redirects
 	return true, nil
 }
 
-// VacationResponseAllowed checks if a vacation response is allowed
+// VacationResponseAllowed is called by the Sieve interpreter.
+// `recipient` is the address of the original sender of the message being processed.
+// `handle` can be used to distinguish between multiple vacation actions in a script.
+// `duration` is the :days parameter from the vacation command.
 func (p *SievePolicy) VacationResponseAllowed(ctx context.Context, d *interp.RuntimeData,
-	recipient, handle string, duration time.Duration) (bool, error) {
-	// Initialize the map if it's nil
+	originalSender, handle string, duration time.Duration) (bool, error) {
+
+	// Key for in-memory tracking (per script execution, per handle)
+	// This is for Sieve's :handle specific cooldown within the same script evaluation.
+	inMemoryKey := originalSender + ":" + handle
+
+	if p.vacationOracle != nil {
+		// Use the oracle for the persistent check (this is the main :days check)
+		allowed, err := p.vacationOracle.IsVacationResponseAllowed(ctx, p.userID, originalSender, handle, duration)
+		if err != nil {
+			return false, fmt.Errorf("checking persistent vacation allowance via oracle: %w", err)
+		}
+		if !allowed {
+			return false, nil // Persistently not allowed
+		}
+	} else {
+		// Fallback to only in-memory check if no oracle (e.g. for default script without DB access, or testing)
+		if p.vacationResponses == nil {
+			p.vacationResponses = make(map[string]time.Time)
+		}
+		lastSent, exists := p.vacationResponses[inMemoryKey]
+		if exists && time.Since(lastSent) < duration {
+			return false, nil // Deny based on in-script, per-handle cooldown for this session
+		}
+	}
+
+	// If allowed (either by oracle or by lack of recent in-memory for no-oracle case),
+	// update the in-memory map for this specific script execution session and handle.
 	if p.vacationResponses == nil {
 		p.vacationResponses = make(map[string]time.Time)
 	}
+	p.vacationResponses[inMemoryKey] = time.Now()
 
-	// Check if we've sent a response to this recipient recently
-	lastSent, exists := p.vacationResponses[recipient]
-	if exists && time.Since(lastSent) < duration {
-		// We've sent a response recently, don't send another one
-		return false, nil
-	}
-
-	// Update the last sent time
-	p.vacationResponses[recipient] = time.Now()
+	// Store the handle for which the response is allowed, so SendVacationResponse can use it.
+	p.lastVacationHandle = handle
 
 	return true, nil
 }
 
-// SendVacationResponse sends a vacation response
+// SendVacationResponse is called by the Sieve interpreter if VacationResponseAllowed returned true.
+// `recipient` is the address to send the vacation message TO (i.e., the original sender).
 func (p *SievePolicy) SendVacationResponse(ctx context.Context, d *interp.RuntimeData,
 	recipient, from, subject, body string, isMime bool) error {
+
 	// Store the vacation response details
 	p.lastVacationFrom = from
 	p.lastVacationSubj = subject
@@ -187,8 +248,11 @@ func (p *SievePolicy) SendVacationResponse(ctx context.Context, d *interp.Runtim
 	p.lastVacationIsMime = isMime
 	p.vacationTriggered = true
 
-	// Implement the actual sending of vacation responses
-	// For now, just log the response (this would be replaced with actual email sending)
+	if p.vacationOracle != nil {
+		if err := p.vacationOracle.RecordVacationResponseSent(ctx, p.userID, recipient, p.lastVacationHandle); err != nil {
+			return fmt.Errorf("failed to record vacation response sent via oracle: %w", err)
+		}
+	}
 	return nil
 }
 

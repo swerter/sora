@@ -6,27 +6,26 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"time"
 
 	"github.com/google/uuid"
+	"github.com/migadu/sora/cache"
+	"github.com/migadu/sora/db"
+	"github.com/migadu/sora/server/uploader"
+	"github.com/migadu/sora/storage"
 )
-
-const MAX_ERRORS_ALLOWED = 3
-const ERROR_DELAY = 3 * time.Second
-const IDLE_TIMEOUT = 5 * time.Minute // Maximum duration of inactivity before the connection is closed
 
 type POP3Server struct {
 	addr      string
 	hostname  string
-	db        DBer               // Use our DBer interface
-	s3        S3StorageInterface // Use our interface
+	db        *db.Database
+	s3        *storage.S3Storage
 	appCtx    context.Context
-	uploader  UploadWorkerInterface // Use our interface
-	cache     CacheInterface        // Use our interface
-	tlsConfig *tls.Config           // TLS configuration
+	uploader  *uploader.UploadWorker
+	cache     *cache.Cache
+	tlsConfig *tls.Config
 }
 
-func New(appCtx context.Context, hostname, popAddr string, storage S3StorageInterface, database DBer, uploadWorker UploadWorkerInterface, cache CacheInterface, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string, insecureSkipVerify ...bool) (*POP3Server, error) {
+func New(appCtx context.Context, hostname, popAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string, insecureSkipVerify ...bool) (*POP3Server, error) {
 	server := &POP3Server{
 		hostname: hostname,
 		addr:     popAddr,

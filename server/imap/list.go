@@ -1,7 +1,6 @@
 package imap
 
 import (
-	"context"
 	"sort"
 	"strings"
 
@@ -22,8 +21,7 @@ func (s *IMAPSession) List(w *imapserver.ListWriter, ref string, patterns []stri
 		})
 	}
 
-	// Fetch mailboxes, converting them to IMAP mailboxes
-	mboxes, err := s.server.db.GetMailboxes(context.Background(), s.UserID(), options.SelectSubscribed)
+	mboxes, err := s.server.db.GetMailboxes(s.ctx, s.UserID(), options.SelectSubscribed)
 	if err != nil {
 		return s.internalError("failed to fetch mailboxes: %v", err)
 	}
@@ -60,12 +58,10 @@ func (s *IMAPSession) List(w *imapserver.ListWriter, ref string, patterns []stri
 }
 
 func listMailbox(mbox *db.DBMailbox, options *imap.ListOptions) *imap.ListData {
-	// Check if the mailbox should be listed
 	if options.SelectSubscribed && !mbox.Subscribed {
 		return nil
 	}
 
-	// Prepare attributes
 	attributes := []imap.MailboxAttr{}
 
 	if mbox.HasChildren {
@@ -74,7 +70,6 @@ func listMailbox(mbox *db.DBMailbox, options *imap.ListOptions) *imap.ListData {
 		attributes = append(attributes, imap.MailboxAttrHasNoChildren)
 	}
 
-	// Add special attributes
 	switch strings.ToUpper(mbox.Name) {
 	case "SENT":
 		attributes = append(attributes, imap.MailboxAttrSent)

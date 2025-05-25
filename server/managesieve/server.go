@@ -9,17 +9,18 @@ import (
 	"net"
 
 	"github.com/google/uuid"
+	"github.com/migadu/sora/db"
 )
 
 type ManageSieveServer struct {
 	addr      string
 	hostname  string
-	db        DBer
-	appCtx    context.Context // Store the application's parent context
-	tlsConfig *tls.Config     // TLS configuration
+	db        *db.Database
+	appCtx    context.Context
+	tlsConfig *tls.Config
 }
 
-func New(appCtx context.Context, hostname, addr string, database DBer, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string, insecureSkipVerify ...bool) (*ManageSieveServer, error) {
+func New(appCtx context.Context, hostname, addr string, database *db.Database, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string, insecureSkipVerify ...bool) (*ManageSieveServer, error) {
 	server := &ManageSieveServer{
 		hostname: hostname,
 		addr:     addr,
@@ -27,7 +28,6 @@ func New(appCtx context.Context, hostname, addr string, database DBer, insecureA
 		appCtx:   appCtx,
 	}
 
-	// Setup TLS if certificate and key files are provided
 	if tlsCertFile != "" && tlsKeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
 		if err != nil {
@@ -35,13 +35,12 @@ func New(appCtx context.Context, hostname, addr string, database DBer, insecureA
 		}
 		server.tlsConfig = &tls.Config{
 			Certificates:             []tls.Certificate{cert},
-			MinVersion:               tls.VersionTLS12, // Allow older TLS versions for better compatibility
+			MinVersion:               tls.VersionTLS12,
 			ClientAuth:               tls.NoClientCert,
 			ServerName:               hostname,
-			PreferServerCipherSuites: true, // Prefer server cipher suites over client cipher suites
+			PreferServerCipherSuites: true,
 		}
 
-		// Set InsecureSkipVerify if requested (for self-signed certificates)
 		if len(insecureSkipVerify) > 0 && insecureSkipVerify[0] {
 			server.tlsConfig.InsecureSkipVerify = true
 			log.Printf("WARNING: TLS certificate verification disabled for ManageSieve server")
@@ -56,7 +55,6 @@ func (s *ManageSieveServer) Start(errChan chan error) {
 	var err error
 
 	if s.tlsConfig != nil {
-		// Start TLS listener if TLS is configured
 		listener, err = tls.Listen("tcp", s.addr, s.tlsConfig)
 		if err != nil {
 			errChan <- fmt.Errorf("failed to create TLS listener: %w", err)
@@ -64,7 +62,6 @@ func (s *ManageSieveServer) Start(errChan chan error) {
 		}
 		log.Printf("ManageSieve listening with TLS on %s", s.addr)
 	} else {
-		// Start regular TCP listener if no TLS
 		listener, err = net.Listen("tcp", s.addr)
 		if err != nil {
 			errChan <- fmt.Errorf("failed to create listener: %w", err)
@@ -81,7 +78,6 @@ func (s *ManageSieveServer) Start(errChan chan error) {
 			return
 		}
 
-		// Create a new cancellable context for this session
 		sessionCtx, sessionCancel := context.WithCancel(s.appCtx)
 
 		session := &ManageSieveSession{

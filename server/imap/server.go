@@ -26,9 +26,9 @@ type IMAPServer struct {
 	server    *imapserver.Server
 	uploader  *uploader.UploadWorker
 	cache     *cache.Cache
-	appCtx    context.Context // Store the application's parent context
+	appCtx    context.Context
 	caps      imap.CapSet
-	tlsConfig *tls.Config // TLS configuration
+	tlsConfig *tls.Config
 }
 
 func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string, insecureSkipVerify ...bool) (*IMAPServer, error) {
@@ -48,6 +48,7 @@ func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3S
 			// imap.CapAuthPlain:   struct{}{},
 			imap.CapMove: struct{}{},
 			imap.CapIdle: struct{}{},
+			// imap.CapCondStore: struct{}{}, // Add CONDSTORE capability
 			// imap.CapID:          struct{}{},
 		},
 	}
@@ -69,7 +70,7 @@ func New(appCtx context.Context, hostname, imapAddr string, storage *storage.S3S
 		// Set InsecureSkipVerify if requested (for self-signed certificates)
 		if len(insecureSkipVerify) > 0 && insecureSkipVerify[0] {
 			s.tlsConfig.InsecureSkipVerify = true
-			log.Printf("WARNING: TLS certificate verification disabled for IMAP server")
+			log.Printf("WARNING TLS certificate verification disabled for IMAP server")
 		}
 	}
 
@@ -110,6 +111,8 @@ func (s *IMAPServer) newSession(conn *imapserver.Conn) (imapserver.Session, *ima
 	greeting := &imapserver.GreetingData{
 		PreAuth: false,
 	}
+
+	session.Log("connected")
 
 	return session, greeting, nil
 }

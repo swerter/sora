@@ -25,8 +25,6 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
-const BATCH_PURGE_SIZE = 100
-
 type CleanupWorker struct {
 	db          *db.Database
 	s3          *storage.S3Storage
@@ -35,6 +33,7 @@ type CleanupWorker struct {
 	gracePeriod time.Duration
 }
 
+// New creates a new CleanupWorker.
 func New(db *db.Database, s3 *storage.S3Storage, cache *cache.Cache, interval, gracePeriod time.Duration) *CleanupWorker {
 	return &CleanupWorker{
 		db:          db,
@@ -46,12 +45,13 @@ func New(db *db.Database, s3 *storage.S3Storage, cache *cache.Cache, interval, g
 }
 
 func (w *CleanupWorker) Start(ctx context.Context) {
-	log.Printf("[CLEANUP] worker starting with interval: %v", w.interval)
+	log.Printf("[CLEANUP] worker starting with interval: %v, grace period: %v", w.interval, w.gracePeriod)
 	interval := w.interval
-	const minInterval = time.Minute
-	if interval < minInterval {
-		log.Printf("[CLEANUP] WARNING: interval %v is less than minimum %v, using minimum.", interval, minInterval)
-		interval = minInterval
+
+	const minAllowedInterval = time.Minute
+	if interval < minAllowedInterval {
+		log.Printf("[CLEANUP] WARNING: Configured interval %v is less than minimum allowed %v. Using minimum.", interval, minAllowedInterval)
+		interval = minAllowedInterval
 	}
 	ticker := time.NewTicker(interval)
 	go func() {
@@ -93,10 +93,10 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 		log.Printf("[CLEANUP] deleted %d old vacation responses", count)
 	}
 
-	candidates, err := w.db.ListS3ObjectsToDelete(ctx, w.gracePeriod, BATCH_PURGE_SIZE)
+	candidates, err := w.db.GetContentHashesForFullCleanup(ctx, w.gracePeriod, db.BATCH_PURGE_SIZE)
 	if err != nil {
-		log.Println("[CLEANUP] failed to list delete candidates:", err)
-		return fmt.Errorf("failed to list S3 delete candidates: %w", err)
+		log.Printf("[CLEANUP] failed to list content hashes for full cleanup: %v", err)
+		return fmt.Errorf("failed to list content hashes for full cleanup: %w", err) // Return error to log it at worker level
 	}
 
 	if len(candidates) == 0 {
@@ -122,6 +122,10 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 		if s3Err != nil && !isS3ObjectNotFoundError {
 			log.Printf("[CLEANUP] failed to delete object %s: %v", cHash, s3Err)
 			continue // Skip to the next candidate
+		}
+
+		if isS3ObjectNotFoundError {
+			log.Printf("[CLEANUP] S3 object %s was not found. Proceeding with DB cleanup.", cHash)
 		}
 
 		if err := w.db.DeleteExpungedMessagesByContentHash(ctx, cHash); err != nil {

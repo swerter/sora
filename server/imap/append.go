@@ -2,11 +2,9 @@ package imap
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 
 	"github.com/emersion/go-imap/v2"
@@ -21,10 +19,10 @@ import (
 )
 
 func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *imap.AppendOptions) (*imap.AppendData, error) {
-	ctx := context.Background()
-	mailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), mboxName)
+	mailbox, err := s.server.db.GetMailboxByName(s.ctx, s.UserID(), mboxName)
 	if err != nil {
 		if err == consts.ErrMailboxNotFound {
+			s.Log("[APPEND] mailbox '%s' does not exist", mboxName)
 			return nil, &imap.Error{
 				Type: imap.StatusResponseTypeNo,
 				Code: imap.ResponseCodeNonExistent,
@@ -36,20 +34,31 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 
 	// Read the entire message into a buffer
 	var buf bytes.Buffer
-	_, err = io.Copy(&buf, r)
-	if err != nil {
+	if _, err = io.Copy(&buf, r); err != nil {
 		return nil, s.internalError("failed to read message: %v", err)
 	}
 
-	// Trim the message to remove any leading CRLF characters
-	messageBytes := bytes.TrimLeft(buf.Bytes(), "\r\n")
+	// Use the full message bytes as received for hashing, size, and header extraction.
+	fullMessageBytes := buf.Bytes()
 
-	messageContent, err := server.ParseMessage(bytes.NewReader(messageBytes))
+	// Extract raw headers string.
+	// Headers are typically terminated by a double CRLF (\r\n\r\n).
+	var rawHeadersText string
+	headerEndIndex := bytes.Index(fullMessageBytes, []byte("\r\n\r\n"))
+	if headerEndIndex != -1 {
+		rawHeadersText = string(fullMessageBytes[:headerEndIndex])
+	} else {
+		// Log if headers are not clearly separated. rawHeadersText will be empty.
+		// This might indicate a malformed email or an email with only headers and no body separator.
+		s.Log("[APPEND] Could not find standard header/body separator (\\r\\n\\r\\n) in message. Raw headers field will be empty.")
+	}
+
+	messageContent, err := server.ParseMessage(bytes.NewReader(fullMessageBytes))
 	if err != nil {
 		return nil, s.internalError("failed to parse message: %v", err)
 	}
 
-	contentHash := helpers.HashContent(messageBytes)
+	contentHash := helpers.HashContent(fullMessageBytes)
 
 	// Parse message headers (this does not consume the body)
 	mailHeader := mail.Header{Header: messageContent.Header}
@@ -70,21 +79,21 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 
 	plaintextBody, err := helpers.ExtractPlaintextBody(messageContent)
 	if err != nil {
-		log.Printf("Failed to extract plaintext body: %v", err)
+		s.Log("[APPEND] failed to extract plaintext body: %v", err)
 		// Continue with the append operation even if plaintext body extraction fails,
 		// it will default to an empty string if not present
 	}
 
 	recipients := helpers.ExtractRecipients(messageContent.Header)
 
-	filePath, err := s.server.uploader.StoreLocally(contentHash, messageBytes)
+	filePath, err := s.server.uploader.StoreLocally(contentHash, fullMessageBytes)
 	if err != nil {
 		return nil, s.internalError("failed to save message to disk: %v", err)
 	}
 
-	size := int64(len(messageBytes))
+	size := int64(len(fullMessageBytes))
 
-	_, messageUID, err := s.server.db.InsertMessage(ctx,
+	_, messageUID, err := s.server.db.InsertMessage(s.ctx,
 		&db.InsertMessageOptions{
 			UserID:        s.UserID(),
 			MailboxID:     mailbox.ID,
@@ -95,11 +104,12 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 			InternalDate:  options.Time,
 			Size:          size,
 			Subject:       subject,
-			PlaintextBody: plaintextBody,
+			PlaintextBody: *plaintextBody,
 			SentDate:      sentDate,
 			InReplyTo:     inReplyTo,
 			BodyStructure: &bodyStructure,
 			Recipients:    recipients,
+			RawHeaders:    rawHeadersText,
 		},
 		db.PendingUpload{
 			InstanceID:  s.server.hostname,
@@ -117,6 +127,21 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		}
 		return nil, s.internalError("failed to insert message metadata: %v", err)
 	}
+
+	// If the message was appended to the currently selected mailbox,
+	// update the session's message count and notify the tracker.
+	// This requires protecting access to session state like s.selectedMailbox.
+	s.mutex.Lock()
+	if s.selectedMailbox != nil && s.selectedMailbox.ID == mailbox.ID {
+		s.currentNumMessages++ // Increment the count for the selected mailbox
+		if s.mailboxTracker != nil {
+			s.mailboxTracker.QueueNumMessages(s.currentNumMessages)
+		} else {
+			// This would indicate an inconsistent state if a mailbox is selected but has no tracker.
+			s.Log("[APPEND] Inconsistent state: selectedMailbox ID %d is set, but mailboxTracker is nil.", s.selectedMailbox.ID)
+		}
+	}
+	s.mutex.Unlock()
 
 	s.server.uploader.NotifyUploadQueued()
 

@@ -1,10 +1,11 @@
 package imap
 
 import (
-	"context"
 	"fmt"
+	"strings"
 
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/migadu/sora/consts"
 )
 
@@ -12,14 +13,24 @@ func (s *IMAPSession) Select(mboxName string, options *imap.SelectOptions) (*ima
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	ctx := context.Background()
+	var previouslySelectedMailboxID int64
+	isReselecting := false
 
-	s.Log("Selecting mailbox: %s", mboxName)
+	if s.selectedMailbox != nil {
+		previouslySelectedMailboxID = s.selectedMailbox.ID
+		s.Log("[SELECT] unselecting mailbox %s (ID: %d) before selecting '%s'.", s.selectedMailbox.Name, previouslySelectedMailboxID, mboxName)
 
-	mailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), mboxName)
+		if strings.EqualFold(s.selectedMailbox.Name, mboxName) {
+			isReselecting = true
+		}
+		s.clearSelectedMailboxState()
+	}
+
+	s.Log("[SELECT] attempting to select mailbox: %s reselecting=%v", mboxName, isReselecting)
+	mailbox, err := s.server.db.GetMailboxByName(s.ctx, s.UserID(), mboxName)
 	if err != nil {
 		if err == consts.ErrMailboxNotFound {
-			s.Log("Mailbox '%s' does not exist", mboxName)
+			s.Log("[SELECT] mailbox '%s' does not exist", mboxName)
 			return nil, &imap.Error{
 				Type: imap.StatusResponseTypeNo,
 				Code: imap.ResponseCodeNonExistent,
@@ -30,38 +41,39 @@ func (s *IMAPSession) Select(mboxName string, options *imap.SelectOptions) (*ima
 		return nil, s.internalError("failed to fetch mailbox '%s': %v", mboxName, err)
 	}
 
-	// Verify the mailbox exists and has messages
-	summary, err := s.server.db.GetMailboxSummary(ctx, mailbox.ID)
+	s.mutex.Unlock()
+
+	currentSummary, err := s.server.db.GetMailboxSummary(s.ctx, mailbox.ID)
 	if err != nil {
-		return nil, s.internalError("failed to get mailbox summary for '%s': %v", mboxName, err)
+		s.mutex.Lock()
+		return nil, s.internalError("failed to get current summary for selected mailbox '%s': %v", mboxName, err)
 	}
 
-	// Double-check message count with a direct query
-	count, _, err := s.server.db.GetMailboxMessageCountAndSizeSum(ctx, mailbox.ID)
-	if err != nil {
-		s.Log("Warning: Failed to get message count for mailbox '%s': %v", mboxName, err)
-	} else if count != summary.NumMessages {
-		s.Log("Warning: Message count mismatch for mailbox '%s': summary=%d, direct count=%d",
-			mboxName, summary.NumMessages, count)
-		// Use the direct count as it's more reliable
-		summary.NumMessages = count
+	s.mutex.Lock()
+	if isReselecting && previouslySelectedMailboxID != 0 && previouslySelectedMailboxID != mailbox.ID {
+		s.Log("[SELECT] WARNING: reselecting mailbox '%s', ID changed from %d to %d", mboxName, previouslySelectedMailboxID, mailbox.ID)
 	}
+	s.currentNumMessages = uint32(currentSummary.NumMessages)
+	s.currentHighestModSeq = currentSummary.HighestModSeq
 
-	s.Log("Mailbox '%s' has %d messages, UIDNext=%d, HighestModSeq=%d",
-		mboxName, summary.NumMessages, summary.UIDNext, summary.HighestModSeq)
+	s.selectedMailbox = mailbox
+	s.mailboxTracker = imapserver.NewMailboxTracker(s.currentNumMessages)
+	s.sessionTracker = s.mailboxTracker.NewSession()
 
-	s.mailbox = NewMailbox(mailbox, uint32(summary.NumMessages), summary.HighestModSeq)
+	s.Log("[SELECT] mailbox '%s' (ID: %d)  NumMessages=%d HighestModSeqForPolling=%d UIDNext=%d UIDValidity=%d ReportedHighestModSeq=%d",
+		mboxName, mailbox.ID, s.currentNumMessages, s.currentHighestModSeq, currentSummary.UIDNext, s.selectedMailbox.UIDValidity, currentSummary.HighestModSeq)
 
 	selectData := &imap.SelectData{
-		Flags:       s.mailbox.PermittedFlags(),
-		NumMessages: s.mailbox.numMessages,
-		UIDNext:     imap.UID(summary.UIDNext),
-		UIDValidity: mailbox.UIDValidity,
-		NumRecent:   uint32(summary.RecentCount),
+		// Flags defined for this mailbox (system flags, common keywords, and in-use custom flags)
+		Flags: getDisplayFlags(s.ctx, s.server.db, mailbox),
+		// Flags that can be changed, including \* for custom
+		PermanentFlags: getPermanentFlags(),
+		NumMessages:    s.currentNumMessages,
+		UIDNext:        imap.UID(currentSummary.UIDNext),
+		UIDValidity:    s.selectedMailbox.UIDValidity,
+		NumRecent:      uint32(currentSummary.RecentCount),
+		HighestModSeq:  s.currentHighestModSeq,
 	}
-
-	s.Log("Mailbox selected: %s (NumMessages=%d, UIDNext=%d, UIDValidity=%d)",
-		mboxName, selectData.NumMessages, selectData.UIDNext, selectData.UIDValidity)
 
 	return selectData, nil
 }
@@ -70,11 +82,9 @@ func (s *IMAPSession) Unselect() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if s.mailbox != nil {
-		s.Log("Mailbox %s unselected", s.mailbox.Name)
-	} else {
-		s.Log("Unselect called but no mailbox was selected")
+	if s.selectedMailbox != nil {
+		s.Log("[SELECT] mailbox %s unselected", s.selectedMailbox.Name)
 	}
-	s.mailbox = nil
+	s.clearSelectedMailboxState()
 	return nil
 }

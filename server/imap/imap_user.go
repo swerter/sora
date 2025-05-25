@@ -9,7 +9,6 @@ import (
 type IMAPUser struct {
 	server.User
 	mutex sync.Mutex
-	// prevUidValidity uint32
 }
 
 func NewIMAPUser(address server.Address, userID int64) *IMAPUser {

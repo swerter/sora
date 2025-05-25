@@ -1,7 +1,6 @@
 package imap
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -9,16 +8,13 @@ import (
 	"github.com/migadu/sora/consts"
 )
 
-// Delete a mailbox
 func (s *IMAPSession) Delete(mboxName string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	ctx := context.Background()
-
 	for _, specialMailbox := range consts.DefaultMailboxes {
 		if strings.EqualFold(mboxName, specialMailbox) {
-			s.Log("Attempt to delete special mailbox '%s'", mboxName)
+			s.Log("[DELETE] attempt to delete special mailbox '%s'", mboxName)
 			return &imap.Error{
 				Type: imap.StatusResponseTypeNo,
 				Code: imap.ResponseCodeNoPerm,
@@ -27,11 +23,10 @@ func (s *IMAPSession) Delete(mboxName string) error {
 		}
 	}
 
-	// Fetch the mailbox from the database using the full path
-	mailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), mboxName)
+	mailbox, err := s.server.db.GetMailboxByName(s.ctx, s.UserID(), mboxName)
 	if err != nil {
 		if err == consts.ErrMailboxNotFound {
-			s.Log("Mailbox '%s' not found", mboxName)
+			s.Log("[DELETE] mailbox '%s' not found", mboxName)
 			return &imap.Error{
 				Type: imap.StatusResponseTypeNo,
 				Code: imap.ResponseCodeNonExistent,
@@ -42,11 +37,11 @@ func (s *IMAPSession) Delete(mboxName string) error {
 	}
 
 	// Delete the mailbox; the database will automatically delete any child mailboxes due to ON DELETE CASCADE
-	err = s.server.db.DeleteMailbox(ctx, mailbox.ID)
+	err = s.server.db.DeleteMailbox(s.ctx, mailbox.ID, s.UserID())
 	if err != nil {
 		return s.internalError("failed to delete mailbox '%s': %v", mboxName, err)
 	}
 
-	s.Log("Mailbox deleted: %s", mboxName)
+	s.Log("[DELETE] mailbox deleted: %s", mboxName)
 	return nil
 }

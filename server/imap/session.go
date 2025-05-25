@@ -7,17 +7,24 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	_ "github.com/emersion/go-message/charset"
+	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/server"
 )
 
 type IMAPSession struct {
 	server.Session
 	*IMAPUser
-	server  *IMAPServer
-	conn    *imapserver.Conn
-	ctx     context.Context
-	cancel  context.CancelFunc
-	mailbox *Mailbox
+	server *IMAPServer
+	conn   *imapserver.Conn
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	selectedMailbox *db.DBMailbox
+	mailboxTracker  *imapserver.MailboxTracker
+	sessionTracker  *imapserver.SessionTracker
+
+	currentHighestModSeq uint64
+	currentNumMessages   uint32
 }
 
 func (s *IMAPSession) Context() context.Context {
@@ -34,32 +41,68 @@ func (s *IMAPSession) internalError(format string, a ...interface{}) *imap.Error
 }
 
 func (s *IMAPSession) Close() error {
-	// Check if s is nil
 	if s == nil {
 		return nil
 	}
 
-	// Safely handle IMAPUser with proper locking
 	if s.IMAPUser != nil {
 		userMutex := &s.IMAPUser.mutex
 		fullAddress := s.IMAPUser.FullAddress()
 
 		userMutex.Lock()
-		s.Log("Closing session for user: %v", fullAddress)
+		s.Log("closing session for user: %v", fullAddress)
 		s.IMAPUser = nil
-		// Also clear the User field in the embedded Session struct
 		s.Session.User = nil
 		userMutex.Unlock()
 	} else {
-		// Log when a client connection drops before authentication
-		s.Log("Client connection dropped (unauthenticated)")
+		s.Log("client dropped unauthenticated connection")
 	}
 
-	s.mailbox = nil
+	s.clearSelectedMailboxState()
 
 	if s.cancel != nil {
-		s.cancel() // Cancel the context for this session
+		s.cancel()
 	}
 
 	return nil
+}
+
+func (s *IMAPSession) clearSelectedMailboxState() {
+	if s.sessionTracker != nil {
+		s.sessionTracker.Close()
+	}
+	s.selectedMailbox = nil
+	s.mailboxTracker = nil
+	s.sessionTracker = nil
+	s.currentHighestModSeq = 0
+	s.currentNumMessages = 0
+}
+
+func (s *IMAPSession) decodeNumSet(numSet imap.NumSet) imap.NumSet {
+	if s.sessionTracker == nil {
+		return numSet
+	}
+
+	seqSet, ok := numSet.(imap.SeqSet)
+	if !ok {
+		return numSet
+	}
+
+	var out imap.SeqSet
+	for _, seqRange := range seqSet {
+		start := s.sessionTracker.DecodeSeqNum(seqRange.Start)
+		stop := s.sessionTracker.DecodeSeqNum(seqRange.Stop)
+
+		if start == 0 && seqRange.Start != 0 {
+			continue
+		}
+		if stop == 0 && seqRange.Stop != 0 {
+			continue
+		}
+		out = append(out, imap.SeqRange{Start: start, Stop: stop})
+	}
+	if len(out) == 0 && len(seqSet) > 0 {
+		return imap.SeqSet{}
+	}
+	return out
 }

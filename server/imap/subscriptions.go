@@ -1,8 +1,6 @@
 package imap
 
 import (
-	"context"
-
 	"github.com/migadu/sora/consts"
 )
 
@@ -21,10 +19,7 @@ func (s *IMAPSession) updateSubscriptionStatus(mailboxName string, subscribe boo
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	ctx := context.Background()
-
-	// Fetch the mailbox by its full path
-	mailbox, err := s.server.db.GetMailboxByName(ctx, s.UserID(), mailboxName)
+	mailbox, err := s.server.db.GetMailboxByName(s.ctx, s.UserID(), mailboxName)
 	if err != nil {
 		if err == consts.ErrMailboxNotFound {
 			s.Log("Mailbox '%s' does not exist", mailboxName)
@@ -33,8 +28,7 @@ func (s *IMAPSession) updateSubscriptionStatus(mailboxName string, subscribe boo
 		return s.internalError("failed to fetch mailbox '%s': %v", mailboxName, err)
 	}
 
-	// Set subscription status
-	err = s.server.db.SetMailboxSubscribed(ctx, mailbox.ID, subscribe)
+	err = s.server.db.SetMailboxSubscribed(s.ctx, mailbox.ID, s.UserID(), subscribe)
 	if err != nil {
 		return s.internalError("failed to set subscription status for mailbox '%s': %v", mailboxName, err)
 	}
@@ -43,7 +37,7 @@ func (s *IMAPSession) updateSubscriptionStatus(mailboxName string, subscribe boo
 	if !subscribe {
 		action = "unsubscribed"
 	}
-	s.Log("Mailbox '%s' %s", mailboxName, action)
+	s.Log("[SUBSCRIBE] mailbox '%s' %s", mailboxName, action)
 
 	return nil
 }
