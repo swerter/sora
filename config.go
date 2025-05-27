@@ -24,6 +24,7 @@ type S3Config struct {
 	SecretKey string `toml:"secret_key"`
 	Bucket    string `toml:"bucket"`
 	Trace     bool   `toml:"trace"`
+	UseTLS    bool   `toml:"use_tls"`
 }
 
 // Cleaner worker configuration.
@@ -116,6 +117,7 @@ func newDefaultConfig() Config {
 			AccessKey: "",
 			SecretKey: "",
 			Bucket:    "",
+			UseTLS:    true,
 		},
 		Cleanup: CleanupConfig{
 			GracePeriod:  "14d",
