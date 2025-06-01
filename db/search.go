@@ -221,7 +221,7 @@ func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64
 		SELECT
 			uid,
 			ROW_NUMBER() OVER (ORDER BY id) AS seqnum, -- id is needed for ordering/seqnum
-			user_id, mailbox_id, content_hash, uploaded, flags, custom_flags,
+			account_id, mailbox_id, content_hash, uploaded, flags, custom_flags,
 			internal_date, size, body_structure,
 			created_modseq, updated_modseq, expunged_modseq,
 			subject,
@@ -235,7 +235,7 @@ func (db *Database) GetMessagesWithCriteria(ctx context.Context, mailboxID int64
 		WHERE m.mailbox_id = @mailboxID AND m.expunged_at IS NULL
 	)
 	SELECT 
-		user_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
+		account_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
 		internal_date, size, body_structure,
 		created_modseq, updated_modseq, expunged_modseq, seqnum
 	FROM message_seqs`

@@ -84,9 +84,9 @@ func (d *Database) InsertMessageCopy(ctx context.Context, srcMessageUID imap.UID
 	var newMsgUID imap.UID
 	err = tx.QueryRow(ctx, `
 		INSERT INTO messages
-			(user_id, mailbox_id, mailbox_path, uid, content_hash, message_id, flags, custom_flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, uploaded, recipients_json, created_modseq)
+			(account_id, mailbox_id, mailbox_path, uid, content_hash, message_id, flags, custom_flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, uploaded, recipients_json, created_modseq)
 		SELECT
-			user_id, $1, $2, $3, content_hash, message_id, flags, custom_flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, uploaded, recipients_json, nextval('messages_modseq')
+			account_id, $1, $2, $3, content_hash, message_id, flags, custom_flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, uploaded, recipients_json, nextval('messages_modseq')
 		FROM
 			messages
 		WHERE
@@ -209,12 +209,12 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO messages
-			(user_id, mailbox_id, mailbox_path, uid, message_id, content_hash, flags, custom_flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, recipients_json, created_modseq)
+			(account_id, mailbox_id, mailbox_path, uid, message_id, content_hash, flags, custom_flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, recipients_json, created_modseq)
 		VALUES
-			(@user_id, @mailbox_id, @mailbox_path, @uid, @message_id, @content_hash, @flags, @custom_flags, @internal_date, @size, @subject, @sent_date, @in_reply_to, @body_structure, @recipients_json, nextval('messages_modseq'))
+			(@account_id, @mailbox_id, @mailbox_path, @uid, @message_id, @content_hash, @flags, @custom_flags, @internal_date, @size, @subject, @sent_date, @in_reply_to, @body_structure, @recipients_json, nextval('messages_modseq'))
 		RETURNING id
 	`, pgx.NamedArgs{
-		"user_id":         options.UserID,
+		"account_id":      options.UserID,
 		"mailbox_id":      options.MailboxID,
 		"mailbox_path":    options.MailboxName,
 		"uid":             highestUID,
@@ -242,7 +242,7 @@ func (d *Database) InsertMessage(ctx context.Context, options *InsertMessageOpti
 			// the defer tx.Rollback(ctx) will roll back the attempted INSERT and UID bump.
 			queryErr := tx.QueryRow(ctx,
 				`SELECT id, uid FROM messages 
-					 WHERE user_id = $1 AND mailbox_id = $2 AND message_id = $3 AND expunged_at IS NULL`,
+					 WHERE account_id = $1 AND mailbox_id = $2 AND message_id = $3 AND expunged_at IS NULL`,
 				options.UserID, options.MailboxID, saneMessageID).Scan(&existingID, &existingUID)
 
 			if queryErr == nil {

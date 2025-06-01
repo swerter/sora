@@ -1,47 +1,52 @@
-CREATE TABLE IF NOT EXISTS users (
+-- This file contains the SQL schema for the mail server database.
+--
+-- Ensure your database has the necessary extensions installed, such as pg_trgm for full-text search.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE TABLE IF NOT EXISTS accounts (
 	id BIGSERIAL PRIMARY KEY,
 	created_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
--- A table to store user passwords and identities
-CREATE TABLE IF NOT EXISTS passwords (
+-- A table to store account passwords and identities
+CREATE TABLE IF NOT EXISTS credentials (
 	id BIGSERIAL PRIMARY KEY,
-	user_id BIGINT REFERENCES users(id),
-	username TEXT UNIQUE NOT NULL, 	
+	account_id BIGINT REFERENCES accounts(id),
+	address TEXT UNIQUE NOT NULL, 	
 	password TEXT NOT NULL,
 	primary_identity BOOLEAN DEFAULT FALSE, -- Flag to indicate if this is the primary identity
 	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
 	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
--- Index to ensure that a user can have at most one primary identity.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_passwords_user_id_one_primary ON passwords (user_id) WHERE primary_identity IS TRUE;
+-- Index to ensure that an account can have at most one primary identity.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credentials_account_id_one_primary ON credentials (account_id) WHERE primary_identity IS TRUE;
 
 CREATE TABLE IF NOT EXISTS mailboxes (
 	id BIGSERIAL PRIMARY KEY,	
-	user_id BIGINT REFERENCES users(id),
+	account_id BIGINT REFERENCES accounts(id),
 	highest_uid BIGINT DEFAULT 0 NOT NULL,                       -- The highest UID in the mailbox
 	name TEXT NOT NULL,
 	uid_validity BIGINT NOT NULL,                                -- Include uid_validity column for IMAP
 	parent_id BIGINT REFERENCES mailboxes(id) ON DELETE CASCADE, -- Self-referencing for parent mailbox	
 	subscribed BOOLEAN DEFAULT TRUE,  							 -- New field to track mailbox subscription status
-	UNIQUE (user_id, name, parent_id), 							 -- Enforce unique mailbox names per user and parent mailbox
+	UNIQUE (account_id, name, parent_id), 						 -- Enforce unique mailbox names per account and parent mailbox
 	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
 	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
--- Index for faster mailbox lookups by user_id and case insensitive name
-CREATE INDEX IF NOT EXISTS idx_mailboxes_lower_name_parent_id ON mailboxes (user_id, LOWER(name), parent_id);
+-- Index for faster mailbox lookups by account_id and case insensitive name
+CREATE INDEX IF NOT EXISTS idx_mailboxes_lower_name_parent_id ON mailboxes (account_id, LOWER(name), parent_id);
 
 -- Partial unique index for top-level mailboxes
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mailboxes_user_id_name_top_level_unique ON mailboxes (user_id, name)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mailboxes_account_id_name_top_level_unique ON mailboxes (account_id, name)
 	WHERE parent_id IS NULL;
 
--- Index for faster mailbox lookups by user_id and subscription status
-CREATE INDEX IF NOT EXISTS idx_mailboxes_user_subscribed ON mailboxes (user_id, subscribed);
+-- Index for faster mailbox lookups by account_id and subscription status
+CREATE INDEX IF NOT EXISTS idx_mailboxes_account_subscribed ON mailboxes (account_id, subscribed);
 
--- Index for faster mailbox lookups by user_id
-CREATE INDEX IF NOT EXISTS idx_mailboxes_user_id ON mailboxes (user_id);
+-- Index for faster mailbox lookups by account_id
+CREATE INDEX IF NOT EXISTS idx_mailboxes_account_id ON mailboxes (account_id);
 
 -- Index to speed up parent-child hierarchy lookups
 CREATE INDEX IF NOT EXISTS idx_mailboxes_parent_id ON mailboxes (parent_id);
@@ -52,8 +57,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	-- Unique message ID, also the UID of messages in a mailbox
 	id BIGSERIAL PRIMARY KEY,       
 
-    -- The user who owns the message
-	user_id BIGINT REFERENCES users(id) ON DELETE NO ACTION, 
+    -- The account who owns the message
+	account_id BIGINT REFERENCES accounts(id) ON DELETE NO ACTION, 
 
 	uid BIGINT NOT NULL,                -- The message UID in its mailbox
 	content_hash VARCHAR(64) NOT NULL,	-- Hash of the message content for deduplication
@@ -90,8 +95,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	CONSTRAINT max_custom_flags_check CHECK (jsonb_array_length(custom_flags) <= 50) -- Limit to 50 custom flags
 );
 
--- Index for faster lookups by user_id and mailbox_id
-CREATE INDEX IF NOT EXISTS idx_messages_expunged_range ON messages (user_id, content_hash, expunged_at) WHERE expunged_at IS NOT NULL;
+-- Index for faster lookups by account_id and mailbox_id
+CREATE INDEX IF NOT EXISTS idx_messages_expunged_range ON messages (account_id, content_hash, expunged_at) WHERE expunged_at IS NOT NULL;
 
 -- Index to speed up message lookups by mailbox_id (for listing, searching)
 CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id ON messages (mailbox_id);
@@ -129,8 +134,6 @@ CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id_expunged_at_is_null ON messag
 CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id_expunged_modseq ON messages (mailbox_id, expunged_modseq);
 
 -- Index for faster searches on the subject field
--- This index uses the pg_trgm extension for trigram similarity searches
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS idx_messages_subject_trgm ON messages USING gin (LOWER(subject) gin_trgm_ops);
 
 -- Index for custom_flags to speed up searches for messages with specific custom flags
@@ -189,34 +192,34 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_uploads_content_hash ON pending_up
 --
 CREATE TABLE IF NOT EXISTS sieve_scripts (
 	id BIGSERIAL PRIMARY KEY,
-	user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+	account_id BIGINT REFERENCES accounts(id) ON DELETE CASCADE,
 	active BOOLEAN NOT NULL DEFAULT TRUE,
 	name TEXT NOT NULL,
 	script TEXT NOT NULL,
 	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
 	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
-	UNIQUE (user_id, name) 	-- Enforce unique script name per user
+	UNIQUE (account_id, name) 	-- Enforce unique script name per account
 );
 
--- Index to speed up sieve script lookups by user_id
-CREATE INDEX IF NOT EXISTS idx_sieve_scripts_user_id ON sieve_scripts (user_id);
+-- Index to speed up sieve script lookups by account_id
+CREATE INDEX IF NOT EXISTS idx_sieve_scripts_account_id ON sieve_scripts (account_id);
 
--- Index to ensure that a user can have at most one active sieve script.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sieve_scripts_user_id_one_active ON sieve_scripts (user_id) WHERE active IS TRUE;
+-- Index to ensure that an account can have at most one active sieve script.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sieve_scripts_account_id_one_active ON sieve_scripts (account_id) WHERE active IS TRUE;
 
 -- Vacation responses tracking table
 CREATE TABLE IF NOT EXISTS vacation_responses (
 	id BIGSERIAL PRIMARY KEY,
-	user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+	account_id BIGINT REFERENCES accounts(id) ON DELETE CASCADE,
 	sender_address TEXT NOT NULL,
 	response_date TIMESTAMPTZ NOT NULL,
 	created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
 	updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
-	UNIQUE (user_id, sender_address, response_date) -- Enforce unique responses per user and sender
+	UNIQUE (account_id, sender_address, response_date) -- Enforce unique responses per account and sender
 );
 
--- Index for faster lookups by user_id and sender_address
-CREATE INDEX IF NOT EXISTS idx_vacation_responses_user_sender ON vacation_responses (user_id, sender_address);
+-- Index for faster lookups by account_id and sender_address
+CREATE INDEX IF NOT EXISTS idx_vacation_responses_account_sender ON vacation_responses (account_id, sender_address);
 
 -- Index for cleanup of old responses
 CREATE INDEX IF NOT EXISTS idx_vacation_responses_response_date ON vacation_responses (response_date);

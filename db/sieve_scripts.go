@@ -16,7 +16,7 @@ type SieveScript struct {
 }
 
 func (db *Database) GetUserScripts(ctx context.Context, userID int64) ([]*SieveScript, error) {
-	rows, err := db.Pool.Query(ctx, "SELECT id, user_id, name, script, active FROM sieve_scripts WHERE user_id = $1", userID)
+	rows, err := db.Pool.Query(ctx, "SELECT id, account_id, name, script, active FROM sieve_scripts WHERE account_id = $1", userID)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +36,7 @@ func (db *Database) GetUserScripts(ctx context.Context, userID int64) ([]*SieveS
 
 func (db *Database) GetScript(ctx context.Context, scriptID, userID int64) (*SieveScript, error) {
 	var script SieveScript
-	err := db.Pool.QueryRow(ctx, "SELECT id, user_id, name, script, active FROM sieve_scripts WHERE id = $1 AND user_id = $2",
+	err := db.Pool.QueryRow(ctx, "SELECT id, account_id, name, script, active FROM sieve_scripts WHERE id = $1 AND account_id = $2",
 		scriptID, userID).Scan(&script.ID, &script.UserID, &script.Name, &script.Script, &script.Active)
 	if err != nil {
 		return nil, err
@@ -47,7 +47,7 @@ func (db *Database) GetScript(ctx context.Context, scriptID, userID int64) (*Sie
 
 func (db *Database) GetActiveScript(ctx context.Context, userID int64) (*SieveScript, error) {
 	var script SieveScript
-	err := db.Pool.QueryRow(ctx, "SELECT id, user_id, name, script, active FROM sieve_scripts WHERE user_id = $1 AND active = true", userID).Scan(&script.ID, &script.UserID, &script.Name, &script.Script, &script.Active)
+	err := db.Pool.QueryRow(ctx, "SELECT id, account_id, name, script, active FROM sieve_scripts WHERE account_id = $1 AND active = true", userID).Scan(&script.ID, &script.UserID, &script.Name, &script.Script, &script.Active)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, consts.ErrDBNotFound
@@ -60,7 +60,7 @@ func (db *Database) GetActiveScript(ctx context.Context, userID int64) (*SieveSc
 
 func (db *Database) GetScriptByName(ctx context.Context, name string, userID int64) (*SieveScript, error) {
 	var script SieveScript
-	err := db.Pool.QueryRow(ctx, "SELECT id, name, script, active FROM sieve_scripts WHERE name = $1 AND user_id = $2", name, userID).Scan(&script.ID, &script.Name, &script.Script, &script.Active)
+	err := db.Pool.QueryRow(ctx, "SELECT id, name, script, active FROM sieve_scripts WHERE name = $1 AND account_id = $2", name, userID).Scan(&script.ID, &script.Name, &script.Script, &script.Active)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, consts.ErrDBNotFound
@@ -73,7 +73,7 @@ func (db *Database) GetScriptByName(ctx context.Context, name string, userID int
 
 func (db *Database) CreateScript(ctx context.Context, userID int64, name, script string) (*SieveScript, error) {
 	var scriptID int64
-	err := db.Pool.QueryRow(ctx, "INSERT INTO sieve_scripts (user_id, name, script) VALUES ($1, $2, $3) RETURNING id", userID, name, script).Scan(&scriptID)
+	err := db.Pool.QueryRow(ctx, "INSERT INTO sieve_scripts (account_id, name, script) VALUES ($1, $2, $3) RETURNING id", userID, name, script).Scan(&scriptID)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func (db *Database) UpdateScript(ctx context.Context, scriptID, userID int64, na
 }
 
 func (db *Database) DeleteScript(ctx context.Context, scriptID, userID int64) error {
-	_, err := db.Pool.Exec(ctx, "DELETE FROM sieve_scripts WHERE id = $1 AND user_id = $2", scriptID, userID)
+	_, err := db.Pool.Exec(ctx, "DELETE FROM sieve_scripts WHERE id = $1 AND account_id = $2", scriptID, userID)
 	return err
 }
 
@@ -102,12 +102,12 @@ func (db *Database) SetScriptActive(ctx context.Context, scriptID, userID int64,
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "UPDATE sieve_scripts SET active = false WHERE id != $1 AND user_id = $2", scriptID, userID)
+	_, err = tx.Exec(ctx, "UPDATE sieve_scripts SET active = false WHERE id != $1 AND account_id = $2", scriptID, userID)
 	if err != nil {
 		return err
 	}
 
-	_, err = tx.Exec(ctx, "UPDATE sieve_scripts SET active = true WHERE id = $1 AND user_id = $2", scriptID, userID)
+	_, err = tx.Exec(ctx, "UPDATE sieve_scripts SET active = true WHERE id = $1 AND account_id = $2", scriptID, userID)
 	if err != nil {
 		return err
 	}

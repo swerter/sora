@@ -18,7 +18,7 @@ type VacationResponse struct {
 func (db *Database) RecordVacationResponse(ctx context.Context, userID int64, senderAddress string) error {
 	now := time.Now()
 	_, err := db.Pool.Exec(ctx, `
-		INSERT INTO vacation_responses (user_id, sender_address, response_date, created_at)
+		INSERT INTO vacation_responses (account_id, sender_address, response_date, created_at)
 		VALUES ($1, $2, $3, $4)
 	`, userID, senderAddress, now, now)
 
@@ -33,7 +33,7 @@ func (db *Database) HasRecentVacationResponse(ctx context.Context, userID int64,
 	err := db.Pool.QueryRow(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM vacation_responses 
-			WHERE user_id = $1 
+			WHERE account_id = $1 
 			AND sender_address = $2 
 			AND response_date > $3
 		)

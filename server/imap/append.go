@@ -77,11 +77,14 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 
 	bodyStructure := imapserver.ExtractBodyStructure(bytes.NewReader(buf.Bytes()))
 
-	plaintextBody, err := helpers.ExtractPlaintextBody(messageContent)
+	extractedPlaintext, err := helpers.ExtractPlaintextBody(messageContent)
+	var actualPlaintextBody string
 	if err != nil {
-		s.Log("[APPEND] failed to extract plaintext body: %v", err)
+		s.Log("[APPEND] failed to extract plaintext body: %v. Using empty string for database.", err)
 		// Continue with the append operation even if plaintext body extraction fails,
-		// it will default to an empty string if not present
+		// actualPlaintextBody is already initialized to an empty string.
+	} else if extractedPlaintext != nil {
+		actualPlaintextBody = *extractedPlaintext
 	}
 
 	recipients := helpers.ExtractRecipients(messageContent.Header)
@@ -104,7 +107,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 			InternalDate:  options.Time,
 			Size:          size,
 			Subject:       subject,
-			PlaintextBody: *plaintextBody,
+			PlaintextBody: actualPlaintextBody,
 			SentDate:      sentDate,
 			InReplyTo:     inReplyTo,
 			BodyStructure: &bodyStructure,

@@ -64,6 +64,8 @@ func main() {
 	fPop3Addr := flag.String("pop3addr", cfg.Servers.Pop3Addr, "POP3 server address (overrides config)")
 	fStartManageSieve := flag.Bool("managesieve", cfg.Servers.StartManageSieve, "Start the ManageSieve server (overrides config)")
 	fManagesieveAddr := flag.String("managesieveaddr", cfg.Servers.ManageSieveAddr, "ManageSieve server address (overrides config)")
+	fMasterUsername := flag.String("masterusername", cfg.Servers.MasterUsername, "Master username (overrides config)")
+	fMasterPassword := flag.String("masterpassword", cfg.Servers.MasterPassword, "Master password (overrides config)")
 
 	// Uploader flags
 	fUploaderPath := flag.String("uploaderpath", cfg.Uploader.Path, "Directory for pending uploads (overrides config)")
@@ -240,6 +242,13 @@ func main() {
 		cfg.Servers.ManageSieveAddr = *fManagesieveAddr
 	}
 
+	if isFlagSet("masterusername") {
+		cfg.Servers.MasterUsername = *fMasterUsername
+	}
+	if isFlagSet("masterpassword") {
+		cfg.Servers.MasterPassword = *fMasterPassword
+	}
+
 	// Upload worker
 	if isFlagSet("uploaderpath") {
 		cfg.Uploader.Path = *fUploaderPath
@@ -395,16 +404,16 @@ func main() {
 	uploadWorker.Start(ctx)
 
 	if cfg.Servers.StartLmtp {
-		go startLMTPServer(ctx, hostname, cfg.Servers.LmtpAddr, s3storage, database, uploadWorker, cfg.Debug, cfg.LMTP.ExternalRelay, errChan, cfg.TLS.LMTP.CertFile, cfg.TLS.LMTP.KeyFile, cfg.TLS.InsecureSkipVerify)
+		go startLMTPServer(ctx, hostname, cfg.Servers.LmtpAddr, s3storage, database, uploadWorker, errChan, cfg)
 	}
 	if cfg.Servers.StartImap {
-		go startIMAPServer(ctx, hostname, cfg.Servers.ImapAddr, s3storage, database, uploadWorker, cacheInstance, cfg.InsecureAuth, cfg.Debug, errChan, cfg.TLS.IMAP.CertFile, cfg.TLS.IMAP.KeyFile, cfg.TLS.InsecureSkipVerify)
+		go startIMAPServer(ctx, hostname, cfg.Servers.ImapAddr, s3storage, database, uploadWorker, cacheInstance, errChan, cfg)
 	}
 	if cfg.Servers.StartPop3 {
-		go startPOP3Server(ctx, hostname, cfg.Servers.Pop3Addr, s3storage, database, uploadWorker, cacheInstance, cfg.InsecureAuth, cfg.Debug, errChan, cfg.TLS.POP3.CertFile, cfg.TLS.POP3.KeyFile, cfg.TLS.InsecureSkipVerify)
+		go startPOP3Server(ctx, hostname, cfg.Servers.Pop3Addr, s3storage, database, uploadWorker, cacheInstance, errChan, cfg)
 	}
 	if cfg.Servers.StartManageSieve {
-		go startManageSieveServer(ctx, hostname, cfg.Servers.ManageSieveAddr, database, cfg.InsecureAuth, cfg.Debug, errChan, cfg.TLS.ManageSieve.CertFile, cfg.TLS.ManageSieve.KeyFile, cfg.TLS.InsecureSkipVerify)
+		go startManageSieveServer(ctx, hostname, cfg.Servers.ManageSieveAddr, database, errChan, cfg)
 	}
 
 	select {
@@ -415,8 +424,17 @@ func main() {
 	}
 }
 
-func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cacheInstance *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
-	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cacheInstance, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify) // Assumes New checks if tlsCertFile/KeyFile are empty to enable TLS
+func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cacheInstance *cache.Cache, errChan chan error, config Config) {
+	s, err := imap.New(ctx, hostname, addr, s3storage, database, uploadWorker, cacheInstance,
+		imap.IMAPServerOptions{
+			InsecureAuth:       config.InsecureAuth,
+			Debug:              config.Debug,
+			TLSCertFile:        config.TLS.IMAP.CertFile,
+			TLSKeyFile:         config.TLS.IMAP.KeyFile,
+			InsecureSkipVerify: config.TLS.InsecureSkipVerify,
+			MasterUsername:     config.Servers.MasterUsername,
+			MasterPassword:     config.Servers.MasterPassword,
+		})
 	if err != nil {
 		errChan <- err
 		return
@@ -433,8 +451,15 @@ func startIMAPServer(ctx context.Context, hostname, addr string, s3storage *stor
 	}
 }
 
-func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, debug bool, externalRelay string, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
-	lmtpServer, err := lmtp.New(ctx, hostname, addr, s3storage, database, uploadWorker, debug, externalRelay, tlsCertFile, tlsKeyFile, insecureSkipVerify)
+func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, errChan chan error, config Config) {
+	lmtpServer, err := lmtp.New(ctx, hostname, addr, s3storage, database, uploadWorker, lmtp.LMTPServerOptions{
+		ExternalRelay:      config.LMTP.ExternalRelay,
+		InsecureSkipVerify: config.TLS.InsecureSkipVerify,
+		TLSCertFile:        config.TLS.LMTP.CertFile,
+		TLSKeyFile:         config.TLS.LMTP.KeyFile,
+		Debug:              config.Debug,
+	})
+
 	if err != nil {
 		errChan <- fmt.Errorf("failed to create LMTP server: %w", err)
 		return
@@ -451,8 +476,15 @@ func startLMTPServer(ctx context.Context, hostname, addr string, s3storage *stor
 	lmtpServer.Start(errChan)
 }
 
-func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cacheInstance *cache.Cache, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
-	s, err := pop3.New(ctx, hostname, addr, s3storage, database, uploadWorker, cacheInstance, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify)
+func startPOP3Server(ctx context.Context, hostname string, addr string, s3storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cacheInstance *cache.Cache, errChan chan error, config Config) {
+	s, err := pop3.New(ctx, hostname, addr, s3storage, database, uploadWorker, cacheInstance, pop3.POP3ServerOptions{
+		InsecureAuth:       config.InsecureAuth,
+		Debug:              config.Debug,
+		TLSCertFile:        config.TLS.POP3.CertFile,
+		TLSKeyFile:         config.TLS.POP3.KeyFile,
+		InsecureSkipVerify: config.TLS.InsecureSkipVerify,
+	})
+
 	if err != nil {
 		errChan <- err
 		return
@@ -467,8 +499,14 @@ func startPOP3Server(ctx context.Context, hostname string, addr string, s3storag
 	s.Start(errChan)
 }
 
-func startManageSieveServer(ctx context.Context, hostname string, addr string, database *db.Database, insecureAuth bool, debug bool, errChan chan error, tlsCertFile, tlsKeyFile string, insecureSkipVerify bool) {
-	s, err := managesieve.New(ctx, hostname, addr, database, insecureAuth, debug, tlsCertFile, tlsKeyFile, insecureSkipVerify) // Pass ctx
+func startManageSieveServer(ctx context.Context, hostname string, addr string, database *db.Database, errChan chan error, config Config) {
+	s, err := managesieve.New(ctx, hostname, addr, database, managesieve.ManageSieveServerOptions{
+		InsecureSkipVerify: config.TLS.InsecureSkipVerify,
+		TLSCertFile:        config.TLS.ManageSieve.CertFile,
+		TLSKeyFile:         config.TLS.ManageSieve.KeyFile,
+		Debug:              config.Debug,
+	})
+
 	if err != nil {
 		errChan <- err
 		return

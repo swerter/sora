@@ -50,7 +50,7 @@ func (db *Database) GetMailboxes(ctx context.Context, userID int64, subscribed b
 		FROM 
 			mailboxes m 
 		WHERE 
-			user_id = $1`
+			account_id = $1`
 
 	if subscribed {
 		query += " AND m.subscribed = TRUE"
@@ -114,7 +114,7 @@ func (db *Database) GetMailbox(ctx context.Context, mailboxID int64, userID int6
 				WHERE child.parent_id = m.id
 			) AS has_children
 		FROM mailboxes m
-		WHERE id = $1 AND user_id = $2
+		WHERE id = $1 AND account_id = $2
 	`, mailboxID, userID).Scan(&mailboxID, &mailboxName, &uidValidityInt64, &dbParentID, &subscribed, &hasChildren)
 
 	if err != nil {
@@ -144,7 +144,7 @@ func (db *Database) GetMailboxByName(ctx context.Context, userID int64, name str
 			id, name, uid_validity, parent_id, subscribed,
 			EXISTS (SELECT 1 FROM mailboxes AS child WHERE child.parent_id = m.id) AS has_children
 		FROM mailboxes m
-		WHERE user_id = $1 AND LOWER(name) = $2
+		WHERE account_id = $1 AND LOWER(name) = $2
 	`, userID, strings.ToLower(name)).Scan(&mailbox.ID, &mailbox.Name, &uidValidityInt64, &mailbox.ParentID, &mailbox.Subscribed, &mailbox.HasChildren)
 
 	if err != nil {
@@ -164,7 +164,7 @@ func (db *Database) CreateMailbox(ctx context.Context, userID int64, name string
 	uidValidity := uint32(time.Now().Unix())
 	// Try to insert the mailbox into the database
 	_, err := db.Pool.Exec(ctx, `
-		INSERT INTO mailboxes (user_id, name, parent_id, uid_validity, subscribed)
+		INSERT INTO mailboxes (account_id, name, parent_id, uid_validity, subscribed)
 		VALUES ($1, $2, $3, $4, $5)
 	`, userID, name, parentID, int64(uidValidity), true)
 
@@ -177,7 +177,7 @@ func (db *Database) CreateMailbox(ctx context.Context, userID int64, name string
 				log.Printf("mailbox named '%s' already exists for user %d", name, userID)
 				return consts.ErrDBUniqueViolation
 			case "23503": // Foreign key violation
-				if pgErr.ConstraintName == "mailboxes_user_id_fkey" {
+				if pgErr.ConstraintName == "mailboxes_account_id_fkey" {
 					log.Printf("user with ID %d does not exist", userID)
 					return consts.ErrDBNotFound
 				} else if pgErr.ConstraintName == "mailboxes_parent_id_fkey" {
@@ -195,9 +195,9 @@ func (db *Database) CreateDefaultMailbox(ctx context.Context, userID int64, name
 	uidValidity := uint32(time.Now().Unix())
 	// Try to insert the mailbox into the database
 	_, err := db.Pool.Exec(ctx, `
-		INSERT INTO mailboxes (user_id, name, parent_id, uid_validity, subscribed)
+		INSERT INTO mailboxes (account_id, name, parent_id, uid_validity, subscribed)
 		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (user_id, name, parent_id) DO NOTHING
+		ON CONFLICT (account_id, name, parent_id) DO NOTHING
 	`, userID, name, parentID, int64(uidValidity), true)
 
 	// Handle errors, including unique constraint and foreign key violations
@@ -206,7 +206,7 @@ func (db *Database) CreateDefaultMailbox(ctx context.Context, userID int64, name
 		if pgErr, ok := err.(*pgconn.PgError); ok {
 			switch pgErr.Code {
 			case "23503": // Foreign key violation
-				if pgErr.ConstraintName == "mailboxes_user_id_fkey" {
+				if pgErr.ConstraintName == "mailboxes_account_id_fkey" {
 					log.Printf("User with ID %d does not exist", userID)
 					return consts.ErrDBNotFound
 				}

@@ -50,6 +50,8 @@ type ServersConfig struct {
 	Pop3Addr         string `toml:"pop3_addr"`
 	StartManageSieve bool   `toml:"start_managesieve"`
 	ManageSieveAddr  string `toml:"managesieve_addr"`
+	MasterUsername   string `toml:"master_username"`
+	MasterPassword   string `toml:"master_password"`
 }
 
 // UploaderConfig holds upload worker configuration.
@@ -137,6 +139,8 @@ func newDefaultConfig() Config {
 			Pop3Addr:         ":110",
 			StartManageSieve: true,
 			ManageSieveAddr:  ":4190",
+			MasterUsername:   "",
+			MasterPassword:   "",
 		},
 		Uploader: UploaderConfig{
 			Path:          "/tmp/sora/uploads",
