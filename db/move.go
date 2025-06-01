@@ -108,7 +108,7 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 
 		_, err = tx.Exec(ctx, `
 			INSERT INTO messages (
-				user_id,
+				account_id,
 				content_hash, 
 				uploaded,
 				message_id, 
@@ -128,7 +128,7 @@ func (db *Database) MoveMessages(ctx context.Context, ids *[]imap.UID, srcMailbo
 				uid
 			)
 			SELECT 
-				user_id,
+				account_id,
 				content_hash, 
 				uploaded,
 				message_id, 

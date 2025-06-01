@@ -109,7 +109,7 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 	}
 	fullAddress := toAddress.FullAddress()
 	s.Log("[LMTP] looking up user ID for address: %s", fullAddress)
-	userId, err := s.backend.db.GetUserIDByAddress(s.ctx, fullAddress)
+	userId, err := s.backend.db.GetAccountIDByAddress(s.ctx, fullAddress)
 	if err != nil {
 		s.Log("[LMTP] failed to get user ID by address: %v", err)
 		return &smtp.SMTPError{

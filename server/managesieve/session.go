@@ -55,16 +55,16 @@ func (s *ManageSieveSession) handleConnection() {
 		switch command {
 		case "LOGIN":
 			if len(parts) < 3 {
-				s.sendResponse("-ERR Syntax: LOGIN username password\r\n")
+				s.sendResponse("-ERR Syntax: LOGIN address password\r\n")
 				continue
 			}
-			username := parts[1]
+			userAddress := parts[1]
 			password := parts[2]
 
-			address, err := server.NewAddress(username)
+			address, err := server.NewAddress(userAddress)
 			if err != nil {
 				s.Log("error: %v", err)
-				s.sendResponse("-ERR Invalid username\r\n")
+				s.sendResponse("-ERR Invalid address\r\n")
 				continue
 			}
 

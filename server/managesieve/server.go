@@ -20,7 +20,15 @@ type ManageSieveServer struct {
 	tlsConfig *tls.Config
 }
 
-func New(appCtx context.Context, hostname, addr string, database *db.Database, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string, insecureSkipVerify ...bool) (*ManageSieveServer, error) {
+type ManageSieveServerOptions struct {
+	InsecureAuth       bool
+	Debug              bool
+	TLSCertFile        string
+	TLSKeyFile         string
+	InsecureSkipVerify bool
+}
+
+func New(appCtx context.Context, hostname, addr string, database *db.Database, options ManageSieveServerOptions) (*ManageSieveServer, error) {
 	server := &ManageSieveServer{
 		hostname: hostname,
 		addr:     addr,
@@ -28,8 +36,8 @@ func New(appCtx context.Context, hostname, addr string, database *db.Database, i
 		appCtx:   appCtx,
 	}
 
-	if tlsCertFile != "" && tlsKeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+	if options.TLSCertFile != "" && options.TLSKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(options.TLSCertFile, options.TLSKeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
 		}
@@ -41,7 +49,7 @@ func New(appCtx context.Context, hostname, addr string, database *db.Database, i
 			PreferServerCipherSuites: true,
 		}
 
-		if len(insecureSkipVerify) > 0 && insecureSkipVerify[0] {
+		if options.InsecureSkipVerify {
 			server.tlsConfig.InsecureSkipVerify = true
 			log.Printf("WARNING: TLS certificate verification disabled for ManageSieve server")
 		}

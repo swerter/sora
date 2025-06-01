@@ -44,21 +44,20 @@ func (s *IMAPSession) Close() error {
 	if s == nil {
 		return nil
 	}
+	// Use the session's primary mutex (from the embedded server.Session)
+	// to protect modifications to IMAPSession fields and embedded Session fields.
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 
 	if s.IMAPUser != nil {
-		userMutex := &s.IMAPUser.mutex
-		fullAddress := s.IMAPUser.FullAddress()
-
-		userMutex.Lock()
-		s.Log("closing session for user: %v", fullAddress)
+		s.Log("closing session for user: %v", s.IMAPUser.FullAddress())
 		s.IMAPUser = nil
 		s.Session.User = nil
-		userMutex.Unlock()
 	} else {
 		s.Log("client dropped unauthenticated connection")
 	}
 
-	s.clearSelectedMailboxState()
+	s.clearSelectedMailboxStateLocked()
 
 	if s.cancel != nil {
 		s.cancel()
@@ -67,7 +66,7 @@ func (s *IMAPSession) Close() error {
 	return nil
 }
 
-func (s *IMAPSession) clearSelectedMailboxState() {
+func (s *IMAPSession) clearSelectedMailboxStateLocked() {
 	if s.sessionTracker != nil {
 		s.sessionTracker.Close()
 	}
@@ -88,11 +87,43 @@ func (s *IMAPSession) decodeNumSet(numSet imap.NumSet) imap.NumSet {
 		return numSet
 	}
 
+	// Use the session's current understanding of the total number of messages
+	// to resolve '*' (represented by 0 in imap.SeqRange Start/Stop).
+	// This count (s.currentNumMessages) is maintained by SELECT, APPEND (for this session),
+	// and POLL, reflecting this session's potentially slightly delayed view of the mailbox.
+	currentTotalMessagesInMailbox := s.currentNumMessages
+
 	var out imap.SeqSet
 	for _, seqRange := range seqSet {
-		start := s.sessionTracker.DecodeSeqNum(seqRange.Start)
-		stop := s.sessionTracker.DecodeSeqNum(seqRange.Stop)
+		actualStart := seqRange.Start
+		if seqRange.Start == 0 { // Represents '*' for the start of the range
+			if currentTotalMessagesInMailbox == 0 {
+				actualStart = 0 // Or 1, but 0 is fine; DecodeSeqNum(0) is 0.
+			} else {
+				actualStart = currentTotalMessagesInMailbox
+			}
+		}
 
+		actualStop := seqRange.Stop
+		if seqRange.Stop == 0 { // Represents '*' for the end of the range
+			if currentTotalMessagesInMailbox == 0 {
+				actualStop = 0
+			} else {
+				actualStop = currentTotalMessagesInMailbox
+			}
+		}
+
+		// Convert resolved client-view sequence numbers to server-view sequence numbers.
+		// s.sessionTracker.DecodeSeqNum handles mapping based on this session's
+		// view of expunges. It returns 0 if the client-view number is invalid
+		// (e.g., too high, or refers to an expunged message in this session's view).
+		start := s.sessionTracker.DecodeSeqNum(actualStart)
+		stop := s.sessionTracker.DecodeSeqNum(actualStop)
+
+		// If actualStart was a specific non-zero number (not '*') but decodes to 0,
+		// it means that specific sequence number is invalid from the server's perspective
+		// for this session (e.g., message 100 requested, but only 50 exist or 100 was expunged).
+		// In such a case, this part of the range is invalid.
 		if start == 0 && seqRange.Start != 0 {
 			continue
 		}

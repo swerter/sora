@@ -23,7 +23,7 @@ func (s *IMAPSession) Select(mboxName string, options *imap.SelectOptions) (*ima
 		if strings.EqualFold(s.selectedMailbox.Name, mboxName) {
 			isReselecting = true
 		}
-		s.clearSelectedMailboxState()
+		s.clearSelectedMailboxStateLocked()
 	}
 
 	s.Log("[SELECT] attempting to select mailbox: %s reselecting=%v", mboxName, isReselecting)
@@ -85,6 +85,6 @@ func (s *IMAPSession) Unselect() error {
 	if s.selectedMailbox != nil {
 		s.Log("[SELECT] mailbox %s unselected", s.selectedMailbox.Name)
 	}
-	s.clearSelectedMailboxState()
+	s.clearSelectedMailboxStateLocked()
 	return nil
 }

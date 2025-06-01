@@ -138,7 +138,7 @@ func (db *Database) getMessagesByUIDSet(ctx context.Context, mailboxID int64, ui
 		baseQuery := `
 			WITH numbered_messages AS (
 				SELECT 
-					user_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
+					account_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
 					internal_date, size, body_structure,
 					created_modseq, updated_modseq, expunged_modseq,
 					row_number() OVER (ORDER BY id) AS seqnum
@@ -146,7 +146,7 @@ func (db *Database) getMessagesByUIDSet(ctx context.Context, mailboxID int64, ui
 				WHERE mailbox_id = $1 AND expunged_at IS NULL
 			)
 			SELECT 
-				user_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
+				account_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
 				internal_date, size, body_structure,
 				created_modseq, updated_modseq, expunged_modseq, seqnum
 			FROM numbered_messages
@@ -198,7 +198,7 @@ func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, se
 		query := `
 			WITH numbered_messages AS (
 				SELECT 
-					user_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
+					account_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
 					internal_date, size, body_structure,
 					created_modseq, updated_modseq, expunged_modseq,
 					row_number() OVER (ORDER BY id) AS seqnum
@@ -206,7 +206,7 @@ func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, se
 				WHERE mailbox_id = $1 AND expunged_at IS NULL
 			)
 			SELECT 
-				user_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
+				account_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
 				internal_date, size, body_structure,
 				created_modseq, updated_modseq, expunged_modseq, seqnum
 			FROM numbered_messages
@@ -234,7 +234,7 @@ func (db *Database) fetchAllActiveMessagesRaw(ctx context.Context, mailboxID int
 	query := `
 		WITH numbered_messages AS (
 			SELECT 
-				user_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
+				account_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
 				internal_date, size, body_structure,
 				created_modseq, updated_modseq, expunged_modseq,
 				row_number() OVER (ORDER BY id) AS seqnum
@@ -242,7 +242,7 @@ func (db *Database) fetchAllActiveMessagesRaw(ctx context.Context, mailboxID int
 			WHERE mailbox_id = $1 AND expunged_at IS NULL
 		)
 		SELECT 
-			user_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
+			account_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
 			internal_date, size, body_structure,
 			created_modseq, updated_modseq, expunged_modseq, seqnum
 		FROM numbered_messages
@@ -296,7 +296,7 @@ func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag
 	rows, err := db.Pool.Query(ctx, `
 		WITH numbered_messages AS (
 			SELECT 
-				user_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
+				account_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
 				internal_date, size, body_structure,
 				created_modseq, updated_modseq, expunged_modseq,
 				ROW_NUMBER() OVER (ORDER BY id) AS seqnum
@@ -304,7 +304,7 @@ func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag
 			WHERE mailbox_id = $1 AND (flags & $2) != 0 AND expunged_at IS NULL
 		)
 		SELECT 
-			user_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
+			account_id, uid, mailbox_id, content_hash, uploaded, flags, custom_flags,
 			internal_date, size, body_structure,
 			created_modseq, updated_modseq, expunged_modseq, seqnum
 		FROM numbered_messages

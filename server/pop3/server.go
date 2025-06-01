@@ -25,7 +25,15 @@ type POP3Server struct {
 	tlsConfig *tls.Config
 }
 
-func New(appCtx context.Context, hostname, popAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, insecureAuth bool, debug bool, tlsCertFile, tlsKeyFile string, insecureSkipVerify ...bool) (*POP3Server, error) {
+type POP3ServerOptions struct {
+	InsecureAuth       bool
+	Debug              bool
+	TLSCertFile        string
+	TLSKeyFile         string
+	InsecureSkipVerify bool
+}
+
+func New(appCtx context.Context, hostname, popAddr string, storage *storage.S3Storage, database *db.Database, uploadWorker *uploader.UploadWorker, cache *cache.Cache, options POP3ServerOptions) (*POP3Server, error) {
 	server := &POP3Server{
 		hostname: hostname,
 		addr:     popAddr,
@@ -37,8 +45,8 @@ func New(appCtx context.Context, hostname, popAddr string, storage *storage.S3St
 	}
 
 	// Setup TLS if certificate and key files are provided
-	if tlsCertFile != "" && tlsKeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+	if options.TLSCertFile != "" && options.TLSKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(options.TLSCertFile, options.TLSKeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
 		}
@@ -51,7 +59,7 @@ func New(appCtx context.Context, hostname, popAddr string, storage *storage.S3St
 		}
 
 		// Set InsecureSkipVerify if requested (for self-signed certificates)
-		if len(insecureSkipVerify) > 0 && insecureSkipVerify[0] {
+		if options.InsecureSkipVerify {
 			server.tlsConfig.InsecureSkipVerify = true
 			log.Printf("WARNING: TLS certificate verification disabled for POP3 server")
 		}
