@@ -1,14 +1,11 @@
 package imap
 
 import (
-	"sync"
-
 	"github.com/migadu/sora/server"
 )
 
 type IMAPUser struct {
 	server.User
-	mutex sync.Mutex
 }
 
 func NewIMAPUser(address server.Address, userID int64) *IMAPUser {
