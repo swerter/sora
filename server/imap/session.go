@@ -3,6 +3,7 @@ package imap
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
@@ -18,6 +19,7 @@ type IMAPSession struct {
 	conn   *imapserver.Conn
 	ctx    context.Context
 	cancel context.CancelFunc
+	mutex  sync.Mutex
 
 	selectedMailbox *db.DBMailbox
 	mailboxTracker  *imapserver.MailboxTracker
