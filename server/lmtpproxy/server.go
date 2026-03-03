@@ -593,38 +593,33 @@ func (s *Server) sendGracefulShutdownMessage() {
 
 	logger.Info("Sending graceful shutdown messages to LMTP sessions", "name", s.name, "count", len(activeSessions))
 
-	// Send shutdown message to all active sessions
+	// Step 1: Set gracefulShutdown flag on all sessions.
 	for _, session := range activeSessions {
-		// Lock the session to safely access writer
 		session.mu.Lock()
-
-		// Send 421 temporary failure to client
-		// LMTP RFC 2821: 421 means "service not available, closing transmission channel"
-		if session.clientWriter != nil {
-			session.clientWriter.WriteString("421 4.3.2 Service shutting down, please try again later\r\n")
-			session.clientWriter.Flush()
-		}
-
-		// Send QUIT to backend for clean disconnect
-		if session.backendWriter != nil {
-			session.backendWriter.WriteString("QUIT\r\n")
-			session.backendWriter.Flush()
-		}
-
+		session.gracefulShutdown = true
 		session.mu.Unlock()
 	}
 
-	// Give both clients and backends a brief moment to process the messages
-	time.Sleep(1 * time.Second)
-
-	// Close connections to unblock any sessions blocked on reads
+	// Step 2: Write 421 shutdown message directly to clientConn.
 	for _, session := range activeSessions {
 		session.mu.Lock()
 		if session.clientConn != nil {
-			session.clientConn.Close()
+			_, _ = fmt.Fprint(session.clientConn, "421 4.3.2 Service shutting down, please try again later\r\n")
 		}
+		session.mu.Unlock()
+	}
+
+	// Step 3: Give clients a moment to process the message before closing.
+	time.Sleep(1 * time.Second)
+
+	// Step 4: Close all connections.
+	for _, session := range activeSessions {
+		session.mu.Lock()
 		if session.backendConn != nil {
 			session.backendConn.Close()
+		}
+		if session.clientConn != nil {
+			session.clientConn.Close()
 		}
 		session.mu.Unlock()
 	}

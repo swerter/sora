@@ -679,7 +679,17 @@ func (s *Server) removeSession(session *Session) {
 }
 
 // sendGracefulShutdownBye sends a BYE message to all active client connections
-// and LOGOUT to backend servers for clean shutdown
+// and closes backend connections for clean shutdown.
+//
+// During proxy mode, a copy goroutine continuously copies backend data to
+// clientConn. Go's net.Conn.Write is internally serialized (fd lock), so
+// writing BYE directly to clientConn will not byte-interleave with the copy
+// goroutine's writes — each Write() call is atomic at the syscall level.
+//
+// We close backend connections FIRST so the copy goroutine stops reading
+// new data, then write BYE to the client, then close the client connection.
+// Writing directly to clientConn (not through bufio.Writer) avoids stale
+// buffer issues from the authentication phase.
 func (s *Server) sendGracefulShutdownBye() {
 	s.activeSessionsMu.RLock()
 	activeSessions := make([]*Session, 0, len(s.activeSessions))
@@ -694,37 +704,39 @@ func (s *Server) sendGracefulShutdownBye() {
 
 	logger.Info("Sending graceful shutdown messages", "proxy", s.name, "count", len(activeSessions))
 
-	// Send shutdown messages to both client and backend
+	// Step 1: Set gracefulShutdown flag on all sessions. This tells the copy
+	// goroutine (in proxy mode) not to close clientConn when it exits, giving
+	// us a chance to write BYE first.
 	for _, session := range activeSessions {
-		// Lock the session to safely access writers
 		session.mu.Lock()
-
-		// Send BYE to client
-		if session.clientWriter != nil {
-			session.clientWriter.WriteString("* BYE Server shutting down, please reconnect\r\n")
-			session.clientWriter.Flush()
-		}
-
-		// Send LOGOUT to backend for clean disconnect
-		if session.backendWriter != nil {
-			session.backendWriter.WriteString("PROXY1 LOGOUT\r\n")
-			session.backendWriter.Flush()
-		}
-
+		session.gracefulShutdown = true
 		session.mu.Unlock()
 	}
 
-	// Give both clients and backends a brief moment to process the BYE/LOGOUT
-	time.Sleep(1 * time.Second)
-
-	// Close connections to unblock any sessions blocked on reads
+	// Step 2: Write BYE directly to clientConn (bypassing bufio.Writer to avoid
+	// stale buffer state from the authentication phase). Go's net.Conn.Write
+	// serialization ensures this won't interleave with any remaining writes.
 	for _, session := range activeSessions {
 		session.mu.Lock()
 		if session.clientConn != nil {
-			session.clientConn.Close()
+			_, _ = fmt.Fprint(session.clientConn, "* BYE Server shutting down, please reconnect\r\n")
 		}
+		session.mu.Unlock()
+	}
+
+	// Step 3: Give clients a moment to process the BYE before closing.
+	time.Sleep(1 * time.Second)
+
+	// Step 4: Close all connections. Backend connections are closed to unblock
+	// any copy goroutines blocked on Read(). Client connections are closed to
+	// finalize the shutdown.
+	for _, session := range activeSessions {
+		session.mu.Lock()
 		if session.backendConn != nil {
 			session.backendConn.Close()
+		}
+		if session.clientConn != nil {
+			session.clientConn.Close()
 		}
 		session.mu.Unlock()
 	}

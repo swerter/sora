@@ -226,13 +226,43 @@ func (db *Database) RemoveMessageFlags(ctx context.Context, tx pgx.Tx, messageUI
 // (keywords) currently in use for messages within a specific mailbox.
 // It excludes system flags (those starting with '\').
 // Also sanitizes flags to remove invalid values (NIL, NULL, etc.) that may have been stored.
+//
+// OPTIMIZATION: Uses the custom_flags_cache column in mailbox_stats (maintained by trigger)
+// instead of scanning all messages with JSONB LATERAL expansion.
+// Falls back to the full scan query if the cache is not available.
 func (db *Database) GetUniqueCustomFlagsForMailbox(ctx context.Context, mailboxID int64) ([]string, error) {
+	// Try the cached version first (maintained by trigger in migration 009)
+	var cachedFlagsJSON []byte
+	err := db.GetReadPool().QueryRow(ctx, `
+		SELECT custom_flags_cache FROM mailbox_stats WHERE mailbox_id = $1
+	`, mailboxID).Scan(&cachedFlagsJSON)
+
+	if err == nil && cachedFlagsJSON != nil {
+		var cachedFlags []string
+		if err := json.Unmarshal(cachedFlagsJSON, &cachedFlags); err == nil {
+			// Sanitize and return cached flags
+			var flags []imap.Flag
+			for _, f := range cachedFlags {
+				flags = append(flags, imap.Flag(f))
+			}
+			sanitizedFlags := helpers.SanitizeFlags(flags)
+			result := make([]string, len(sanitizedFlags))
+			for i, f := range sanitizedFlags {
+				result[i] = string(f)
+			}
+			return result, nil
+		}
+		// If unmarshal fails, fall through to the full scan
+		log.Printf("Database: failed to unmarshal custom_flags_cache for mailbox %d, falling back to full scan", mailboxID)
+	}
+
+	// Fallback: full scan query (used if cache column doesn't exist yet or cache is NULL)
 	query := `
 		SELECT DISTINCT flag
 		FROM messages CROSS JOIN LATERAL jsonb_array_elements_text(custom_flags) AS elem(flag)
 		WHERE mailbox_id = $1
 		  AND expunged_at IS NULL
-		  AND flag NOT LIKE '\%';
+		  AND flag !~ '^\\';
 	`
 	rows, err := db.GetReadPool().Query(ctx, query, mailboxID)
 	if err != nil {

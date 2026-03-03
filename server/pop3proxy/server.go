@@ -1,7 +1,6 @@
 package pop3proxy
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -665,34 +664,35 @@ func (s *POP3ProxyServer) sendGracefulShutdownMessage() {
 
 	logger.Debug("POP3 Proxy: Sending graceful shutdown messages to active connections", "proxy", s.name, "count", len(activeSessions))
 
-	// Send shutdown messages to both client and backend
+	// Step 1: Set gracefulShutdown flag on all sessions.
 	for _, session := range activeSessions {
-		// Send error response to client
-		if session.clientConn != nil {
-			writer := bufio.NewWriter(session.clientConn)
-			writer.WriteString("-ERR Server shutting down, please reconnect\r\n")
-			writer.Flush()
-		}
-
-		// Send QUIT to backend for clean disconnect
-		if session.backendConn != nil {
-			writer := bufio.NewWriter(session.backendConn)
-			writer.WriteString("QUIT\r\n")
-			writer.Flush()
-		}
+		session.mutex.Lock()
+		session.gracefulShutdown = true
+		session.mutex.Unlock()
 	}
 
-	// Give both clients and backends a brief moment to process
+	// Step 2: Write shutdown message directly to clientConn.
+	for _, session := range activeSessions {
+		session.mutex.Lock()
+		if session.clientConn != nil {
+			_, _ = fmt.Fprint(session.clientConn, "-ERR Server shutting down, please reconnect\r\n")
+		}
+		session.mutex.Unlock()
+	}
+
+	// Step 3: Give clients a moment to process the message before closing.
 	time.Sleep(1 * time.Second)
 
-	// Close connections to unblock any sessions blocked on reads
+	// Step 4: Close all connections.
 	for _, session := range activeSessions {
-		if session.clientConn != nil {
-			session.clientConn.Close()
-		}
+		session.mutex.Lock()
 		if session.backendConn != nil {
 			session.backendConn.Close()
 		}
+		if session.clientConn != nil {
+			session.clientConn.Close()
+		}
+		session.mutex.Unlock()
 	}
 
 	logger.Debug("POP3 Proxy: Proceeding with connection cleanup", "proxy", s.name)

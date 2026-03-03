@@ -42,6 +42,7 @@ type POP3ProxySession struct {
 	startTime             time.Time
 	releaseConn           func() // Connection limiter cleanup function
 	proxyInfo             *server.ProxyProtocolInfo
+	gracefulShutdown      bool // Set during server shutdown to prevent copy goroutine from closing clientConn
 }
 
 func (s *POP3ProxySession) handleConnection() {
@@ -1084,7 +1085,13 @@ func (s *POP3ProxySession) startProxying() {
 		defer wg.Done()
 		// If this copy returns, it means the backend has closed the connection or there was an error.
 		// We must close the client connection to unblock the other copy operation.
-		defer s.clientConn.Close()
+		defer func() {
+			s.mutex.Lock()
+			if !s.gracefulShutdown {
+				s.clientConn.Close()
+			}
+			s.mutex.Unlock()
+		}()
 		var bytesOut int64
 		var err error
 		// Use the buffered reader from authentication phase to avoid losing buffered data

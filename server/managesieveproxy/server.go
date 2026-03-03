@@ -1,7 +1,6 @@
 package managesieveproxy
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -667,35 +666,35 @@ func (s *Server) sendGracefulShutdownBye() {
 
 	logger.Debug("ManageSieve Proxy: Sending graceful shutdown messages", "name", s.name, "active_sessions", len(activeSessions))
 
-	// Send shutdown messages to both client and backend
+	// Step 1: Set gracefulShutdown flag on all sessions.
 	for _, session := range activeSessions {
-		// Send BYE to client
-		if session.clientWriter != nil {
-			// Send BYE with TRYLATER response code (RFC 5804)
-			session.clientWriter.WriteString("BYE (TRYLATER) \"Server shutting down, please reconnect\"\r\n")
-			session.clientWriter.Flush()
-		}
-
-		// Send LOGOUT to backend for clean disconnect
-		if session.backendConn != nil {
-			// ManageSieve uses LOGOUT command (RFC 5804 Section 2.3)
-			writer := bufio.NewWriter(session.backendConn)
-			writer.WriteString("LOGOUT\r\n")
-			writer.Flush()
-		}
+		session.mu.Lock()
+		session.gracefulShutdown = true
+		session.mu.Unlock()
 	}
 
-	// Give both clients and backends a brief moment to process
+	// Step 2: Write BYE directly to clientConn (RFC 5804 TRYLATER).
+	for _, session := range activeSessions {
+		session.mu.Lock()
+		if session.clientConn != nil {
+			_, _ = fmt.Fprint(session.clientConn, "BYE (TRYLATER) \"Server shutting down, please reconnect\"\r\n")
+		}
+		session.mu.Unlock()
+	}
+
+	// Step 3: Give clients a moment to process the BYE before closing.
 	time.Sleep(1 * time.Second)
 
-	// Close connections to unblock any sessions blocked on reads
+	// Step 4: Close all connections.
 	for _, session := range activeSessions {
-		if session.clientConn != nil {
-			session.clientConn.Close()
-		}
+		session.mu.Lock()
 		if session.backendConn != nil {
 			session.backendConn.Close()
 		}
+		if session.clientConn != nil {
+			session.clientConn.Close()
+		}
+		session.mu.Unlock()
 	}
 
 	logger.Debug("ManageSieve Proxy: Proceeding with connection cleanup", "name", s.name)

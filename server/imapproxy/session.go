@@ -48,6 +48,7 @@ type Session struct {
 	errorCount            int
 	startTime             time.Time
 	releaseConn           func() // Connection limiter cleanup function
+	gracefulShutdown      bool   // Set during server shutdown to prevent copy goroutine from closing clientConn
 }
 
 // newSession creates a new IMAP proxy session.
@@ -1365,8 +1366,16 @@ func (s *Session) startProxy() {
 		defer wg.Done()
 		defer logger.Debug("Backend-to-client copy goroutine exiting", "proxy", s.server.name, "username", s.username)
 		// If this copy returns, it means the backend has closed the connection or there was an error.
-		// We must close the client connection to unblock the other copy operation.
-		defer s.clientConn.Close()
+		// We must close the client connection to unblock the other copy operation —
+		// UNLESS a graceful shutdown is in progress, in which case sendGracefulShutdownBye
+		// needs clientConn to remain open so it can write the BYE message first.
+		defer func() {
+			s.mu.Lock()
+			if !s.gracefulShutdown {
+				s.clientConn.Close()
+			}
+			s.mu.Unlock()
+		}()
 		var bytesOut int64
 		var err error
 		// Use the buffered reader from authentication phase to avoid losing buffered data
