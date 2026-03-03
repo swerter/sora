@@ -191,7 +191,25 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 
 		s.DebugLog("processing expunge update", "seq", update.SeqNum, "uid", update.UID,
 			"tracker_count_before", trackerExpectedCount)
-		s.mailboxTracker.QueueExpunge(update.SeqNum)
+		// RACE CONDITION PROTECTION: A concurrent Move handler may have already
+		// called QueueExpunge for some of these messages, decrementing the tracker's
+		// numMessages. If our sequence number is now out of range, the tracker panics.
+		// We recover gracefully since the expunge was already handled.
+		panicked := false
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panicked = true
+					s.DebugLog("skipping poll expunge (tracker already updated by concurrent operation)",
+						"seq", update.SeqNum, "uid", update.UID, "panic", r)
+				}
+			}()
+			s.mailboxTracker.QueueExpunge(update.SeqNum)
+		}()
+		if panicked {
+			skippedExpunges++
+			continue
+		}
 		// Atomically decrement the current number of messages
 		s.currentNumMessages.Add(^uint32(0)) // Equivalent to -1 for unsigned
 		// Track that the mailbox tracker's count decreased

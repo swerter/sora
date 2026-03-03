@@ -173,9 +173,25 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 		// 2. EXPUNGE notifications are sent to the client when flushed
 		// 3. No tracker desync on next poll (which would force disconnection)
 		// We previously used w.WriteExpunge() which bypassed the tracker.
+		//
+		// RACE CONDITION PROTECTION: Between GetMessagesByNumSetWithRetry and here,
+		// a concurrent poll cycle may have already detected some expunges and
+		// decremented the tracker's numMessages. If our sequence numbers are now
+		// out of range, the tracker panics. We recover from this because:
+		// - The poll already handled the EXPUNGE notifications for those messages
+		// - The tracker's state is consistent (poll decremented it correctly)
+		// - We just skip the redundant expunge notification
 		if s.mailboxTracker != nil {
 			for _, seq := range seqNums {
-				s.mailboxTracker.QueueExpunge(seq)
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							s.DebugLog("skipping expunge notification (tracker already updated by poll)",
+								"seq", seq, "panic", r)
+						}
+					}()
+					s.mailboxTracker.QueueExpunge(seq)
+				}()
 			}
 		} else {
 			// Fallback: write directly if no tracker (shouldn't happen in normal operation)
