@@ -25,6 +25,8 @@ func handleUploaderCommand(ctx context.Context) {
 	switch subcommand {
 	case "status":
 		handleUploaderStatus(ctx)
+	case "resolve":
+		handleUploaderResolve(ctx)
 	case "help", "--help", "-h":
 		printUploaderUsage()
 	default:
@@ -79,6 +81,141 @@ Examples:
 	}
 }
 
+func handleUploaderResolve(ctx context.Context) {
+	fs := flag.NewFlagSet("uploader resolve", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "Show what would be done without making changes")
+	limit := fs.Int("limit", 100, "Maximum number of failed uploads to process")
+
+	fs.Usage = func() {
+		fmt.Printf(`Resolve failed uploads by checking S3 and repairing or removing stale records.
+
+Usage:
+  sora-admin uploader resolve [options]
+
+Options:
+  --dry-run     Show what would be done without making changes (default: false)
+  --limit int   Maximum number of failed uploads to process (default: 100)
+
+Actions taken per upload:
+  ✓ EXISTS in S3  → CompleteS3Upload: marks messages as uploaded=TRUE, removes pending record.
+                    Users regain access to their messages immediately.
+  ✗ MISSING in S3 → DeleteFailedUpload: removes undeliverable message rows and pending record.
+                    Content was never stored in S3; the message is permanently lost.
+
+Examples:
+  sora-admin uploader resolve --dry-run
+  sora-admin uploader resolve
+  sora-admin uploader resolve --limit 50
+`)
+	}
+
+	if err := fs.Parse(os.Args[3:]); err != nil {
+		logger.Fatalf("Error parsing flags: %v", err)
+	}
+
+	if err := resolveFailedUploads(ctx, globalConfig, *dryRun, *limit); err != nil {
+		logger.Fatalf("Failed to resolve uploads: %v", err)
+	}
+}
+
+func resolveFailedUploads(ctx context.Context, cfg AdminConfig, dryRun bool, limit int) error {
+	rdb, err := newAdminDatabase(ctx, &cfg.Database)
+	if err != nil {
+		return fmt.Errorf("failed to initialize resilient database: %w", err)
+	}
+	defer rdb.Close()
+
+	s3Storage, err := storage.New(
+		cfg.S3.Endpoint,
+		cfg.S3.AccessKey,
+		cfg.S3.SecretKey,
+		cfg.S3.Bucket,
+		!cfg.S3.DisableTLS,
+		false,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize S3: %w", err)
+	}
+	if cfg.S3.Encrypt {
+		if err := s3Storage.EnableEncryption(cfg.S3.EncryptionKey); err != nil {
+			return fmt.Errorf("failed to enable S3 encryption: %w", err)
+		}
+	}
+
+	failedUploads, err := rdb.GetFailedUploadsWithEmailWithRetry(ctx, cfg.Uploader.MaxAttempts, limit)
+	if err != nil {
+		return fmt.Errorf("failed to get failed uploads: %w", err)
+	}
+
+	if len(failedUploads) == 0 {
+		fmt.Println("No failed uploads to resolve.")
+		return nil
+	}
+
+	if dryRun {
+		fmt.Println("DRY RUN — no changes will be made.\n")
+	}
+
+	var resolved, deleted, skipped int
+
+	for _, upload := range failedUploads {
+		if upload.AccountEmail == "" {
+			fmt.Printf("  [SKIP]   id=%-10d hash=%.16s... (no account email found)\n", upload.ID, upload.ContentHash)
+			skipped++
+			continue
+		}
+
+		parts := strings.Split(upload.AccountEmail, "@")
+		if len(parts) != 2 {
+			fmt.Printf("  [SKIP]   id=%-10d hash=%.16s... (malformed email: %s)\n", upload.ID, upload.ContentHash, upload.AccountEmail)
+			skipped++
+			continue
+		}
+
+		s3Key := fmt.Sprintf("%s/%s/%s", parts[1], parts[0], upload.ContentHash)
+		exists, _, checkErr := s3Storage.Exists(s3Key)
+		if checkErr != nil {
+			fmt.Printf("  [ERROR]  id=%-10d hash=%.16s... S3 check failed: %v\n", upload.ID, upload.ContentHash, checkErr)
+			skipped++
+			continue
+		}
+
+		if exists {
+			// Content is in S3 — mark messages as uploaded=TRUE, remove pending record.
+			fmt.Printf("  [REPAIR] id=%-10d account=%-8d hash=%.16s... ✓ EXISTS in S3 → CompleteS3Upload\n",
+				upload.ID, upload.AccountID, upload.ContentHash)
+			if !dryRun {
+				if err := rdb.CompleteS3UploadWithRetry(ctx, upload.ContentHash, upload.AccountID); err != nil {
+					fmt.Printf("            ERROR: %v\n", err)
+					skipped++
+					continue
+				}
+			}
+			resolved++
+		} else {
+			// Content is NOT in S3 — the message was never delivered. Clean up.
+			fmt.Printf("  [DELETE] id=%-10d account=%-8d hash=%.16s... ✗ MISSING in S3 → DeleteFailedUpload\n",
+				upload.ID, upload.AccountID, upload.ContentHash)
+			if !dryRun {
+				n, err := rdb.DeleteFailedUploadWithRetry(ctx, upload.ContentHash, upload.AccountID)
+				if err != nil {
+					fmt.Printf("            ERROR: %v\n", err)
+					skipped++
+					continue
+				}
+				fmt.Printf("            Deleted %d message row(s)\n", n)
+			}
+			deleted++
+		}
+	}
+
+	fmt.Printf("\nSummary: %d repaired (✓ EXISTS), %d deleted (✗ MISSING), %d skipped\n", resolved, deleted, skipped)
+	if dryRun {
+		fmt.Println("(dry run — run without --dry-run to apply changes)")
+	}
+	return nil
+}
+
 func printUploaderUsage() {
 	fmt.Printf(`Upload Queue Management
 
@@ -87,11 +224,14 @@ Usage:
 
 Subcommands:
   status   Show uploader queue status and failed uploads
+  resolve  Resolve failed uploads: repair ✓ EXISTS entries, delete ✗ MISSING entries
 
 Examples:
   sora-admin uploader status
   sora-admin uploader status --show-failed=false
   sora-admin uploader status --failed-limit 20
+  sora-admin uploader resolve --dry-run
+  sora-admin uploader resolve
 
 Use 'sora-admin uploader <subcommand> --help' for detailed help.
 `)

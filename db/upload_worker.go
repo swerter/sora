@@ -242,6 +242,30 @@ func (db *Database) GetFailedUploadsWithEmail(ctx context.Context, maxAttempts i
 	return uploads, nil
 }
 
+// DeleteFailedUpload deletes the pending_uploads record and any unuploaded message rows
+// for the given content hash + account. Used by the admin tool to clean up entries where
+// the content is permanently lost (✗ MISSING in S3 and no local file).
+// Returns the number of message rows that were deleted.
+func (d *Database) DeleteFailedUpload(ctx context.Context, tx pgx.Tx, contentHash string, accountID int64) (int64, error) {
+	var deleted int64
+	err := tx.QueryRow(ctx, `
+		WITH deleted_messages AS (
+			DELETE FROM messages
+			WHERE content_hash = $1 AND account_id = $2 AND uploaded = FALSE
+			RETURNING id
+		),
+		deleted_pending AS (
+			DELETE FROM pending_uploads
+			WHERE content_hash = $1 AND account_id = $2
+		)
+		SELECT count(*) FROM deleted_messages
+	`, contentHash, accountID).Scan(&deleted)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete failed upload (hash=%s, account=%d): %w", contentHash, accountID, err)
+	}
+	return deleted, nil
+}
+
 // PendingUploadExists checks if a pending upload record exists for the given content hash and account.
 // This is used by the cleanup job to determine if a local file is orphaned.
 func (db *Database) PendingUploadExists(ctx context.Context, contentHash string, accountID int64) (bool, error) {
