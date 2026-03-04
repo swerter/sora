@@ -303,6 +303,24 @@ func (db *Database) migrate(ctx context.Context, migrationTimeout time.Duration)
 	if err != nil {
 		return fmt.Errorf("failed to open a temporary sql.DB for migrations: %w", err)
 	}
+	// IMPORTANT: Limit the migration sqlDB to exactly ONE connection.
+	//
+	// golang-migrate uses session-level advisory locks (pg_advisory_lock /
+	// pg_advisory_unlock) for mutual exclusion. Session-level locks are tied to
+	// the specific database connection on which they were acquired. If Lock() and
+	// Unlock() happen to use *different* connections from a pool, pg_advisory_unlock
+	// returns false (lock not held on this connection) and golang-migrate ignores
+	// that boolean — silently failing to release the lock.
+	//
+	// The result is a startup deadlock: the instance that "completed" migrations
+	// still holds the advisory lock on its idle pooled connection, so the other
+	// instance blocks on pg_advisory_lock indefinitely.
+	//
+	// Forcing a single connection guarantees that Lock, Run, SetVersion, and
+	// Unlock all execute on the exact same PostgreSQL session.
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+
 	// NOTE: We do NOT defer sqlDB.Close() here. sql.DB.Close() waits for all in-flight
 	// queries to finish, but the migration goroutine may be blocked on pg_advisory_lock()
 	// which would cause a deadlock. Instead, we close sqlDB explicitly when the goroutine
@@ -409,28 +427,53 @@ func (db *Database) migrate(ctx context.Context, migrationTimeout time.Duration)
 		}()
 
 		logger.Info("Database: migration attempt timed out (another instance may be running migrations)")
-		logger.Info("Database: verifying current migration state")
+		logger.Info("Database: polling for migration completion by another instance")
 
-		// Query schema_migrations using the main WritePool (NOT sqlDB, which may be
-		// contended by the migration goroutine's advisory lock)
-		var newVersion uint
-		var newDirty bool
-		verifyCtx, verifyCancel := context.WithTimeout(ctx, 10*time.Second)
-		defer verifyCancel()
-		queryErr := db.WritePool.QueryRow(verifyCtx, "SELECT version, dirty FROM schema_migrations LIMIT 1").Scan(&newVersion, &newDirty)
-		if queryErr != nil && queryErr != pgx.ErrNoRows {
-			return fmt.Errorf("failed to verify migration version after timeout: %w", queryErr)
-		}
-		if newDirty {
-			return fmt.Errorf("database is in a dirty migration state after timeout (version %d)", newVersion)
-		}
+		// Poll schema_migrations using the main WritePool (NOT sqlDB, which may be
+		// contended by the migration goroutine's advisory lock waiting for another
+		// instance to finish).
+		//
+		// We poll instead of doing a single check because the other instance may
+		// still be actively running migrations when our timeout fires. A single
+		// version check at timeout time would see a stale version and fail even
+		// though the other instance is about to commit the final migration.
+		//
+		// Use 3x the configured migration timeout as the overall poll deadline to
+		// give the other instance a generous window to complete.
+		pollDeadline := 3 * migrationTimeout
+		pollCtx, pollCancel := context.WithTimeout(ctx, pollDeadline)
+		defer pollCancel()
 
-		// Check if the version is now up-to-date (>= latest available migration)
-		if newVersion >= latestVersion {
-			logger.Info("Database: migration version verified (migrations completed by another instance)", "version", newVersion)
-			skipFinalVerification = true // Skip final verification since we already verified directly
-		} else {
-			return fmt.Errorf("timeout waiting for migrations and database is not up-to-date (current: %d, latest: %d)", newVersion, latestVersion)
+		pollInterval := 5 * time.Second
+		pollTicker := time.NewTicker(pollInterval)
+		defer pollTicker.Stop()
+
+		var migrationDoneByPeer bool
+		for !migrationDoneByPeer {
+			select {
+			case <-pollCtx.Done():
+				return fmt.Errorf("timed out waiting for another instance to complete migrations (waited %s, current version still below latest %d)", pollDeadline, latestVersion)
+			case <-pollTicker.C:
+				var newVersion uint
+				var newDirty bool
+				verifyCtx, verifyCancel := context.WithTimeout(ctx, 10*time.Second)
+				queryErr := db.WritePool.QueryRow(verifyCtx, "SELECT version, dirty FROM schema_migrations LIMIT 1").Scan(&newVersion, &newDirty)
+				verifyCancel()
+				if queryErr != nil && queryErr != pgx.ErrNoRows {
+					logger.Warn("Database: error polling migration version, retrying", "err", queryErr)
+					continue
+				}
+				if newDirty {
+					return fmt.Errorf("database is in a dirty migration state while waiting for peer migrations (version %d)", newVersion)
+				}
+				if newVersion >= latestVersion {
+					logger.Info("Database: migrations completed by another instance", "version", newVersion)
+					skipFinalVerification = true
+					migrationDoneByPeer = true
+				} else {
+					logger.Info("Database: waiting for peer to complete migrations", "current", newVersion, "latest", latestVersion)
+				}
+			}
 		}
 	}
 
