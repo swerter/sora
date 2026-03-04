@@ -746,17 +746,11 @@ func (db *Database) ListAccounts(ctx context.Context) ([]AccountSummary, error) 
 		WITH account_stats AS (
 			SELECT mb.account_id,
 				   COUNT(mb.id) as mailbox_count,
-				   COALESCE(SUM(ms.message_count), 0) as message_count
+				   COALESCE(SUM(ms.message_count), 0) as message_count,
+				   COALESCE(SUM(ms.total_size), 0) as storage_used
 			FROM mailboxes mb
 			LEFT JOIN mailbox_stats ms ON mb.id = ms.mailbox_id
 			GROUP BY mb.account_id
-		),
-		storage_stats AS (
-			SELECT m.account_id,
-				   COALESCE(SUM(m.size), 0) as storage_used
-			FROM messages m
-			WHERE m.expunged_at IS NULL
-			GROUP BY m.account_id
 		)
 		SELECT a.id,
 			   a.created_at,
@@ -764,11 +758,10 @@ func (db *Database) ListAccounts(ctx context.Context) ([]AccountSummary, error) 
 			   (SELECT COUNT(*) FROM credentials WHERE account_id = a.id) AS credential_count,
 			   COALESCE(s.mailbox_count, 0),
 			   COALESCE(s.message_count, 0),
-			   COALESCE(st.storage_used, 0)
+			   COALESCE(s.storage_used, 0)
 		FROM accounts a
 		LEFT JOIN credentials pc ON a.id = pc.account_id AND pc.primary_identity = TRUE
 		LEFT JOIN account_stats s ON a.id = s.account_id
-		LEFT JOIN storage_stats st ON a.id = st.account_id
 		WHERE a.deleted_at IS NULL
 		ORDER BY a.created_at DESC`
 
@@ -805,17 +798,11 @@ func (db *Database) ListAccountsByDomain(ctx context.Context, domain string) ([]
 		WITH account_stats AS (
 			SELECT mb.account_id,
 				   COUNT(mb.id) as mailbox_count,
-				   COALESCE(SUM(ms.message_count), 0) as message_count
+				   COALESCE(SUM(ms.message_count), 0) as message_count,
+				   COALESCE(SUM(ms.total_size), 0) as storage_used
 			FROM mailboxes mb
 			LEFT JOIN mailbox_stats ms ON mb.id = ms.mailbox_id
 			GROUP BY mb.account_id
-		),
-		storage_stats AS (
-			SELECT m.account_id,
-				   COALESCE(SUM(m.size), 0) as storage_used
-			FROM messages m
-			WHERE m.expunged_at IS NULL
-			GROUP BY m.account_id
 		)
 		SELECT a.id,
 			   a.created_at,
@@ -823,11 +810,10 @@ func (db *Database) ListAccountsByDomain(ctx context.Context, domain string) ([]
 			   (SELECT COUNT(*) FROM credentials WHERE account_id = a.id) AS credential_count,
 			   COALESCE(s.mailbox_count, 0),
 			   COALESCE(s.message_count, 0),
-			   COALESCE(st.storage_used, 0)
+			   COALESCE(s.storage_used, 0)
 		FROM accounts a
 		LEFT JOIN credentials pc ON a.id = pc.account_id AND pc.primary_identity = TRUE
 		LEFT JOIN account_stats s ON a.id = s.account_id
-		LEFT JOIN storage_stats st ON a.id = st.account_id
 		WHERE a.deleted_at IS NULL
 		  AND LOWER(pc.address) LIKE '%' || '@' || LOWER($1)
 		ORDER BY a.created_at DESC`
