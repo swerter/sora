@@ -692,6 +692,7 @@ type AccountSummary struct {
 	CredentialCount int    `json:"credential_count"`
 	MailboxCount    int    `json:"mailbox_count"`
 	MessageCount    int64  `json:"message_count"`
+	StorageUsed     int64  `json:"storage_used"` // Total storage in bytes
 	CreatedAt       string `json:"created_at"`
 }
 
@@ -749,16 +750,25 @@ func (db *Database) ListAccounts(ctx context.Context) ([]AccountSummary, error) 
 			FROM mailboxes mb
 			LEFT JOIN mailbox_stats ms ON mb.id = ms.mailbox_id
 			GROUP BY mb.account_id
+		),
+		storage_stats AS (
+			SELECT m.account_id,
+				   COALESCE(SUM(m.size), 0) as storage_used
+			FROM messages m
+			WHERE m.expunged_at IS NULL
+			GROUP BY m.account_id
 		)
 		SELECT a.id,
 			   a.created_at,
 			   COALESCE(pc.address, '') AS primary_email,
 			   (SELECT COUNT(*) FROM credentials WHERE account_id = a.id) AS credential_count,
 			   COALESCE(s.mailbox_count, 0),
-			   COALESCE(s.message_count, 0)
+			   COALESCE(s.message_count, 0),
+			   COALESCE(st.storage_used, 0)
 		FROM accounts a
 		LEFT JOIN credentials pc ON a.id = pc.account_id AND pc.primary_identity = TRUE
 		LEFT JOIN account_stats s ON a.id = s.account_id
+		LEFT JOIN storage_stats st ON a.id = st.account_id
 		WHERE a.deleted_at IS NULL
 		ORDER BY a.created_at DESC`
 
@@ -773,7 +783,8 @@ func (db *Database) ListAccounts(ctx context.Context) ([]AccountSummary, error) 
 		var account AccountSummary
 		var createdAt any
 		err := rows.Scan(&account.AccountID, &createdAt, &account.PrimaryEmail,
-			&account.CredentialCount, &account.MailboxCount, &account.MessageCount)
+			&account.CredentialCount, &account.MailboxCount, &account.MessageCount,
+			&account.StorageUsed)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan account: %w", err)
 		}
@@ -798,16 +809,25 @@ func (db *Database) ListAccountsByDomain(ctx context.Context, domain string) ([]
 			FROM mailboxes mb
 			LEFT JOIN mailbox_stats ms ON mb.id = ms.mailbox_id
 			GROUP BY mb.account_id
+		),
+		storage_stats AS (
+			SELECT m.account_id,
+				   COALESCE(SUM(m.size), 0) as storage_used
+			FROM messages m
+			WHERE m.expunged_at IS NULL
+			GROUP BY m.account_id
 		)
 		SELECT a.id,
 			   a.created_at,
 			   COALESCE(pc.address, '') AS primary_email,
 			   (SELECT COUNT(*) FROM credentials WHERE account_id = a.id) AS credential_count,
 			   COALESCE(s.mailbox_count, 0),
-			   COALESCE(s.message_count, 0)
+			   COALESCE(s.message_count, 0),
+			   COALESCE(st.storage_used, 0)
 		FROM accounts a
 		LEFT JOIN credentials pc ON a.id = pc.account_id AND pc.primary_identity = TRUE
 		LEFT JOIN account_stats s ON a.id = s.account_id
+		LEFT JOIN storage_stats st ON a.id = st.account_id
 		WHERE a.deleted_at IS NULL
 		  AND LOWER(pc.address) LIKE '%' || '@' || LOWER($1)
 		ORDER BY a.created_at DESC`
@@ -823,7 +843,8 @@ func (db *Database) ListAccountsByDomain(ctx context.Context, domain string) ([]
 		var account AccountSummary
 		var createdAt any
 		err := rows.Scan(&account.AccountID, &createdAt, &account.PrimaryEmail,
-			&account.CredentialCount, &account.MailboxCount, &account.MessageCount)
+			&account.CredentialCount, &account.MailboxCount, &account.MessageCount,
+			&account.StorageUsed)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan account: %w", err)
 		}

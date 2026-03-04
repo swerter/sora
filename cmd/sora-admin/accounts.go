@@ -635,10 +635,10 @@ func listAccounts(ctx context.Context, cfg AdminConfig, domain string) error {
 	fmt.Printf("Found %d account(s) for domain %s:\n\n", len(accounts), domain)
 
 	// Print header
-	fmt.Printf("%-8s %-30s %-10s %-10s %-12s %-20s\n",
-		"ID", "Primary Email", "Credentials", "Mailboxes", "Messages", "Created")
-	fmt.Printf("%-8s %-30s %-10s %-10s %-12s %-20s\n",
-		"--", "-------------", "-----------", "---------", "--------", "-------")
+	fmt.Printf("%-8s %-30s %-10s %-10s %-12s %-12s %-20s\n",
+		"ID", "Primary Email", "Credentials", "Mailboxes", "Messages", "Storage", "Created")
+	fmt.Printf("%-8s %-30s %-10s %-10s %-12s %-12s %-20s\n",
+		"--", "-------------", "-----------", "---------", "--------", "-------", "-------")
 
 	// Print account details
 	for _, account := range accounts {
@@ -647,12 +647,13 @@ func listAccounts(ctx context.Context, cfg AdminConfig, domain string) error {
 			primaryEmail = "<no primary>"
 		}
 
-		fmt.Printf("%-8d %-30s %-10d %-10d %-12d %-20s\n",
+		fmt.Printf("%-8d %-30s %-10d %-10d %-12d %-12s %-20s\n",
 			account.AccountID,
 			primaryEmail,
 			account.CredentialCount,
 			account.MailboxCount,
 			account.MessageCount,
+			formatBytes(account.StorageUsed),
 			account.CreatedAt)
 	}
 
