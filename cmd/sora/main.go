@@ -687,6 +687,12 @@ func initializeServices(ctx context.Context, cfg config.Config, errorHandler *er
 			errorHandler.FatalError("create upload worker", err)
 			os.Exit(errorHandler.WaitForExit())
 		}
+		cleanupGracePeriod, cgpErr := cfg.Uploader.GetCleanupGracePeriod()
+		if cgpErr != nil {
+			logger.Warn("Failed to parse uploader cleanup_grace_period — using default (1h)", "error", cgpErr)
+			cleanupGracePeriod = time.Hour
+		}
+		deps.uploadWorker.SetCleanupGracePeriod(cleanupGracePeriod)
 
 		// Start error listener for upload worker
 		go func() {

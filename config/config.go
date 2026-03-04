@@ -372,11 +372,12 @@ func (c *LocalCacheConfig) GetOrphanCleanupAge() (time.Duration, error) {
 
 // UploaderConfig holds upload worker configuration.
 type UploaderConfig struct {
-	Path          string `toml:"path"`
-	BatchSize     int    `toml:"batch_size"`
-	Concurrency   int    `toml:"concurrency"`
-	MaxAttempts   int    `toml:"max_attempts"`
-	RetryInterval string `toml:"retry_interval"`
+	Path               string `toml:"path"`
+	BatchSize          int    `toml:"batch_size"`
+	Concurrency        int    `toml:"concurrency"`
+	MaxAttempts        int    `toml:"max_attempts"`
+	RetryInterval      string `toml:"retry_interval"`
+	CleanupGracePeriod string `toml:"cleanup_grace_period"` // Minimum age of a local upload file before cleanup considers it (default: "1h"). Must exceed the longest possible DB transaction to avoid the race where a file is deleted before its pending_upload record commits.
 }
 
 // GetRetryInterval parses the retry interval duration
@@ -385,6 +386,16 @@ func (c *UploaderConfig) GetRetryInterval() (time.Duration, error) {
 		c.RetryInterval = "30s"
 	}
 	return helpers.ParseDuration(c.RetryInterval)
+}
+
+// GetCleanupGracePeriod parses the cleanup grace period duration.
+// Must be long enough that no in-flight DB transaction can still be open when
+// cleanupOrphanedFiles first considers a file (default: 1h).
+func (c *UploaderConfig) GetCleanupGracePeriod() (time.Duration, error) {
+	if c.CleanupGracePeriod == "" {
+		return time.Hour, nil // safe default: no real transaction stays open for an hour
+	}
+	return helpers.ParseDuration(c.CleanupGracePeriod)
 }
 
 // ProxyProtocolConfig holds PROXY protocol configuration
@@ -1649,7 +1660,7 @@ func NewDefaultConfig() Config {
 			Path:          "/tmp/sora/uploads",
 			BatchSize:     10,
 			Concurrency:   20,
-			MaxAttempts:   5,
+			MaxAttempts:   20,
 			RetryInterval: "30s",
 		},
 	}

@@ -71,11 +71,19 @@ func (m *mockDB) GetUploaderStatsWithRetry(ctx context.Context, maxAttempts int)
 }
 
 type mockS3 struct {
-	PutWithRetryFunc func(ctx context.Context, key string, reader io.Reader, size int64) error
+	PutWithRetryFunc    func(ctx context.Context, key string, reader io.Reader, size int64) error
+	ExistsWithRetryFunc func(ctx context.Context, key string) (bool, error)
 }
 
 func (m *mockS3) PutWithRetry(ctx context.Context, key string, reader io.Reader, size int64) error {
 	return m.PutWithRetryFunc(ctx, key, reader, size)
+}
+
+func (m *mockS3) ExistsWithRetry(ctx context.Context, key string) (bool, error) {
+	if m.ExistsWithRetryFunc != nil {
+		return m.ExistsWithRetryFunc(ctx, key)
+	}
+	return false, nil
 }
 
 type mockCache struct {
@@ -111,6 +119,9 @@ func setupTestWorker(t *testing.T) (*UploadWorker, *mockDB, *mockS3, *mockCache,
 	s3 := &mockS3{}
 	s3.PutWithRetryFunc = func(ctx context.Context, key string, reader io.Reader, size int64) error {
 		return nil
+	}
+	s3.ExistsWithRetryFunc = func(ctx context.Context, key string) (bool, error) {
+		return false, nil
 	}
 
 	cache := &mockCache{}
@@ -373,18 +384,46 @@ func TestProcessSingleUpload(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "local file should be removed even if already uploaded")
 	})
 
-	t.Run("local file read fails", func(t *testing.T) {
-		worker, rdb, _, _, _ := setupTestWorker(t)
-		// Don't create the local file
+	t.Run("local file missing and S3 also missing — marks attempt", func(t *testing.T) {
+		worker, rdb, s3, _, _ := setupTestWorker(t)
+		// Don't create the local file; S3 also does not have it.
 
 		var markedAttempt atomic.Bool
 		rdb.MarkUploadAttemptWithRetryFunc = func(ctx context.Context, contentHash string, accountID int64) error {
 			markedAttempt.Store(true)
 			return nil
 		}
+		s3.ExistsWithRetryFunc = func(ctx context.Context, key string) (bool, error) {
+			return false, nil // S3 doesn't have it either
+		}
 
 		worker.processSingleUpload(context.Background(), baseUpload)
-		assert.True(t, markedAttempt.Load())
+		assert.True(t, markedAttempt.Load(), "attempt should be counted when both file and S3 are missing")
+	})
+
+	t.Run("local file missing but S3 has content — self-heals without marking attempt", func(t *testing.T) {
+		worker, rdb, s3, _, _ := setupTestWorker(t)
+		// Don't create the local file — simulates cleanupOrphanedFiles race or lost file.
+		// S3 however already has the content (✓ EXISTS scenario from the incident report).
+
+		var markedAttempt atomic.Bool
+		var completed atomic.Bool
+		rdb.MarkUploadAttemptWithRetryFunc = func(ctx context.Context, contentHash string, accountID int64) error {
+			markedAttempt.Store(true)
+			return nil
+		}
+		rdb.CompleteS3UploadWithRetryFunc = func(ctx context.Context, contentHash string, accountID int64) error {
+			completed.Store(true)
+			return nil
+		}
+		s3.ExistsWithRetryFunc = func(ctx context.Context, key string) (bool, error) {
+			return true, nil // Content is already in S3
+		}
+
+		worker.processSingleUpload(context.Background(), baseUpload)
+
+		assert.False(t, markedAttempt.Load(), "attempt must NOT be counted — self-heal should not exhaust max_attempts")
+		assert.True(t, completed.Load(), "CompleteS3Upload must be called to mark messages as uploaded and unblock the user")
 	})
 
 	t.Run("s3 upload fails", func(t *testing.T) {

@@ -2,11 +2,13 @@ package resilient
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/migadu/sora/logger"
 	"github.com/migadu/sora/pkg/circuitbreaker"
@@ -211,6 +213,24 @@ func (rs *ResilientS3Storage) GetObjectWithRetry(ctx context.Context, key string
 	}
 	output := result.(*s3.GetObjectOutput)
 	return output, err
+}
+
+// ExistsWithRetry returns true if an S3 object with the given key exists.
+// A 404 response is treated as "does not exist" (returns false, nil).
+// All other errors are returned as-is.
+// This is used by the uploader to self-heal stuck uploads whose local file
+// was deleted but whose content was already successfully stored in S3.
+func (rs *ResilientS3Storage) ExistsWithRetry(ctx context.Context, key string) (bool, error) {
+	_, err := rs.StatObjectWithRetry(ctx, key)
+	if err != nil {
+		// A 404 means the object simply isn't there — not an error condition.
+		var httpErr *awshttp.ResponseError
+		if errors.As(err, &httpErr) && httpErr.HTTPStatusCode() == 404 {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (rs *ResilientS3Storage) StatObjectWithRetry(ctx context.Context, key string) (*s3.HeadObjectOutput, error) {

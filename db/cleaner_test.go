@@ -159,6 +159,13 @@ func TestPruneOldMessageBodies(t *testing.T) {
 	}
 	t.Logf("PruneOldMessageBodies affected %d rows total", totalRowsAffected)
 
+	// Force a new snapshot by starting and immediately committing a transaction
+	// This ensures we see the committed changes from the prune operations
+	txSync, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	err = txSync.Commit(ctx)
+	require.NoError(t, err)
+
 	// Test 2: Verify old message body was pruned
 	var oldBodyAfter *string
 	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM message_contents WHERE content_hash = $1", oldContentHash).Scan(&oldBodyAfter)
@@ -307,6 +314,13 @@ func TestPruneOldMessageBodiesBatching(t *testing.T) {
 	assert.GreaterOrEqual(t, rowsAffected, int64(numRecords), "Should prune at least our test records")
 
 	err = tx2.Commit(ctx)
+	require.NoError(t, err)
+
+	// Force a new snapshot by starting and immediately committing a transaction
+	// This ensures we see the committed changes from the prune operations
+	txSync, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	err = txSync.Commit(ctx)
 	require.NoError(t, err)
 
 	// Verify all our test messages were pruned

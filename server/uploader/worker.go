@@ -43,6 +43,10 @@ type UploaderDB interface {
 // UploaderS3 defines the S3 storage operations needed by the uploader worker.
 type UploaderS3 interface {
 	PutWithRetry(ctx context.Context, key string, reader io.Reader, size int64) error
+	// ExistsWithRetry checks whether an object already exists in S3.
+	// Used to self-heal uploads whose local file is missing but whose content
+	// was already stored in S3 by a prior attempt.
+	ExistsWithRetry(ctx context.Context, key string) (bool, error)
 }
 
 // UploaderCache defines the cache operations needed by the uploader worker.
@@ -51,21 +55,22 @@ type UploaderCache interface {
 }
 
 type UploadWorker struct {
-	rdb           UploaderDB
-	s3            UploaderS3
-	cache         UploaderCache
-	path          string
-	batchSize     int
-	concurrency   int
-	maxAttempts   int
-	retryInterval time.Duration
-	instanceID    string
-	notifyCh      chan struct{}
-	stopCh        chan struct{}
-	errCh         chan<- error
-	wg            sync.WaitGroup
-	mu            sync.Mutex
-	running       bool
+	cleanupGracePeriod time.Duration // set via SetCleanupGracePeriod; 0 → default 1h
+	rdb                UploaderDB
+	s3                 UploaderS3
+	cache              UploaderCache
+	path               string
+	batchSize          int
+	concurrency        int
+	maxAttempts        int
+	retryInterval      time.Duration
+	instanceID         string
+	notifyCh           chan struct{}
+	stopCh             chan struct{}
+	errCh              chan<- error
+	wg                 sync.WaitGroup
+	mu                 sync.Mutex
+	running            bool
 }
 
 func New(ctx context.Context, path string, batchSize int, concurrency int, maxAttempts int, retryInterval time.Duration, instanceID string, rdb *resilient.ResilientDatabase, s3 *storage.S3Storage, cache *cache.Cache, errCh chan<- error) (*UploadWorker, error) {
@@ -178,6 +183,17 @@ func (w *UploadWorker) Stop() {
 	w.wg.Wait()
 
 	logger.Info("Uploader: worker stopped")
+}
+
+// SetCleanupGracePeriod configures how old a local upload file must be before
+// cleanupOrphanedFiles will consider removing it.  The value must be long enough
+// to guarantee that any concurrent DB transaction (writing the pending_upload
+// record) has committed before the cleanup consults the database.
+//
+// Set from cfg.Uploader.GetCleanupGracePeriod() at startup.
+// If never called (or called with 0), the default of 1 hour is used.
+func (w *UploadWorker) SetCleanupGracePeriod(d time.Duration) {
+	w.cleanupGracePeriod = d
 }
 
 func (w *UploadWorker) NotifyUploadQueued() {
@@ -302,11 +318,63 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		if err := w.rdb.MarkUploadAttemptWithRetry(ctx, upload.ContentHash, upload.AccountID); err != nil {
-			logger.Error("Uploader: CRITICAL - Failed to mark upload attempt after file read failure", "hash", upload.ContentHash, "account_id", upload.AccountID, "error", err)
+		if !os.IsNotExist(err) {
+			// Unexpected error (e.g. permissions) — not a missing-file situation.
+			if err := w.rdb.MarkUploadAttemptWithRetry(ctx, upload.ContentHash, upload.AccountID); err != nil {
+				logger.Error("Uploader: CRITICAL - Failed to mark upload attempt after file read failure", "hash", upload.ContentHash, "account_id", upload.AccountID, "error", err)
+			}
+			logger.Error("Uploader: Could not read file", "path", filePath, "account_id", upload.AccountID, "error", err)
+			return
 		}
-		logger.Error("Uploader: Could not read file", "path", filePath, "account_id", upload.AccountID, "error", err)
-		return // Cannot proceed without the file
+
+		// Local file is missing (ENOENT). This can happen when:
+		//   a) cleanupOrphanedFiles deleted it just before the DB transaction committed
+		//      (the race condition fixed by the 1-hour grace period — this path is now
+		//       much rarer but still theoretically possible on very long transactions).
+		//   b) The file was uploaded to S3 by a prior attempt, CompleteS3UploadWithRetry
+		//      succeeded at marking messages uploaded but the pending_upload DELETE failed,
+		//      leaving the record stuck; a subsequent run then deleted the local file.
+		//
+		// In case (b) — and whenever S3 already has the content for any reason — we can
+		// self-heal by calling CompleteS3UploadWithRetry directly, without the local file.
+		// This prevents CleanupFailedUploads from eventually deleting the user's messages
+		// even though their content is safely stored in S3 (the ✓ EXISTS scenario).
+		logger.Warn("Uploader: Local file missing — checking S3 for existing content",
+			"hash", upload.ContentHash, "account", upload.AccountID, "path", filePath)
+
+		s3Exists, statErr := w.s3.ExistsWithRetry(ctx, s3Key)
+		if statErr != nil {
+			// S3 is unreachable — don't count as a permanent failure.
+			logger.Warn("Uploader: Could not check S3 existence after missing file",
+				"hash", upload.ContentHash, "account", upload.AccountID, "error", statErr)
+			// Do NOT increment attempts: the content may be in S3; we'll retry next cycle.
+			return
+		}
+
+		if s3Exists {
+			// Content is already in S3. Complete the upload (mark messages as uploaded,
+			// remove the pending_upload record) so the user's messages are accessible.
+			logger.Info("Uploader: Local file missing but content found in S3 — self-healing upload",
+				"hash", upload.ContentHash, "account", upload.AccountID)
+			if err := w.rdb.CompleteS3UploadWithRetry(ctx, upload.ContentHash, upload.AccountID); err != nil {
+				logger.Error("Uploader: CRITICAL - Failed to complete upload after S3 existence recovery",
+					"hash", upload.ContentHash, "account_id", upload.AccountID, "error", err)
+				return // Retry next cycle; do NOT increment attempts
+			}
+			logger.Info("Uploader: Upload self-healed via S3 existence check",
+				"hash", upload.ContentHash, "account", upload.AccountID)
+			metrics.UploadWorkerJobs.WithLabelValues("success").Inc()
+			return
+		}
+
+		// File is truly missing AND S3 doesn't have it — content is genuinely lost.
+		if err := w.rdb.MarkUploadAttemptWithRetry(ctx, upload.ContentHash, upload.AccountID); err != nil {
+			logger.Error("Uploader: CRITICAL - Failed to mark upload attempt after missing file",
+				"hash", upload.ContentHash, "account_id", upload.AccountID, "error", err)
+		}
+		logger.Error("Uploader: Could not read file — content lost",
+			"path", filePath, "account_id", upload.AccountID, "error", err)
+		return
 	}
 
 	// Attempt to upload to S3 using resilient wrapper with circuit breakers and retries.
@@ -545,9 +613,21 @@ func removeEmptyParents(path, stopAt string) {
 func (w *UploadWorker) cleanupOrphanedFiles(ctx context.Context) error {
 	start := time.Now()
 
-	// Grace period before considering a file orphaned (10 minutes)
-	// This ensures we don't delete files that are actively being processed
-	gracePeriod := 10 * time.Minute
+	// Grace period before considering a file orphaned (1 hour).
+	//
+	// This must be long enough to guarantee that any DB transaction which wrote
+	// the pending_upload record has either committed (making the record visible)
+	// or rolled back (making the file truly orphaned) before we ever consult the
+	// database.  10 minutes was too short: a large-message InsertMessage
+	// transaction could still be in-flight when the cleanup ticker fired,
+	// causing PendingUploadExistsWithRetry() to return false for a record that
+	// was about to commit.  The uploader then found "no such file or directory"
+	// on every retry and the message was permanently lost (see incident
+	// upload id=6197517, account=22385, hash=66e220f4…).
+	gracePeriod := w.cleanupGracePeriod
+	if gracePeriod == 0 {
+		gracePeriod = time.Hour // safe default — see SetCleanupGracePeriod
+	}
 	cutoffTime := time.Now().Add(-gracePeriod)
 
 	var filesChecked, filesRemoved int64
@@ -587,12 +667,11 @@ func (w *UploadWorker) cleanupOrphanedFiles(ctx context.Context) error {
 			return nil
 		}
 
-		// Parse path components
-		parts := filepath.SplitList(relPath)
-		if len(parts) < 2 {
-			// Try with separator
-			parts = strings.Split(relPath, string(filepath.Separator))
-		}
+		// Parse path components.
+		// filepath.SplitList splits on the OS list-separator (":" on Unix, ";"
+		// on Windows) — it is intended for $PATH-style strings and is wrong here.
+		// Use strings.Split with the path separator instead.
+		parts := strings.Split(relPath, string(filepath.Separator))
 
 		if len(parts) < 2 {
 			logger.Warn("UploaderCleanup: Unexpected path structure", "path", relPath)
