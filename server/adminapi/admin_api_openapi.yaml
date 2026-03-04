@@ -732,6 +732,103 @@ security:
 
 # API Paths
 paths:
+  /domains/{domain}/accounts:
+    get:
+      tags:
+        - Domain Management
+      summary: List accounts for a specific domain
+      description: |
+        Retrieves a list of all accounts for the specified domain. This is the recommended way to list accounts
+        as it prevents performance issues with large multi-tenant deployments.
+
+        Note: The unrestricted `GET /accounts` endpoint has been removed to prevent accidentally listing
+        all accounts across all domains.
+      parameters:
+        - name: domain
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "Domain name (e.g., example.com)"
+          example: "example.com"
+      responses:
+        '200':
+          description: List of accounts for the domain.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  domain:
+                    type: string
+                    example: "example.com"
+                  accounts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        account_id:
+                          type: integer
+                          format: int64
+                          example: 123
+                        primary_email:
+                          type: string
+                          format: email
+                          example: "user@example.com"
+                        credential_count:
+                          type: integer
+                          example: 2
+                        mailbox_count:
+                          type: integer
+                          example: 5
+                        message_count:
+                          type: integer
+                          format: int64
+                          example: 1234
+                        created_at:
+                          type: string
+                          example: "2023-01-01 12:00:00"
+                  total:
+                    type: integer
+                    example: 15
+              examples:
+                success:
+                  summary: Successful response
+                  value:
+                    domain: "example.com"
+                    accounts:
+                      - account_id: 123
+                        primary_email: "alice@example.com"
+                        credential_count: 2
+                        mailbox_count: 5
+                        message_count: 1234
+                        created_at: "2023-01-01 12:00:00"
+                      - account_id: 124
+                        primary_email: "bob@example.com"
+                        credential_count: 1
+                        mailbox_count: 3
+                        message_count: 567
+                        created_at: "2023-01-02 14:30:00"
+                    total: 2
+                empty:
+                  summary: No accounts found
+                  value:
+                    domain: "example.com"
+                    accounts: []
+                    total: 0
+        '400':
+          description: Invalid domain parameter.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /accounts:
     post:
       tags:

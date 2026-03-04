@@ -151,11 +151,12 @@ Examples:
 func handleListAccounts(ctx context.Context) {
 	// Parse list-accounts specific flags
 	fs := flag.NewFlagSet("accounts list", flag.ExitOnError)
+	domain := fs.String("domain", "", "Domain to list accounts for (e.g., example.com) (required)")
 
 	fs.Usage = func() {
-		fmt.Printf(`List all accounts in the system
+		fmt.Printf(`List accounts for a specific domain
 
-This command displays a summary of all accounts including:
+This command displays a summary of all accounts for the specified domain including:
 - Account ID and primary email address
 - Number of credentials (aliases) per account
 - Number of mailboxes per account
@@ -163,14 +164,15 @@ This command displays a summary of all accounts including:
 - Account creation date
 
 Usage:
-  sora-admin list-accounts [options]
+  sora-admin accounts list --domain <domain> [options]
 
 Options:
   --config string        Path to TOML configuration file (required)
+  --domain string        Domain to list accounts for (e.g., example.com) (required)
 
 Examples:
-  sora-admin list-accounts
-  sora-admin list-accounts --config /path/to/config.toml
+  sora-admin accounts list --domain example.com
+  sora-admin accounts list --domain example.com --config /path/to/config.toml
 `)
 	}
 
@@ -180,9 +182,14 @@ Examples:
 	}
 
 	// Validate required arguments
+	if *domain == "" {
+		fmt.Printf("Error: --domain is required\n\n")
+		fs.Usage()
+		os.Exit(1)
+	}
 
 	// List accounts
-	if err := listAccounts(ctx, globalConfig); err != nil {
+	if err := listAccounts(ctx, globalConfig, *domain); err != nil {
 		logger.Fatalf("Failed to list accounts: %v", err)
 	}
 }
@@ -508,7 +515,7 @@ Usage:
 
 Subcommands:
   create        Create a new account
-  list          List all accounts in the system
+  list          List accounts for a specific domain
   show          Show detailed information for a specific account
   update        Update an existing account's password
   delete        Delete an account (soft delete with grace period, or hard delete with --purge)
@@ -517,7 +524,7 @@ Subcommands:
 
 Examples:
   sora-admin accounts create --email user@example.com --password mypassword
-  sora-admin accounts list
+  sora-admin accounts list --domain example.com
   sora-admin accounts show --email user@example.com
   sora-admin accounts update --email user@example.com --password newpassword
   sora-admin accounts delete --email user@example.com --confirm
@@ -605,7 +612,7 @@ func createAccountWithCredentials(ctx context.Context, cfg AdminConfig, credenti
 	return nil
 }
 
-func listAccounts(ctx context.Context, cfg AdminConfig) error {
+func listAccounts(ctx context.Context, cfg AdminConfig, domain string) error {
 
 	// Connect to resilient database (skip read replicas for CLI)
 	rdb, err := newAdminDatabase(ctx, &cfg.Database)
@@ -614,18 +621,18 @@ func listAccounts(ctx context.Context, cfg AdminConfig) error {
 	}
 	defer rdb.Close()
 
-	// List accounts using the database function
-	accounts, err := rdb.ListAccountsWithRetry(ctx)
+	// List accounts for the specified domain
+	accounts, err := rdb.ListAccountsByDomainWithRetry(ctx, domain)
 	if err != nil {
 		return err
 	}
 
 	if len(accounts) == 0 {
-		fmt.Println("No accounts found in the system.")
+		fmt.Printf("No accounts found for domain: %s\n", domain)
 		return nil
 	}
 
-	fmt.Printf("Found %d account(s):\n\n", len(accounts))
+	fmt.Printf("Found %d account(s) for domain %s:\n\n", len(accounts), domain)
 
 	// Print header
 	fmt.Printf("%-8s %-30s %-10s %-10s %-12s %-20s\n",

@@ -788,6 +788,56 @@ func (db *Database) ListAccounts(ctx context.Context) ([]AccountSummary, error) 
 	return accounts, nil
 }
 
+// ListAccountsByDomain returns a summary of all accounts for a specific domain
+func (db *Database) ListAccountsByDomain(ctx context.Context, domain string) ([]AccountSummary, error) {
+	query := `
+		WITH account_stats AS (
+			SELECT mb.account_id,
+				   COUNT(mb.id) as mailbox_count,
+				   COALESCE(SUM(ms.message_count), 0) as message_count
+			FROM mailboxes mb
+			LEFT JOIN mailbox_stats ms ON mb.id = ms.mailbox_id
+			GROUP BY mb.account_id
+		)
+		SELECT a.id,
+			   a.created_at,
+			   COALESCE(pc.address, '') AS primary_email,
+			   (SELECT COUNT(*) FROM credentials WHERE account_id = a.id) AS credential_count,
+			   COALESCE(s.mailbox_count, 0),
+			   COALESCE(s.message_count, 0)
+		FROM accounts a
+		LEFT JOIN credentials pc ON a.id = pc.account_id AND pc.primary_identity = TRUE
+		LEFT JOIN account_stats s ON a.id = s.account_id
+		WHERE a.deleted_at IS NULL
+		  AND LOWER(pc.address) LIKE '%' || '@' || LOWER($1)
+		ORDER BY a.created_at DESC`
+
+	rows, err := db.GetReadPool().Query(ctx, query, domain)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list accounts by domain: %w", err)
+	}
+	defer rows.Close()
+
+	var accounts []AccountSummary
+	for rows.Next() {
+		var account AccountSummary
+		var createdAt any
+		err := rows.Scan(&account.AccountID, &createdAt, &account.PrimaryEmail,
+			&account.CredentialCount, &account.MailboxCount, &account.MessageCount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan account: %w", err)
+		}
+		account.CreatedAt = fmt.Sprintf("%v", createdAt)
+		accounts = append(accounts, account)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating accounts: %w", err)
+	}
+
+	return accounts, nil
+}
+
 // CredentialSpec represents a credential specification for account creation
 type CredentialSpec struct {
 	Email        string `json:"email"`

@@ -297,11 +297,11 @@ func (s *Server) setupRoutes() http.Handler {
 	mux := http.NewServeMux()
 
 	// Account management routes
-	mux.HandleFunc("/admin/accounts", multiMethodHandler(map[string]http.HandlerFunc{
-		"GET":  s.handleListAccounts,
-		"POST": s.handleCreateAccount,
-	}))
+	mux.HandleFunc("/admin/accounts", routeHandler("POST", s.handleCreateAccount))
 	mux.HandleFunc("/admin/accounts/", s.handleAccountOperations)
+
+	// Domain-scoped account management routes
+	mux.HandleFunc("/admin/domains/", s.handleDomainOperations)
 
 	// Credential management routes
 	mux.HandleFunc("/admin/credentials/", s.handleCredentialOperations)
@@ -432,6 +432,24 @@ func (s *Server) handleCredentialOperations(w http.ResponseWriter, r *http.Reque
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleDomainOperations routes domain-scoped operations
+func (s *Server) handleDomainOperations(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+
+	// Check for /admin/domains/{domain}/accounts
+	if strings.Contains(path, "/accounts") {
+		if r.Method != "GET" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleListAccountsByDomain(w, r)
+		return
+	}
+
+	// Unknown domain operation
+	http.Error(w, "Not found", http.StatusNotFound)
 }
 
 // handleHealthOperations routes health monitoring operations
@@ -726,17 +744,31 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListAccountsByDomain(w http.ResponseWriter, r *http.Request) {
+	// Extract domain from path: /admin/domains/{domain}/accounts
+	domain := extractPathParam(r.URL.Path, "/admin/domains/", "/accounts")
 	ctx := r.Context()
 
-	accounts, err := s.rdb.ListAccountsWithRetry(ctx)
-	if err != nil {
-		logger.Warn("HTTP API: Error listing accounts", "name", s.name, "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Error listing accounts")
+	if domain == "" {
+		s.writeError(w, http.StatusBadRequest, "Domain is required")
 		return
 	}
 
+	summaries, err := s.rdb.ListAccountsByDomainWithRetry(ctx, domain)
+	if err != nil {
+		logger.Warn("HTTP API: Error listing accounts by domain", "name", s.name, "domain", domain, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Error listing accounts by domain")
+		return
+	}
+
+	// Convert []AccountSummary to []*AccountSummary for consistent response format
+	accounts := make([]*db.AccountSummary, len(summaries))
+	for i := range summaries {
+		accounts[i] = &summaries[i]
+	}
+
 	s.writeJSON(w, http.StatusOK, map[string]any{
+		"domain":   domain,
 		"accounts": accounts,
 		"total":    len(accounts),
 	})
@@ -1842,7 +1874,6 @@ func (s *Server) handleConfigInfo(w http.ResponseWriter, r *http.Request) {
 		"endpoints": map[string][]string{
 			"account_management": {
 				"POST /admin/accounts",
-				"GET /admin/accounts",
 				"GET /admin/accounts/{email}",
 				"PUT /admin/accounts/{email}",
 				"DELETE /admin/accounts/{email}",
@@ -1850,6 +1881,9 @@ func (s *Server) handleConfigInfo(w http.ResponseWriter, r *http.Request) {
 				"GET /admin/accounts/{email}/exists",
 				"POST /admin/accounts/{email}/credentials",
 				"GET /admin/accounts/{email}/credentials",
+			},
+			"domain_management": {
+				"GET /admin/domains/{domain}/accounts (list accounts scoped to domain)",
 			},
 			"credential_management": {
 				"GET /admin/credentials/{email}",

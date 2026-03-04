@@ -265,14 +265,19 @@ func TestAccountCRUD(t *testing.T) {
 		t.Errorf("Expected success message, got %v", result["message"])
 	}
 
-	// 5. List accounts
-	resp, body = server.makeRequest(t, "GET", "/admin/accounts", nil)
+	// 5. List accounts by domain
+	resp, body = server.makeRequest(t, "GET", "/admin/domains/example.com/accounts", nil)
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status %d, got %d. Body: %s", http.StatusOK, resp.StatusCode, string(body))
 	}
 
 	server.expectJSON(t, body, &result)
+
+	// Check domain field
+	if result["domain"] != "example.com" {
+		t.Errorf("Expected domain 'example.com', got %v", result["domain"])
+	}
 
 	accounts, ok := result["accounts"].([]any)
 	if !ok {
