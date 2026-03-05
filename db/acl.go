@@ -133,7 +133,7 @@ func (db *Database) GrantMailboxAccessByIdentifier(ctx context.Context, ownerAcc
 	`, identifier).Scan(&granteeAccountID, &granteeDomain)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return fmt.Errorf("user %s not found", identifier)
+			return fmt.Errorf("%w: user %s not found", consts.ErrUserNotFound, identifier)
 		}
 		return fmt.Errorf("failed to get grantee info: %w", err)
 	}
@@ -171,7 +171,7 @@ func (db *Database) RevokeMailboxAccessByIdentifier(ctx context.Context, mailbox
 	}
 
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("ACL entry not found for identifier %s", identifier)
+		return fmt.Errorf("%w: ACL entry not found for identifier %s", consts.ErrDBNotFound, identifier)
 	}
 
 	return nil

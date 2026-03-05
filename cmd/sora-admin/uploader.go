@@ -153,7 +153,7 @@ func resolveFailedUploads(ctx context.Context, cfg AdminConfig, dryRun bool, lim
 	}
 
 	if dryRun {
-		fmt.Println("DRY RUN — no changes will be made.\n")
+		fmt.Println("DRY RUN — no changes will be made.")
 	}
 
 	var resolved, deleted, skipped int

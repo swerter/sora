@@ -260,6 +260,32 @@ type BackendHealthInfo struct {
 	IsRemoteLookup     bool      `json:"is_remote_lookup"` // True if backend from remote_lookup (not in pool)
 }
 
+// HasHealthyPoolBackends checks if at least one pool backend (from remote_addrs config) is healthy.
+// This is used to determine if the proxy can route messages to backends.
+// Returns true if health checks are disabled (assume healthy) or if any backend is healthy.
+func (cm *ConnectionManager) HasHealthyPoolBackends() bool {
+	// If health checks are disabled, all backends are healthy
+	if !cm.enableBackendHealthCheck {
+		return true
+	}
+
+	cm.healthMu.RLock()
+	defer cm.healthMu.RUnlock()
+
+	// Check if any pool backend is healthy
+	for _, health := range cm.backendHealth {
+		if health.IsHealthy {
+			return true
+		}
+		// Also check auto-recovery (1 minute since last failure)
+		if time.Since(health.LastFailure) > 1*time.Minute {
+			return true
+		}
+	}
+
+	return false
+}
+
 // GetBackendHealthStatuses returns health information for all backends (pool + remote lookup)
 func (cm *ConnectionManager) GetBackendHealthStatuses() []BackendHealthInfo {
 	cm.healthMu.RLock()

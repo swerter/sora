@@ -7,6 +7,7 @@ var (
 	ErrMailboxInvalidName   = errors.New("invalid mailbox name")
 	ErrMailboxAlreadyExists = errors.New("mailbox already exists")
 	ErrUserNotFound         = errors.New("user not found")
+	ErrAccountAlreadyExists = errors.New("account already exists")
 	ErrInternalError        = errors.New("internal error")
 	ErrNotPermitted         = errors.New("operation not permitted")
 	ErrMessageExists        = errors.New("message already exists")

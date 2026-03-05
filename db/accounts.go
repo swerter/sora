@@ -46,7 +46,7 @@ func (db *Database) CreateAccount(ctx context.Context, tx pgx.Tx, req CreateAcco
 		if deletedAt != nil {
 			return fmt.Errorf("cannot create account with email %s: an account with this email is in deletion grace period", normalizedEmail)
 		}
-		return fmt.Errorf("account with email %s already exists", normalizedEmail)
+		return fmt.Errorf("%w: account with email %s already exists", consts.ErrAccountAlreadyExists, normalizedEmail)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("error checking for existing account: %w", err)
 	}
@@ -207,7 +207,7 @@ func (db *Database) UpdateAccount(ctx context.Context, tx pgx.Tx, req UpdateAcco
 	accountID, err := db.getAccountIDByAddressInTx(ctx, tx, normalizedEmail)
 	if err != nil {
 		if err == consts.ErrUserNotFound {
-			return fmt.Errorf("account with email %s does not exist", normalizedEmail)
+			return fmt.Errorf("%w: account with email %s does not exist", consts.ErrUserNotFound, normalizedEmail)
 		}
 		return fmt.Errorf("error checking account: %w", err)
 	}
@@ -927,7 +927,7 @@ func (db *Database) CreateAccountWithCredentials(ctx context.Context, tx pgx.Tx,
 			if deletedAt != nil {
 				return 0, fmt.Errorf("credential %d: cannot create account with email %s: an account with this email is in deletion grace period", i+1, email)
 			}
-			return 0, fmt.Errorf("credential %d: account with email %s already exists", i+1, email)
+			return 0, fmt.Errorf("%w: credential %d: account with email %s already exists", consts.ErrAccountAlreadyExists, i+1, email)
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return 0, fmt.Errorf("credential %d: error checking for existing account: %w", i+1, err)
 		}

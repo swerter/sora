@@ -201,22 +201,26 @@ func (d *Database) PruneOldMessageBodies(ctx context.Context, tx pgx.Tx, retenti
 	// This is safe within the transaction timeout constraints
 	const batchSize = 100
 
+	// NOT EXISTS with a correlated index probe: for each of the (small) batch of
+	// message_contents rows, PostgreSQL does a single B-tree lookup on
+	// idx_messages_content_hash_active_sent_date — a nested-loop anti-join.
+	// This avoids building a hash table of all live messages, which could spill
+	// to disk (temp files) when work_mem is small and the messages table is large.
+	// LIMIT is placed inside the CTE so it applies after the NOT EXISTS check,
+	// ensuring every batch is filled with truly prunable rows.
 	query := `
-		WITH candidates AS (
-			SELECT content_hash
-			FROM message_contents
-			WHERE text_body IS NOT NULL OR headers != ''
-			LIMIT $2
-		),
-		prunable AS (
-			SELECT c.content_hash
-			FROM candidates c
-			WHERE NOT EXISTS (
+		WITH prunable AS (
+			SELECT mc.content_hash
+			FROM message_contents mc
+			WHERE (mc.text_body IS NOT NULL OR mc.headers != '')
+			  AND NOT EXISTS (
 				SELECT 1 FROM messages m
-				WHERE m.content_hash = c.content_hash
+				WHERE m.content_hash = mc.content_hash
 				  AND m.expunged_at IS NULL
 				  AND m.sent_date >= (now() - $1::interval)
-			)
+			  )
+			ORDER BY mc.content_hash
+			LIMIT $2
 		)
 		UPDATE message_contents mc
 		SET
@@ -254,23 +258,26 @@ func (d *Database) PruneOldMessageBodiesBatched(ctx context.Context, retention t
 			return totalPruned, fmt.Errorf("failed to begin transaction for batch %d: %w", batch, err)
 		}
 
-		// Process one batch
+		// NOT EXISTS with a correlated index probe: for each of the (small) batch of
+		// message_contents rows, PostgreSQL does a single B-tree lookup on
+		// idx_messages_content_hash_active_sent_date — a nested-loop anti-join.
+		// This avoids building a hash table of all live messages, which could spill
+		// to disk (temp files) when work_mem is small and the messages table is large.
+		// LIMIT is placed inside the CTE so it applies after the NOT EXISTS check,
+		// ensuring every batch is filled with truly prunable rows.
 		query := `
-			WITH candidates AS (
-				SELECT content_hash
-				FROM message_contents
-				WHERE text_body IS NOT NULL OR headers != ''
-				LIMIT $2
-			),
-			prunable AS (
-				SELECT c.content_hash
-				FROM candidates c
-				WHERE NOT EXISTS (
+			WITH prunable AS (
+				SELECT mc.content_hash
+				FROM message_contents mc
+				WHERE (mc.text_body IS NOT NULL OR mc.headers != '')
+				  AND NOT EXISTS (
 					SELECT 1 FROM messages m
-					WHERE m.content_hash = c.content_hash
+					WHERE m.content_hash = mc.content_hash
 					  AND m.expunged_at IS NULL
 					  AND m.sent_date >= (now() - $1::interval)
-				)
+				  )
+				ORDER BY mc.content_hash
+				LIMIT $2
 			)
 			UPDATE message_contents mc
 			SET
@@ -315,22 +322,26 @@ func (d *Database) PruneOldMessageBodiesBatched(ctx context.Context, retention t
 func (d *Database) PruneOldMessageVectors(ctx context.Context, tx pgx.Tx, retention time.Duration) (int64, error) {
 	const batchSize = 100
 
+	// NOT EXISTS with a correlated index probe: for each of the (small) batch of
+	// message_contents rows, PostgreSQL does a single B-tree lookup on
+	// idx_messages_content_hash_active_sent_date — a nested-loop anti-join.
+	// This avoids building a hash table of all live messages, which could spill
+	// to disk (temp files) when work_mem is small and the messages table is large.
+	// LIMIT is placed inside the CTE so it applies after the NOT EXISTS check,
+	// ensuring every batch is filled with truly prunable rows.
 	query := `
-		WITH candidates AS (
-			SELECT content_hash
-			FROM message_contents
-			WHERE text_body_tsv IS NOT NULL OR headers_tsv IS NOT NULL
-			LIMIT $2
-		),
-		prunable AS (
-			SELECT c.content_hash
-			FROM candidates c
-			WHERE NOT EXISTS (
+		WITH prunable AS (
+			SELECT mc.content_hash
+			FROM message_contents mc
+			WHERE (mc.text_body_tsv IS NOT NULL OR mc.headers_tsv IS NOT NULL)
+			  AND NOT EXISTS (
 				SELECT 1 FROM messages m
-				WHERE m.content_hash = c.content_hash
+				WHERE m.content_hash = mc.content_hash
 				  AND m.expunged_at IS NULL
 				  AND m.sent_date >= (now() - $1::interval)
-			)
+			  )
+			ORDER BY mc.content_hash
+			LIMIT $2
 		)
 		UPDATE message_contents mc
 		SET
@@ -368,23 +379,26 @@ func (d *Database) PruneOldMessageVectorsBatched(ctx context.Context, retention 
 			return totalPruned, fmt.Errorf("failed to begin transaction for batch %d: %w", batch, err)
 		}
 
-		// Process one batch
+		// NOT EXISTS with a correlated index probe: for each of the (small) batch of
+		// message_contents rows, PostgreSQL does a single B-tree lookup on
+		// idx_messages_content_hash_active_sent_date — a nested-loop anti-join.
+		// This avoids building a hash table of all live messages, which could spill
+		// to disk (temp files) when work_mem is small and the messages table is large.
+		// LIMIT is placed inside the CTE so it applies after the NOT EXISTS check,
+		// ensuring every batch is filled with truly prunable rows.
 		query := `
-			WITH candidates AS (
-				SELECT content_hash
-				FROM message_contents
-				WHERE text_body_tsv IS NOT NULL OR headers_tsv IS NOT NULL
-				LIMIT $2
-			),
-			prunable AS (
-				SELECT c.content_hash
-				FROM candidates c
-				WHERE NOT EXISTS (
+			WITH prunable AS (
+				SELECT mc.content_hash
+				FROM message_contents mc
+				WHERE (mc.text_body_tsv IS NOT NULL OR mc.headers_tsv IS NOT NULL)
+				  AND NOT EXISTS (
 					SELECT 1 FROM messages m
-					WHERE m.content_hash = c.content_hash
+					WHERE m.content_hash = mc.content_hash
 					  AND m.expunged_at IS NULL
 					  AND m.sent_date >= (now() - $1::interval)
-				)
+				  )
+				ORDER BY mc.content_hash
+				LIMIT $2
 			)
 			UPDATE message_contents mc
 			SET

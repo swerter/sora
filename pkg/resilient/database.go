@@ -174,11 +174,23 @@ func NewResilientDatabase(ctx context.Context, config *config.DatabaseConfig, en
 func NewResilientDatabaseWithOptions(ctx context.Context, config *config.DatabaseConfig, enableHealthCheck bool, runMigrations bool, skipReadReplicas bool) (*ResilientDatabase, error) {
 	// Create circuit breakers
 	querySettings := circuitbreaker.DefaultSettings("database_query")
-	querySettings.MaxRequests = 5
+	querySettings.MaxRequests = 10 // Allow more test requests in half-open state for faster recovery
 	querySettings.Interval = 15 * time.Second
 	querySettings.Timeout = 45 * time.Second
 	querySettings.ReadyToTrip = func(counts circuitbreaker.Counts) bool {
 		failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+
+		// In half-open state, if we've used all allowed requests and majority failed, trip immediately
+		// This prevents deadlock where circuit stays half-open forever
+		if counts.Requests >= querySettings.MaxRequests && failureRatio >= 0.6 {
+			logger.Warn("Query circuit breaker ready to trip (half-open exhausted)", "component", "RESILIENT-FAILOVER",
+				"requests", counts.Requests, "failures", counts.TotalFailures,
+				"failure_ratio", fmt.Sprintf("%.2f%%", failureRatio*100),
+				"max_requests", querySettings.MaxRequests)
+			return true
+		}
+
+		// In normal operation, require at least 8 requests to establish a pattern
 		shouldTrip := counts.Requests >= 8 && failureRatio >= 0.6
 		if shouldTrip {
 			logger.Warn("Query circuit breaker ready to trip", "component", "RESILIENT-FAILOVER",
@@ -202,7 +214,9 @@ func NewResilientDatabaseWithOptions(ctx context.Context, config *config.Databas
 			errors.Is(err, consts.ErrMailboxNotFound) ||
 			errors.Is(err, consts.ErrMessageNotAvailable) ||
 			errors.Is(err, consts.ErrMailboxAlreadyExists) ||
+			errors.Is(err, consts.ErrAccountAlreadyExists) ||
 			errors.Is(err, consts.ErrNotPermitted) ||
+			errors.Is(err, consts.ErrDBNotFound) ||
 			errors.Is(err, consts.ErrMessageExists) ||
 			errors.Is(err, pgx.ErrNoRows) {
 			return true // Treat as success - these are expected application errors
@@ -211,11 +225,23 @@ func NewResilientDatabaseWithOptions(ctx context.Context, config *config.Databas
 	}
 
 	writeSettings := circuitbreaker.DefaultSettings("database_write")
-	writeSettings.MaxRequests = 3
+	writeSettings.MaxRequests = 10 // Allow more test requests in half-open state for faster recovery
 	writeSettings.Interval = 10 * time.Second
 	writeSettings.Timeout = 30 * time.Second
 	writeSettings.ReadyToTrip = func(counts circuitbreaker.Counts) bool {
 		failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+
+		// In half-open state, if we've used all allowed requests and majority failed, trip immediately
+		// This prevents deadlock where circuit stays half-open forever
+		if counts.Requests >= writeSettings.MaxRequests && failureRatio >= 0.5 {
+			logger.Warn("Write circuit breaker ready to trip (half-open exhausted)", "component", "RESILIENT-FAILOVER",
+				"requests", counts.Requests, "failures", counts.TotalFailures,
+				"failure_ratio", fmt.Sprintf("%.2f%%", failureRatio*100),
+				"max_requests", writeSettings.MaxRequests)
+			return true
+		}
+
+		// In normal operation, require at least 5 requests to establish a pattern
 		shouldTrip := counts.Requests >= 5 && failureRatio >= 0.5
 		if shouldTrip {
 			logger.Warn("Write circuit breaker ready to trip", "component", "RESILIENT-FAILOVER",
@@ -239,7 +265,9 @@ func NewResilientDatabaseWithOptions(ctx context.Context, config *config.Databas
 			errors.Is(err, consts.ErrMailboxNotFound) ||
 			errors.Is(err, consts.ErrMessageNotAvailable) ||
 			errors.Is(err, consts.ErrMailboxAlreadyExists) ||
+			errors.Is(err, consts.ErrAccountAlreadyExists) ||
 			errors.Is(err, consts.ErrNotPermitted) ||
+			errors.Is(err, consts.ErrDBNotFound) ||
 			errors.Is(err, consts.ErrDBUniqueViolation) ||
 			errors.Is(err, consts.ErrMessageExists) ||
 			errors.Is(err, pgx.ErrNoRows) {

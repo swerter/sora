@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/pkg/lookupcache"
 	"github.com/migadu/sora/pkg/metrics"
 	"github.com/migadu/sora/server"
@@ -268,6 +269,15 @@ func (s *Session) handleConnection() {
 						"recipient", to,
 						"response", "450 4.1.1")
 					s.sendResponse("450 4.1.1 User unknown (temporary failure)")
+					continue
+				}
+				// Check if recipient address is syntactically invalid (permanent failure)
+				if errors.Is(err, server.ErrInvalidAddress) {
+					s.InfoLog("rejecting recipient - invalid address syntax",
+						"recipient", to,
+						"error", err.Error(),
+						"response", "550 5.1.3")
+					s.sendResponse("550 5.1.3 Bad destination mailbox address syntax")
 					continue
 				}
 				// Unknown/unexpected error - use temporary failure to be safe
@@ -639,7 +649,10 @@ func (s *Session) extractAddress(param string) string {
 func (s *Session) handleRecipient(to string, lookupStart time.Time) error {
 	address, err := server.NewAddress(to)
 	if err != nil {
-		return fmt.Errorf("invalid address format: %w", err)
+		s.InfoLog("rejecting recipient - invalid address format",
+			"recipient", to,
+			"error", err.Error())
+		return fmt.Errorf("%w: %w", server.ErrInvalidAddress, err)
 	}
 
 	s.to = to
@@ -844,8 +857,10 @@ func (s *Session) handleRecipient(to string, lookupStart time.Time) error {
 	dbCtx, dbCancel := context.WithTimeout(s.ctx, queryTimeout)
 	defer dbCancel()
 
-	row := s.server.rdb.QueryRowWithRetry(dbCtx, "SELECT c.account_id FROM credentials c JOIN accounts a ON c.account_id = a.id WHERE c.address = $1 AND a.deleted_at IS NULL", s.username)
-	if err := row.Scan(&s.accountID); err != nil {
+	// Use GetActiveAccountIDByAddressWithRetry which properly handles ErrUserNotFound
+	// as a business logic error (not a circuit breaker failure)
+	accountID, err := s.server.rdb.GetActiveAccountIDByAddressWithRetry(dbCtx, s.username)
+	if err != nil {
 		// Check if error is due to session context cancellation (server shutdown)
 		// Note: Must check s.ctx.Err(), not just the query error, because the query context
 		// can timeout (DeadlineExceeded) independently from server shutdown
@@ -854,25 +869,46 @@ func (s *Session) handleRecipient(to string, lookupStart time.Time) error {
 			return server.ErrServerShuttingDown
 		}
 
-		// Cache negative result (user not found)
-		// We reached here so user is not in remotelookup (if enabled) AND not in DB.
-		s.server.lookupCache.Set(s.server.name, originalAddress, &lookupcache.CacheEntry{
-			Result:     lookupcache.AuthUserNotFound,
-			IsNegative: true,
-		})
+		// Check if user was not found (business logic error, not a system failure)
+		if errors.Is(err, consts.ErrUserNotFound) {
+			// IMPORTANT: Before permanently rejecting (550), check if backends are healthy.
+			// If all backends are down, we can't verify if user exists on backends, so return tempfail.
+			// This prevents wrongly bouncing messages when:
+			//  - Proxy has a separate/lagging database instance
+			//  - User exists on backends but not on proxy's database
+			//  - Backends are temporarily unavailable
+			if !s.server.connManager.HasHealthyPoolBackends() {
+				s.WarnLog("user not found in proxy database, but all backends unhealthy - returning tempfail to allow retry",
+					"address", s.username)
+				return server.ErrUserNotFoundTempFail
+			}
 
-		// Single consolidated log for lookup failure
-		duration := time.Since(lookupStart)
-		s.InfoLog("account lookup failed",
-			"address", s.username,
-			"reason", "user_not_found",
-			"cached", false,
-			"method", "main_db",
-			"negative_cache_skipped", false,
-			"duration", fmt.Sprintf("%.3fs", duration.Seconds()))
+			// Cache negative result (user not found)
+			// We reached here so user is not in remotelookup (if enabled) AND not in DB.
+			s.server.lookupCache.Set(s.server.name, originalAddress, &lookupcache.CacheEntry{
+				Result:     lookupcache.AuthUserNotFound,
+				IsNegative: true,
+			})
 
-		return server.ErrUserNotFound
+			// Single consolidated log for lookup failure
+			duration := time.Since(lookupStart)
+			s.InfoLog("account lookup failed",
+				"address", s.username,
+				"reason", "user_not_found",
+				"cached", false,
+				"method", "main_db",
+				"negative_cache_skipped", false,
+				"duration", fmt.Sprintf("%.3fs", duration.Seconds()))
+
+			return server.ErrUserNotFound
+		}
+
+		// Other database errors (timeouts, connection failures, etc.)
+		s.WarnLog("database lookup error", "address", s.username, "error", err)
+		return fmt.Errorf("database lookup error: %w", err)
 	}
+
+	s.accountID = accountID
 
 	// Set routing info so connectToBackend doesn't call remotelookup again
 	// Preserve global proxy settings (XCLIENT support) since we're not using remotelookup routing
