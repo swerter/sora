@@ -266,7 +266,8 @@ func scanMessages(rows pgx.Rows) ([]Message, error) {
 			if bs, err := helpers.DeserializeBodyStructureGob(bodyStructureBytes); err == nil {
 				// Validate the deserialized structure (e.g., multipart with no children)
 				if validateErr := helpers.ValidateBodyStructure(bs); validateErr != nil {
-					log.Printf("Database: WARNING - UID %d has invalid body_structure (%v), using default", msg.UID, validateErr)
+					log.Printf("Database: WARNING - account_id=%d mailbox_id=%d UID=%d has invalid body_structure (%v), using default",
+						msg.AccountID, msg.MailboxID, msg.UID, validateErr)
 					bodyStructure = nil // Force fallback
 				} else {
 					bodyStructure = bs
@@ -276,7 +277,8 @@ func scanMessages(rows pgx.Rows) ([]Message, error) {
 
 		// If deserialization failed, validation failed, or data was empty, create a safe default
 		if bodyStructure == nil {
-			log.Printf("Database: WARNING - UID %d has invalid or empty body_structure, using default", msg.UID)
+			log.Printf("Database: WARNING - account_id=%d mailbox_id=%d UID=%d has invalid or empty body_structure, using default",
+				msg.AccountID, msg.MailboxID, msg.UID)
 			defaultBS := &imap.BodyStructureSinglePart{
 				Type:    "text",
 				Subtype: "plain",
