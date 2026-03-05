@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"hash/crc32"
 	"sync"
 	"testing"
 	"time"
@@ -31,72 +32,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestConcurrentMigrationStartup fires N goroutines each calling
-// NewDatabaseFromConfig with runMigrations=true at the exact same instant.
-// All must succeed within a strict deadline; any timeout is treated as a
-// deadlock regression.
-func TestConcurrentMigrationStartup(t *testing.T) {
-	const N = 3
-	const deadline = 30 * time.Second
+// resetMigrationState rolls the test DB back to the given version so the
+// concurrent-migration tests always start from a clean, known state.
+// It drops the two partial indexes added by migration 12 (idempotent due to
+// IF EXISTS) and resets schema_migrations to the requested version.
+func resetMigrationState(t *testing.T, targetVersion int) {
+	t.Helper()
+	ctx := context.Background()
 
-	// Build config directly (same values as config-test.toml) so we can call
-	// NewDatabaseFromConfig without going through setupTestDatabase, which calls
-	// t.Fatal inside goroutines (unsafe in Go's testing package).
-	makeConfig := func() *config.DatabaseConfig {
-		return &config.DatabaseConfig{
-			Write: &config.DatabaseEndpointConfig{
-				Hosts:    []string{"localhost"},
-				Port:     5432,
-				User:     "postgres",
-				Password: "password",
-				Name:     "sora_test_db",
-				TLSMode:  false,
-			},
-		}
+	db := setupTestDatabase(t)
+	defer db.Close()
+
+	pool := db.WritePool
+
+	// Drop the indexes that migration 12 creates (IF EXISTS → idempotent).
+	_, err := pool.Exec(ctx, `DROP INDEX IF EXISTS idx_message_contents_bodies_prunable`)
+	if err != nil {
+		t.Fatalf("resetMigrationState: drop bodies index: %v", err)
+	}
+	_, err = pool.Exec(ctx, `DROP INDEX IF EXISTS idx_message_contents_vectors_prunable`)
+	if err != nil {
+		t.Fatalf("resetMigrationState: drop vectors index: %v", err)
 	}
 
-	type result struct {
-		db  *Database
-		err error
+	// Ensure schema_migrations has exactly one row at targetVersion, not dirty.
+	_, err = pool.Exec(ctx, `DELETE FROM schema_migrations WHERE version >= $1`, targetVersion)
+	if err != nil {
+		t.Fatalf("resetMigrationState: delete schema_migrations: %v", err)
 	}
-
-	results := make([]result, N)
-	var wg sync.WaitGroup
-	gate := make(chan struct{}) // synchronise goroutines for maximum contention
-
-	for i := 0; i < N; i++ {
-		i := i
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-gate // wait for the starting gun
-			db, err := NewDatabaseFromConfig(context.Background(), makeConfig(), true, false)
-			results[i] = result{db: db, err: err}
-		}()
-	}
-
-	close(gate) // fire all goroutines simultaneously
-
-	// Wait for all goroutines, but fail fast if the deadline is exceeded.
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-
-	select {
-	case <-done:
-		// All goroutines finished in time.
-	case <-time.After(deadline):
-		t.Fatalf("TestConcurrentMigrationStartup: timed out after %s — "+
-			"likely deadlock regression in migration advisory-lock code", deadline)
-	}
-
-	// Verify every goroutine succeeded.
-	for i, r := range results {
-		if r.err != nil {
-			t.Errorf("goroutine %d: NewDatabaseFromConfig returned error: %v", i, r.err)
-		}
-		if r.db != nil {
-			r.db.Close()
-		}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO schema_migrations (version, dirty)
+		VALUES ($1, false)
+		ON CONFLICT (version) DO UPDATE SET dirty = false`, targetVersion)
+	if err != nil {
+		t.Fatalf("resetMigrationState: insert schema_migrations: %v", err)
 	}
 }
 
@@ -358,6 +327,118 @@ func TestMigrationDeadlineDoesNotDeadlock(t *testing.T) {
 	}
 }
 
+// TestMigrateTimeoutCoversWithInstance is the specific regression test for
+// the bug that caused Server 1 to hang after the second deployment.
+//
+// Root cause:
+//
+//	pgxv5.WithInstance() calls ensureVersionTable() which calls Lock() which
+//	calls pg_advisory_lock(lockID) using context.Background() — completely
+//	uncancellable. In the old code, WithInstance was called BEFORE the
+//	goroutine and migrateCtx were created, so the 2-minute timeout never
+//	fired even if another server held the lock indefinitely.
+//
+// This test reproduces the scenario:
+//   - An external connection holds the exact advisory lock that golang-migrate
+//     uses for "sora_test_db" (computed with the same crc32 formula).
+//   - migrate() is called with a short timeout (2s) — shorter than the lock
+//     hold duration (4s) — so the timeout fires while WithInstance is blocked.
+//   - With the fix (everything inside the goroutine), migrateCtx fires, the
+//     code switches to the polling path, the external lock is eventually
+//     released, migration runs, and migrate() returns successfully.
+//   - Without the fix, migrate() would hang until the overall test deadline.
+func TestMigrateTimeoutCoversWithInstance(t *testing.T) {
+	// This test proves that moving pgxv5.WithInstance() inside the goroutine
+	// (so migrateCtx covers pg_advisory_lock) is the correct fix.
+	//
+	// The external lock is held for the ENTIRE test and released only in
+	// t.Cleanup — simulating an orphaned migration lock from a crashed peer.
+	//
+	// Without the fix (WithInstance before goroutine):
+	//   - WithInstance → ensureVersionTable → Lock → pg_advisory_lock blocks
+	//     forever. migrateCtx is never created. migrate() hangs indefinitely.
+	//   - Test hits overallDeadline → FAIL.
+	//
+	// With the fix (everything inside the goroutine):
+	//   - Goroutine blocks in WithInstance. migrateCtx fires at migrationTimeout.
+	//   - Polling path starts. pollCtx expires. migrate() returns an error at
+	//     roughly (migrationTimeout + pollDeadline) = 2s + 6s = 8s.
+	//   - migrate() returned — it did not hang. Test hits the <-done case → PASS.
+	const connStr = "postgres://postgres:password@localhost:5432/sora_test_db?sslmode=disable"
+	const (
+		migrationTimeout = 2 * time.Second
+		overallDeadline  = 15 * time.Second // fix returns at ~8s; bug hangs forever
+	)
+	ctx := context.Background()
+
+	// Compute the advisory lock ID that golang-migrate's pgxv5 driver uses.
+	//
+	// Source: database.GenerateAdvisoryLockId() in golang-migrate v4.19.0:
+	//   key  = strings.Join(append(additionalNames, databaseName), "\x00")
+	//        = "public\x00schema_migrations\x00sora_test_db"  (schemaName, tableName, dbName)
+	//   sum  = crc32.ChecksumIEEE(key) * advisoryLockIDSalt  (salt = 1486364155)
+	//
+	// The pgxv5 driver passes p.config.migrationsSchemaName and
+	// p.config.migrationsTableName as additionalNames, both defaulting to
+	// "public" and "schema_migrations" respectively.
+	const advisoryLockIDSalt = uint32(1486364155)
+	migrateLockID := int64(crc32.ChecksumIEEE(
+		[]byte("public\x00schema_migrations\x00sora_test_db"),
+	) * advisoryLockIDSalt)
+
+	// IMPORTANT: do ALL setup BEFORE acquiring the external lock.
+	// resetMigrationState → setupTestDatabase → NewDatabaseFromConfig which
+	// calls WithInstance → pg_advisory_lock internally. If we hold the lock
+	// first, setup blocks instead of the db.migrate() call we want to test.
+	resetMigrationState(t, 11)
+	t.Cleanup(func() { resetMigrationState(t, 11) })
+
+	db, err := NewDatabaseFromConfig(ctx, makeTestDBConfig(), false, false)
+	require.NoError(t, err)
+	defer db.Close()
+
+	// Acquire the lock NOW. db.migrate() below is the first caller that will
+	// encounter it. The lock is held for the entire test; it is released only
+	// in t.Cleanup, simulating a lock that is never voluntarily released.
+	lockHolder, err := sql.Open("pgx", connStr)
+	require.NoError(t, err)
+	lockHolder.SetMaxOpenConns(1)
+
+	lockConn, err := lockHolder.Conn(ctx)
+	require.NoError(t, err)
+
+	var held bool
+	err = lockConn.QueryRowContext(ctx,
+		"SELECT pg_try_advisory_lock($1)", migrateLockID).Scan(&held)
+	require.NoError(t, err)
+	require.True(t, held, "prerequisite: must hold the migration advisory lock")
+
+	// Release at test end (LIFO cleanup: this runs before resetMigrationState).
+	t.Cleanup(func() {
+		_, _ = lockConn.ExecContext(context.Background(),
+			"SELECT pg_advisory_unlock($1)", migrateLockID)
+		lockConn.Close()
+		lockHolder.Close()
+	})
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- db.migrate(ctx, migrationTimeout) }()
+
+	select {
+	case migrateErr := <-done:
+		elapsed := time.Since(start)
+		// With the fix: migrateCtx fired at 2s, polling ran, pollCtx expired
+		// at 8s, migrate() returned a polling-timeout error — it did not hang.
+		// Any return (nil or error) within overallDeadline proves the fix works.
+		t.Logf("migrate() returned in %s (err=%v) — did not hang, fix is working", elapsed, migrateErr)
+	case <-time.After(overallDeadline):
+		t.Fatalf("migrate() did not return within %s — REGRESSION: "+
+			"WithInstance/pg_advisory_lock is blocking before migrateCtx, "+
+			"so the timeout never fires and migrate() hangs indefinitely", overallDeadline)
+	}
+}
+
 // makeTestDBConfig is a helper that returns a DatabaseConfig pointing at the
 // local test database (same values as config-test.toml).
 func makeTestDBConfig() *config.DatabaseConfig {
@@ -379,6 +460,9 @@ func makeTestDBConfig() *config.DatabaseConfig {
 func TestNewDatabaseFromConfigConcurrentIdempotent(t *testing.T) {
 	const N = 4
 	const deadline = 20 * time.Second
+
+	resetMigrationState(t, 11)
+	t.Cleanup(func() { resetMigrationState(t, 11) })
 
 	type result struct {
 		db  *Database

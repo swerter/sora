@@ -283,7 +283,11 @@ func (rd *ResilientDatabase) GetUnusedContentHashesWithRetry(ctx context.Context
 	op := func(ctx context.Context) (any, error) {
 		return rd.getOperationalDatabaseForOperation(false).GetUnusedContentHashes(ctx, batchSize)
 	}
-	result, err := rd.executeReadWithRetry(ctx, cleanupRetryConfig, timeoutRead, op)
+	// Use timeoutSearch (not timeoutRead) — this is a full-table anti-join scan on
+	// message_contents that can be slow immediately after a large pruning run leaves
+	// many dead tuples. 30s (timeoutRead) is insufficient; use the search timeout
+	// (typically 60s) to give PostgreSQL enough time before autovacuum catches up.
+	result, err := rd.executeReadWithRetry(ctx, cleanupRetryConfig, timeoutSearch, op)
 	if err != nil {
 		return nil, err
 	}

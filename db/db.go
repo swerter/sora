@@ -331,42 +331,68 @@ func (db *Database) migrate(ctx context.Context, migrationTimeout time.Duration)
 		return fmt.Errorf("failed to ping temporary DB for migrations: %w", err)
 	}
 
-	dbDriver, err := pgxv5.WithInstance(sqlDB, &pgxv5.Config{})
-	if err != nil {
-		sqlDB.Close()
-		return fmt.Errorf("failed to create migration db driver: %w", err)
-	}
-
-	m, err := migrate.NewWithInstance("iofs", sourceDriver, "pgx5", dbDriver)
-	if err != nil {
-		sqlDB.Close()
-		return fmt.Errorf("failed to create migrate instance: %w", err)
-	}
-
-	m.Log = &migrationLogger{}
-
-	// Get current version from migration driver (needed for proper state tracking)
-	currentVersion, dirty, err = m.Version()
-	if err != nil && err != migrate.ErrNilVersion {
-		sqlDB.Close()
-		return fmt.Errorf("failed to get current migration version: %w", err)
-	}
-	if dirty {
-		sqlDB.Close()
-		return fmt.Errorf("database is in a dirty migration state (version %d). Manual intervention required", currentVersion)
-	}
-
-	logger.Info("Database: current migration version, running migrations", "version", currentVersion)
-
-	// Run migrations with timeout context to prevent hanging forever
-	// If another instance is running migrations, this will wait up to the configured timeout
+	// CRITICAL: start the timeout BEFORE entering the migration driver setup.
+	//
+	// pgxv5.WithInstance() calls ensureVersionTable() which calls Lock() which
+	// calls pg_advisory_lock() — a BLOCKING PostgreSQL call that uses
+	// context.Background() internally, so it is NOT cancellable via Go contexts.
+	// If another server holds the migration advisory lock, this call blocks
+	// indefinitely, and the migrateCtx timeout never fires because it hasn't been
+	// created yet.
+	//
+	// By starting the goroutine (and therefore the migrateCtx) BEFORE calling
+	// WithInstance, the timeout covers the entire advisory-lock acquisition,
+	// migration execution, and cleanup path.
 	logger.Info("Database: migration timeout configured", "timeout", migrationTimeout)
 	migrateCtx, cancel := context.WithTimeout(ctx, migrationTimeout)
 	defer cancel()
 
-	// Create a channel to run migrations asynchronously
+	// errChan carries the result of the entire migration sequence.
+	// Buffered so the goroutine can exit even if we have already moved on to
+	// the polling path after a timeout.
 	errChan := make(chan error, 1)
 	go func() {
+		// Everything from here on can block on pg_advisory_lock().
+		// It all lives inside this goroutine so the migrateCtx deadline is
+		// meaningful: when it fires we can spawn a cleanup goroutine and poll
+		// schema_migrations directly instead of waiting indefinitely.
+
+		dbDriver, err := pgxv5.WithInstance(sqlDB, &pgxv5.Config{
+			// MultiStatementEnabled splits the migration file on semicolons and
+			// runs each statement as a separate single-statement ExecContext call.
+			//
+			// This matters because PostgreSQL's simple-query protocol wraps ALL
+			// statements in a multi-statement string into a single implicit
+			// transaction block.  Some DDL (e.g. CREATE INDEX CONCURRENTLY)
+			// cannot run inside any transaction block; splitting guarantees each
+			// statement runs in its own autocommit context.
+			MultiStatementEnabled: true,
+		})
+		if err != nil {
+			errChan <- fmt.Errorf("failed to create migration db driver: %w", err)
+			return
+		}
+
+		m, err := migrate.NewWithInstance("iofs", sourceDriver, "pgx5", dbDriver)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to create migrate instance: %w", err)
+			return
+		}
+
+		m.Log = &migrationLogger{}
+
+		// Check current version (also acquires the advisory lock internally).
+		ver, dirty, err := m.Version()
+		if err != nil && err != migrate.ErrNilVersion {
+			errChan <- fmt.Errorf("failed to get current migration version: %w", err)
+			return
+		}
+		if dirty {
+			errChan <- fmt.Errorf("database is in a dirty migration state (version %d). Manual intervention required", ver)
+			return
+		}
+
+		logger.Info("Database: current migration version, running migrations", "version", ver)
 		logger.Info("Database: attempting to run migrations")
 		errChan <- m.Up()
 	}()
@@ -477,17 +503,21 @@ func (db *Database) migrate(ctx context.Context, migrationTimeout time.Duration)
 		}
 	}
 
-	// Final verification (skip if we already verified via direct query)
+	// Final verification (skip if we already verified via direct query above).
+	// m is scoped inside the goroutine, so we use the WritePool for the check.
 	if !skipFinalVerification {
-		version, dirty, err := m.Version()
-		if err != nil && err != migrate.ErrNilVersion {
-			return fmt.Errorf("failed to get final migration version: %w", err)
+		var finalVersion uint
+		var finalDirty bool
+		verifyCtx, verifyCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer verifyCancel()
+		queryErr := db.WritePool.QueryRow(verifyCtx, "SELECT version, dirty FROM schema_migrations LIMIT 1").Scan(&finalVersion, &finalDirty)
+		if queryErr != nil && queryErr != pgx.ErrNoRows {
+			return fmt.Errorf("failed to verify final migration version: %w", queryErr)
 		}
-		if dirty {
-			return fmt.Errorf("database is in a dirty migration state (version %d). Manual intervention required", version)
+		if finalDirty {
+			return fmt.Errorf("database is in a dirty migration state (version %d). Manual intervention required", finalVersion)
 		}
-
-		logger.Info("Database: migration complete", "version", version)
+		logger.Info("Database: migration complete", "version", finalVersion)
 	} else {
 		logger.Info("Database: migrations verified, proceeding with startup")
 	}
