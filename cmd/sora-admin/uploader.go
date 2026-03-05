@@ -153,7 +153,7 @@ func resolveFailedUploads(ctx context.Context, cfg AdminConfig, dryRun bool, lim
 	}
 
 	if dryRun {
-		fmt.Println("DRY RUN — no changes will be made.")
+		fmt.Println("DRY RUN - no changes will be made.")
 	}
 
 	var resolved, deleted, skipped int
@@ -181,7 +181,7 @@ func resolveFailedUploads(ctx context.Context, cfg AdminConfig, dryRun bool, lim
 		}
 
 		if exists {
-			// Content is in S3 — mark messages as uploaded=TRUE, remove pending record.
+			// Content is in S3 - mark messages as uploaded=TRUE, remove pending record.
 			fmt.Printf("  [REPAIR] id=%-10d account=%-8d hash=%.16s... ✓ EXISTS in S3 → CompleteS3Upload\n",
 				upload.ID, upload.AccountID, upload.ContentHash)
 			if !dryRun {
@@ -193,7 +193,7 @@ func resolveFailedUploads(ctx context.Context, cfg AdminConfig, dryRun bool, lim
 			}
 			resolved++
 		} else {
-			// Content is NOT in S3 — the message was never delivered. Clean up.
+			// Content is NOT in S3 - the message was never delivered. Clean up.
 			fmt.Printf("  [DELETE] id=%-10d account=%-8d hash=%.16s... ✗ MISSING in S3 → DeleteFailedUpload\n",
 				upload.ID, upload.AccountID, upload.ContentHash)
 			if !dryRun {
@@ -211,7 +211,7 @@ func resolveFailedUploads(ctx context.Context, cfg AdminConfig, dryRun bool, lim
 
 	fmt.Printf("\nSummary: %d repaired (✓ EXISTS), %d deleted (✗ MISSING), %d skipped\n", resolved, deleted, skipped)
 	if dryRun {
-		fmt.Println("(dry run — run without --dry-run to apply changes)")
+		fmt.Println("(dry run - run without --dry-run to apply changes)")
 	}
 	return nil
 }

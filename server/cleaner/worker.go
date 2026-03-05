@@ -226,7 +226,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	// SAFETY: Only run when S3 is healthy. If S3 is down, messages can't be uploaded,
 	// and deleting their metadata would cause permanent message loss.
 	if !w.s3.IsHealthy() {
-		logger.Warn("Cleanup: Skipping failed upload cleanup — S3 is unhealthy (circuit breaker open). Messages preserved for retry when S3 recovers.")
+		logger.Warn("Cleanup: Skipping failed upload cleanup - S3 is unhealthy (circuit breaker open). Messages preserved for retry when S3 recovers.")
 	} else {
 		failedUploadsCount, err = w.rdb.CleanupFailedUploadsWithRetry(ctx, w.gracePeriod)
 		if err != nil {

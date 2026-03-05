@@ -151,13 +151,7 @@ func main() {
 		defer logger.Sync() // Still sync even without a log file
 	}
 
-	// Print startup banner
-	logger.Println("")
-	logger.Println(" ▗▄▄▖ ▗▄▖ ▗▄▄▖  ▗▄▖  ")
-	logger.Println("▐▌   ▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌ ")
-	logger.Println(" ▝▀▚▖▐▌ ▐▌▐▛▀▚▖▐▛▀▜▌ ")
-	logger.Println("▗▄▄▞▘▝▚▄▞▘▐▌ ▐▌▐▌ ▐▌ ")
-	logger.Println("")
+	logger.Info("---------------------")
 	logger.Info("SORA application starting", "version", version, "commit", commit, "built", date)
 	logger.Info("Logging configuration", "format", cfg.Logging.Format, "level", cfg.Logging.Level)
 
@@ -221,19 +215,19 @@ func main() {
 		defer deps.relayWorker.Stop()
 	}
 
-	// SIGHUP handler for config reload — set up AFTER deps is created so we can
+	// SIGHUP handler for config reload - set up AFTER deps is created so we can
 	// update deps.config directly. Servers that hold Config *config.Config pointers
 	// (IMAP, POP3, ManageSieve) will see changes through the shared pointer.
 	reloadChan := make(chan os.Signal, 1)
 	signal.Notify(reloadChan, syscall.SIGHUP)
 	go func() {
 		for range reloadChan {
-			logger.Info("SIGHUP received — reloading configuration", "config", *configPath)
+			logger.Info("SIGHUP received - reloading configuration", "config", *configPath)
 
 			// Re-read the full config for per-server dispatch
 			newCfg := config.NewDefaultConfig()
 			if err := config.LoadConfigFromFile(*configPath, &newCfg); err != nil {
-				logger.Error("Config reload failed — keeping current config", "error", err)
+				logger.Error("Config reload failed - keeping current config", "error", err)
 				continue
 			}
 
@@ -331,7 +325,7 @@ func handleConfigReload(configPath string, currentCfg *config.Config, errorHandl
 
 	// Re-read config file
 	if err := config.LoadConfigFromFile(configPath, &newCfg); err != nil {
-		logger.Error("Config reload failed — keeping current config", "error", err)
+		logger.Error("Config reload failed - keeping current config", "error", err)
 		return
 	}
 
@@ -689,7 +683,7 @@ func initializeServices(ctx context.Context, cfg config.Config, errorHandler *er
 		}
 		cleanupGracePeriod, cgpErr := cfg.Uploader.GetCleanupGracePeriod()
 		if cgpErr != nil {
-			logger.Warn("Failed to parse uploader cleanup_grace_period — using default (1h)", "error", cgpErr)
+			logger.Warn("Failed to parse uploader cleanup_grace_period - using default (1h)", "error", cgpErr)
 			cleanupGracePeriod = time.Hour
 		}
 		deps.uploadWorker.SetCleanupGracePeriod(cleanupGracePeriod)

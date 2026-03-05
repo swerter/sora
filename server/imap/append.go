@@ -184,7 +184,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	// If a duplicate APPEND arrives while uploader is processing the first copy,
 	// we don't want to overwrite/delete the file the uploader is reading.
 	if s.server.uploader == nil {
-		return nil, s.internalError("uploader not configured — cannot store message")
+		return nil, s.internalError("uploader not configured - cannot store message")
 	}
 	expectedPath := s.server.uploader.FilePath(contentHash, s.AccountID())
 	var filePath *string
