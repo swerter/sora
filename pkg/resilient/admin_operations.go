@@ -362,7 +362,10 @@ func (rd *ResilientDatabase) executeWriteInTxWithRetry(ctx context.Context, conf
 			// are expected and should not produce noisy Warn logs.
 			state := rd.writeBreaker.State()
 			counts := rd.writeBreaker.Counts()
-			if rd.isRetryableError(cbErr) || state != circuitbreaker.StateClosed {
+
+			// Log at WARN only for system failures or when breaker is not CLOSED
+			// Business logic errors log at DEBUG to reduce noise
+			if !rd.isBusinessLogicError(cbErr) && (rd.isRetryableError(cbErr) || state != circuitbreaker.StateClosed) {
 				logger.Warn("Write transaction operation failed through circuit breaker", "component", "RESILIENT-FAILOVER",
 					"error", cbErr, "breaker_state", state, "total_failures", counts.TotalFailures,
 					"total_requests", counts.Requests, "consecutive_failures", counts.ConsecutiveFailures)

@@ -449,6 +449,26 @@ func (rd *ResilientDatabase) isRetryableError(err error) bool {
 	return false
 }
 
+// isBusinessLogicError checks if an error is a business logic error that should not
+// be logged at WARN level (e.g., user not found, already exists, etc.)
+func (rd *ResilientDatabase) isBusinessLogicError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check against all business logic errors that are treated as success by circuit breaker
+	return errors.Is(err, consts.ErrUserNotFound) ||
+		errors.Is(err, consts.ErrMailboxNotFound) ||
+		errors.Is(err, consts.ErrMessageNotAvailable) ||
+		errors.Is(err, consts.ErrMailboxAlreadyExists) ||
+		errors.Is(err, consts.ErrAccountAlreadyExists) ||
+		errors.Is(err, consts.ErrNotPermitted) ||
+		errors.Is(err, consts.ErrDBNotFound) ||
+		errors.Is(err, consts.ErrDBUniqueViolation) ||
+		errors.Is(err, consts.ErrMessageExists) ||
+		errors.Is(err, pgx.ErrNoRows)
+}
+
 func (rd *ResilientDatabase) QueryWithRetry(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	// Determine if this should go to write or read pools
 	var pool *pgxpool.Pool
@@ -590,9 +610,17 @@ func (rd *ResilientDatabase) BeginTxWithRetry(ctx context.Context, txOptions pgx
 			// Log circuit breaker state to understand failure patterns
 			state := rd.writeBreaker.State()
 			counts := rd.writeBreaker.Counts()
-			logger.Warn("Write operation failed through circuit breaker", "component", "RESILIENT-FAILOVER",
-				"error", cbErr, "breaker_state", state, "total_failures", counts.TotalFailures,
-				"total_requests", counts.Requests, "consecutive_failures", counts.ConsecutiveFailures)
+
+			// Log at WARN only for system failures or when breaker is not CLOSED
+			// Business logic errors log at DEBUG to reduce noise
+			if !rd.isBusinessLogicError(cbErr) && (rd.isRetryableError(cbErr) || state != circuitbreaker.StateClosed) {
+				logger.Warn("Write operation failed through circuit breaker", "component", "RESILIENT-FAILOVER",
+					"error", cbErr, "breaker_state", state, "total_failures", counts.TotalFailures,
+					"total_requests", counts.Requests, "consecutive_failures", counts.ConsecutiveFailures)
+			} else {
+				logger.Debug("Write operation returned application error", "component", "RESILIENT-FAILOVER",
+					"error", cbErr)
+			}
 
 			if !rd.isRetryableError(cbErr) {
 				return retry.Stop(cbErr)
