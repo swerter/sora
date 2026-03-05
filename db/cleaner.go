@@ -243,11 +243,23 @@ func (d *Database) PruneOldMessageBodies(ctx context.Context, tx pgx.Tx, retenti
 // This should be used for production cleanup operations on large databases.
 func (d *Database) PruneOldMessageBodiesBatched(ctx context.Context, retention time.Duration) (int64, error) {
 	const batchSize = 100
+	const maxBatches = 1000                // Hard upper bound: 100,000 records per run
+	const maxRunDuration = 5 * time.Minute // Wall-clock cap per cleanup cycle
+	const progressLogInterval = 10         // Log progress every N batches
+
 	var totalPruned int64
-	maxBatches := 1000 // Safety limit: max 100,000 records per cleanup run
+	runDeadline := time.Now().Add(maxRunDuration)
 
 	for batch := 0; batch < maxBatches; batch++ {
-		// Check if context is cancelled
+		// Respect the per-run time cap so this never blocks the cleanup worker
+		// for more than maxRunDuration. The next cleanup cycle will resume.
+		if time.Now().After(runDeadline) {
+			logger.Info("Pruning bodies: reached per-run time limit, will resume on next cycle",
+				"batches_completed", batch, "pruned_so_far", totalPruned)
+			break
+		}
+
+		// Check if context is cancelled (e.g. server shutdown)
 		if ctx.Err() != nil {
 			return totalPruned, ctx.Err()
 		}
@@ -307,8 +319,16 @@ func (d *Database) PruneOldMessageBodiesBatched(ctx context.Context, retention t
 			break
 		}
 
-		// Sleep briefly between batches to avoid overwhelming the database
-		time.Sleep(10 * time.Millisecond)
+		// Periodic progress logging so long-running cleanup is observable
+		if (batch+1)%progressLogInterval == 0 {
+			logger.Info("Pruning bodies: batch progress",
+				"batch", batch+1, "pruned_so_far", totalPruned, "elapsed", time.Since(runDeadline.Add(-maxRunDuration)).Round(time.Second))
+		}
+
+		// Pace between batches: pruning is a background maintenance task — give other
+		// operations (IMAP, LMTP) ample time to acquire WAL and I/O bandwidth.
+		// 100ms keeps 1000 batches within ~1.7 minutes, well under the 5-min cap.
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	return totalPruned, nil
@@ -364,11 +384,23 @@ func (d *Database) PruneOldMessageVectors(ctx context.Context, tx pgx.Tx, retent
 // This should be used for production cleanup operations on large databases.
 func (d *Database) PruneOldMessageVectorsBatched(ctx context.Context, retention time.Duration) (int64, error) {
 	const batchSize = 100
+	const maxBatches = 1000                // Hard upper bound: 100,000 records per run
+	const maxRunDuration = 5 * time.Minute // Wall-clock cap per cleanup cycle
+	const progressLogInterval = 10         // Log progress every N batches
+
 	var totalPruned int64
-	maxBatches := 1000 // Safety limit: max 100,000 records per cleanup run
+	runDeadline := time.Now().Add(maxRunDuration)
 
 	for batch := 0; batch < maxBatches; batch++ {
-		// Check if context is cancelled
+		// Respect the per-run time cap so this never blocks the cleanup worker
+		// for more than maxRunDuration. The next cleanup cycle will resume.
+		if time.Now().After(runDeadline) {
+			logger.Info("Pruning vectors: reached per-run time limit, will resume on next cycle",
+				"batches_completed", batch, "pruned_so_far", totalPruned)
+			break
+		}
+
+		// Check if context is cancelled (e.g. server shutdown)
 		if ctx.Err() != nil {
 			return totalPruned, ctx.Err()
 		}
@@ -428,8 +460,16 @@ func (d *Database) PruneOldMessageVectorsBatched(ctx context.Context, retention 
 			break
 		}
 
-		// Sleep briefly between batches to avoid overwhelming the database
-		time.Sleep(10 * time.Millisecond)
+		// Periodic progress logging so long-running cleanup is observable
+		if (batch+1)%progressLogInterval == 0 {
+			logger.Info("Pruning vectors: batch progress",
+				"batch", batch+1, "pruned_so_far", totalPruned, "elapsed", time.Since(runDeadline.Add(-maxRunDuration)).Round(time.Second))
+		}
+
+		// Pace between batches: pruning is a background maintenance task — give other
+		// operations (IMAP, LMTP) ample time to acquire WAL and I/O bandwidth.
+		// 100ms keeps 1000 batches within ~1.7 minutes, well under the 5-min cap.
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	return totalPruned, nil
