@@ -36,11 +36,16 @@ func (db *Database) MoveMessages(ctx context.Context, tx pgx.Tx, ids *[]imap.UID
 		return nil, fmt.Errorf("failed to acquire locks for move on mailboxes %d and %d: %w", srcMailboxID, destMailboxID, err)
 	}
 
-	// Get the source message IDs and UIDs
+	// Lock source message rows early (before INSERT triggers) to establish a
+	// consistent lock ordering: advisory mailbox lock → row locks on source rows.
+	// Without FOR UPDATE here, concurrent EXPUNGE could hold row locks and then
+	// wait for the advisory lock while MOVE holds the advisory lock and waits
+	// for those same row locks → deadlock.
 	rows, err := tx.Query(ctx, `
 		SELECT id, uid FROM messages
 		WHERE mailbox_id = $1 AND uid = ANY($2) AND expunged_at IS NULL
 		ORDER BY uid
+		FOR UPDATE
 	`, srcMailboxID, ids)
 	if err != nil {
 		logger.Error("Database: failed to query source messages", "err", err)
@@ -191,11 +196,13 @@ func (db *Database) MoveMessages(ctx context.Context, tx pgx.Tx, ids *[]imap.UID
 
 	// Mark the original messages as expunged in the source mailbox
 	// (unless we already did this above for same-mailbox moves)
+	// AND expunged_at IS NULL ensures we only touch rows we actually locked via
+	// FOR UPDATE above, avoiding unnecessary lock contention on already-expunged rows.
 	if srcMailboxID != destMailboxID {
 		_, err = tx.Exec(ctx, `
 			UPDATE messages
 			SET expunged_at = NOW(), expunged_modseq = nextval('messages_modseq')
-			WHERE mailbox_id = $1 AND id = ANY($2)
+			WHERE mailbox_id = $1 AND id = ANY($2) AND expunged_at IS NULL
 		`, srcMailboxID, messageIDs)
 
 		if err != nil {

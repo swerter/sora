@@ -245,6 +245,16 @@ func NewResilientDatabaseWithOptions(ctx context.Context, config *config.Databas
 			errors.Is(err, pgx.ErrNoRows) {
 			return true // Treat as success - these are expected application errors
 		}
+		// Transient PostgreSQL errors (deadlock, serialization failure) are retried
+		// and should not count as circuit breaker failures — they are self-resolving.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			switch pgErr.Code {
+			case "40P01", // deadlock detected
+				"40001": // serialization failure
+				return true
+			}
+		}
 		return false // Actual system failure
 	}
 
