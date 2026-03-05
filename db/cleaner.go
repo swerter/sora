@@ -11,7 +11,7 @@ import (
 )
 
 const CLEANUP_LOCK_NAME = "cleanup_worker"
-const BATCH_PURGE_SIZE = 100
+const BATCH_PURGE_SIZE = 1000
 const LOCK_TIMEOUT = 30 * time.Second
 
 // UserScopedObjectForCleanup represents a user-specific object that is a candidate for cleanup.
