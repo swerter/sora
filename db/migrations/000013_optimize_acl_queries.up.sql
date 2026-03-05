@@ -7,12 +7,12 @@
 CREATE OR REPLACE FUNCTION maintain_credentials_domain()
 RETURNS TRIGGER
 LANGUAGE plpgsql
-AS $$
+AS $function$
 BEGIN
     NEW.domain := SPLIT_PART(NEW.address, '@', 2);
     RETURN NEW;
 END;
-$$;
+$function$;
 
 CREATE TRIGGER trigger_maintain_credentials_domain
 BEFORE INSERT OR UPDATE OF address ON credentials
