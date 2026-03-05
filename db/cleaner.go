@@ -243,9 +243,9 @@ func (d *Database) PruneOldMessageBodies(ctx context.Context, tx pgx.Tx, retenti
 // This should be used for production cleanup operations on large databases.
 func (d *Database) PruneOldMessageBodiesBatched(ctx context.Context, retention time.Duration) (int64, error) {
 	const batchSize = 100
-	const maxBatches = 1000                // Hard upper bound: 100,000 records per run
-	const maxRunDuration = 5 * time.Minute // Wall-clock cap per cleanup cycle
-	const progressLogInterval = 10         // Log progress every N batches
+	const maxBatches = 1000                 // Hard upper bound: 100,000 records per run
+	const maxRunDuration = 15 * time.Minute // Wall-clock cap per cleanup cycle; queries on large tables can be ~9s/batch
+	const progressLogInterval = 10          // Log progress every N batches
 
 	var totalPruned int64
 	runDeadline := time.Now().Add(maxRunDuration)
@@ -384,9 +384,9 @@ func (d *Database) PruneOldMessageVectors(ctx context.Context, tx pgx.Tx, retent
 // This should be used for production cleanup operations on large databases.
 func (d *Database) PruneOldMessageVectorsBatched(ctx context.Context, retention time.Duration) (int64, error) {
 	const batchSize = 100
-	const maxBatches = 1000                // Hard upper bound: 100,000 records per run
-	const maxRunDuration = 5 * time.Minute // Wall-clock cap per cleanup cycle
-	const progressLogInterval = 10         // Log progress every N batches
+	const maxBatches = 1000                 // Hard upper bound: 100,000 records per run
+	const maxRunDuration = 15 * time.Minute // Wall-clock cap per cleanup cycle; queries on large tables can be ~9s/batch
+	const progressLogInterval = 10          // Log progress every N batches
 
 	var totalPruned int64
 	runDeadline := time.Now().Add(maxRunDuration)
