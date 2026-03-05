@@ -44,30 +44,36 @@ func NewDBMailbox(mboxId int64, name string, uidValidity uint32, path string, su
 }
 
 func (db *Database) GetMailboxes(ctx context.Context, AccountID int64, subscribed bool) ([]*DBMailbox, error) {
-	// Modified query to include both personal mailboxes and shared mailboxes with ACL access
+	// Optimized query using denormalized domain column and better index usage
+	// Key optimizations:
+	// 1. CTE to materialize user's domain once (eliminates repeated SPLIT_PART calls)
+	// 2. Uses credentials.domain column instead of SPLIT_PART(address, '@', 2)
+	// 3. Composite indexes on mailbox_acls allow efficient rights filtering
 	query := `
+		WITH user_domain AS (
+			SELECT domain
+			FROM credentials
+			WHERE account_id = $1 AND primary_identity = TRUE
+			LIMIT 1
+		)
 		SELECT DISTINCT
 			m.id, m.name, m.uid_validity, m.path, m.subscribed, m.created_at, m.updated_at, m.account_id,
 			EXISTS(SELECT 1 FROM mailboxes child WHERE child.account_id = m.account_id AND LENGTH(child.path) = LENGTH(m.path) + 16 AND child.path LIKE m.path || '%') AS has_children
 		FROM mailboxes m
-		LEFT JOIN mailbox_acls acl ON m.id = acl.mailbox_id AND acl.account_id = $1
+		LEFT JOIN mailbox_acls acl ON m.id = acl.mailbox_id AND acl.account_id = $1 AND position('l' IN acl.rights) > 0
+		LEFT JOIN mailbox_acls anyone_acl ON m.id = anyone_acl.mailbox_id AND anyone_acl.identifier = 'anyone' AND position('l' IN anyone_acl.rights) > 0
+		CROSS JOIN user_domain ud
 		WHERE
 			-- All mailboxes owned by user (including shared mailboxes they created)
 			m.account_id = $1
 			OR
 			-- Shared mailboxes where user has direct ACL access (must have at least 'l' lookup right)
-			(COALESCE(m.is_shared, FALSE) = TRUE AND acl.account_id IS NOT NULL AND position('l' IN acl.rights) > 0)
+			(COALESCE(m.is_shared, FALSE) = TRUE AND acl.account_id IS NOT NULL)
 			OR
 			-- Shared mailboxes with "anyone" access (same domain, must have 'l' right)
 			(COALESCE(m.is_shared, FALSE) = TRUE
-			 AND EXISTS (
-			   SELECT 1 FROM mailbox_acls a2
-			   INNER JOIN credentials c ON c.account_id = $1 AND c.primary_identity = TRUE
-			   WHERE a2.mailbox_id = m.id
-			     AND a2.identifier = 'anyone'
-			     AND position('l' IN a2.rights) > 0
-			     AND m.owner_domain = SPLIT_PART(c.address, '@', 2)
-			 ))
+			 AND anyone_acl.mailbox_id IS NOT NULL
+			 AND m.owner_domain = ud.domain)
 	`
 
 	if subscribed {
@@ -163,31 +169,33 @@ func (db *Database) GetMailboxByName(ctx context.Context, AccountID int64, name 
 	var uidValidityInt64 int64
 	var accountID int64
 
-	// First try to find owned mailbox, then check for shared mailbox with ACL access
+	// Optimized query using denormalized domain column
 	// Use LOWER() on both sides to ensure consistent case-insensitive comparison
 	// regardless of database locale (C/POSIX locales don't lowercase non-ASCII in LOWER())
 	err = db.GetReadPoolWithContext(ctx).QueryRow(ctx, `
+		WITH user_domain AS (
+			SELECT domain
+			FROM credentials
+			WHERE account_id = $1 AND primary_identity = TRUE
+			LIMIT 1
+		)
 		SELECT m.id, m.name, m.uid_validity, m.path, m.subscribed, m.created_at, m.updated_at, m.account_id
 		FROM mailboxes m
-		LEFT JOIN mailbox_acls acl ON m.id = acl.mailbox_id AND acl.account_id = $1
+		LEFT JOIN mailbox_acls acl ON m.id = acl.mailbox_id AND acl.account_id = $1 AND position('l' IN acl.rights) > 0
+		LEFT JOIN mailbox_acls anyone_acl ON m.id = anyone_acl.mailbox_id AND anyone_acl.identifier = 'anyone' AND position('l' IN anyone_acl.rights) > 0
+		CROSS JOIN user_domain ud
 		WHERE LOWER(m.name) = LOWER($2)
 		  AND (
 		    -- Owned mailbox (shared or non-shared, owner always has access)
 		    (m.account_id = $1)
 		    OR
 		    -- Shared mailbox with ACL access (has 'l' right)
-		    (COALESCE(m.is_shared, FALSE) = TRUE AND acl.account_id IS NOT NULL AND position('l' IN acl.rights) > 0)
+		    (COALESCE(m.is_shared, FALSE) = TRUE AND acl.account_id IS NOT NULL)
 		    OR
 		    -- Shared mailbox with "anyone" access (same domain, has 'l' right)
 		    (COALESCE(m.is_shared, FALSE) = TRUE
-		     AND EXISTS (
-		       SELECT 1 FROM mailbox_acls a2
-		       INNER JOIN credentials c ON c.account_id = $1 AND c.primary_identity = TRUE
-		       WHERE a2.mailbox_id = m.id
-		         AND a2.identifier = 'anyone'
-		         AND position('l' IN a2.rights) > 0
-		         AND m.owner_domain = SPLIT_PART(c.address, '@', 2)
-		     ))
+		     AND anyone_acl.mailbox_id IS NOT NULL
+		     AND m.owner_domain = ud.domain)
 		  )
 		LIMIT 1
 	`, AccountID, name).Scan(&mailbox.ID, &mailbox.Name, &uidValidityInt64, &mailbox.Path, &mailbox.Subscribed, &mailbox.CreatedAt, &mailbox.UpdatedAt, &accountID)
