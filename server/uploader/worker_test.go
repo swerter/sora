@@ -22,6 +22,7 @@ import (
 type mockDB struct {
 	AcquireAndLeasePendingUploadsWithRetryFunc func(ctx context.Context, instanceID string, batchSize int, retryInterval time.Duration, maxAttempts int) ([]db.PendingUpload, error)
 	MarkUploadAttemptWithRetryFunc             func(ctx context.Context, contentHash string, accountID int64) error
+	ExhaustUploadAttemptsWithRetryFunc         func(ctx context.Context, contentHash string, accountID int64, maxAttempts int) error
 	GetPrimaryEmailForAccountWithRetryFunc     func(ctx context.Context, accountID int64) (server.Address, error)
 	IsContentHashUploadedWithRetryFunc         func(ctx context.Context, contentHash string, accountID int64) (bool, error)
 	CompleteS3UploadWithRetryFunc              func(ctx context.Context, contentHash string, accountID int64) error
@@ -31,6 +32,13 @@ type mockDB struct {
 
 func (m *mockDB) AcquireAndLeasePendingUploadsWithRetry(ctx context.Context, instanceID string, batchSize int, retryInterval time.Duration, maxAttempts int) ([]db.PendingUpload, error) {
 	return m.AcquireAndLeasePendingUploadsWithRetryFunc(ctx, instanceID, batchSize, retryInterval, maxAttempts)
+}
+
+func (m *mockDB) ExhaustUploadAttemptsWithRetry(ctx context.Context, contentHash string, accountID int64, maxAttempts int) error {
+	if m.ExhaustUploadAttemptsWithRetryFunc != nil {
+		return m.ExhaustUploadAttemptsWithRetryFunc(ctx, contentHash, accountID, maxAttempts)
+	}
+	return nil
 }
 
 func (m *mockDB) MarkUploadAttemptWithRetry(ctx context.Context, contentHash string, accountID int64) error {
@@ -384,11 +392,20 @@ func TestProcessSingleUpload(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "local file should be removed even if already uploaded")
 	})
 
-	t.Run("local file missing and S3 also missing — marks attempt", func(t *testing.T) {
+	t.Run("local file missing and S3 also missing — exhausts attempts immediately", func(t *testing.T) {
 		worker, rdb, s3, _, _ := setupTestWorker(t)
 		// Don't create the local file; S3 also does not have it.
+		// The worker should immediately exhaust all remaining attempts so the record
+		// moves to the "failed" list on the very next monitor tick rather than cycling
+		// through every remaining retry slot (wasting maxAttempts × retryInterval).
 
+		var exhausted atomic.Bool
 		var markedAttempt atomic.Bool
+		rdb.ExhaustUploadAttemptsWithRetryFunc = func(ctx context.Context, contentHash string, accountID int64, maxAttempts int) error {
+			exhausted.Store(true)
+			assert.Equal(t, worker.maxAttempts, maxAttempts)
+			return nil
+		}
 		rdb.MarkUploadAttemptWithRetryFunc = func(ctx context.Context, contentHash string, accountID int64) error {
 			markedAttempt.Store(true)
 			return nil
@@ -398,7 +415,8 @@ func TestProcessSingleUpload(t *testing.T) {
 		}
 
 		worker.processSingleUpload(context.Background(), baseUpload)
-		assert.True(t, markedAttempt.Load(), "attempt should be counted when both file and S3 are missing")
+		assert.True(t, exhausted.Load(), "ExhaustUploadAttempts should be called when content is permanently lost")
+		assert.False(t, markedAttempt.Load(), "MarkUploadAttempt must NOT be called — ExhaustUploadAttempts supersedes it")
 	})
 
 	t.Run("local file missing but S3 has content — self-heals without marking attempt", func(t *testing.T) {

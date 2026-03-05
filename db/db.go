@@ -358,15 +358,15 @@ func (db *Database) migrate(ctx context.Context, migrationTimeout time.Duration)
 		// schema_migrations directly instead of waiting indefinitely.
 
 		dbDriver, err := pgxv5.WithInstance(sqlDB, &pgxv5.Config{
-			// MultiStatementEnabled splits the migration file on semicolons and
-			// runs each statement as a separate single-statement ExecContext call.
+			// MultiStatementEnabled is disabled because it cannot properly parse
+			// PL/pgSQL functions with dollar-quoted bodies ($$) that contain semicolons.
+			// The simple semicolon-based parser splits inside function bodies, breaking
+			// the migration.
 			//
-			// This matters because PostgreSQL's simple-query protocol wraps ALL
-			// statements in a multi-statement string into a single implicit
-			// transaction block.  Some DDL (e.g. CREATE INDEX CONCURRENTLY)
-			// cannot run inside any transaction block; splitting guarantees each
-			// statement runs in its own autocommit context.
-			MultiStatementEnabled: true,
+			// Since we don't use CREATE INDEX CONCURRENTLY or other DDL that requires
+			// running outside of transaction blocks in our migrations, it's safe to
+			// run all statements in a single transaction.
+			MultiStatementEnabled: false,
 		})
 		if err != nil {
 			errChan <- fmt.Errorf("failed to create migration db driver: %w", err)

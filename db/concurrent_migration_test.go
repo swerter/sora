@@ -34,8 +34,9 @@ import (
 
 // resetMigrationState rolls the test DB back to the given version so the
 // concurrent-migration tests always start from a clean, known state.
-// It drops the two partial indexes added by migration 12 (idempotent due to
-// IF EXISTS) and resets schema_migrations to the requested version.
+// It drops the schema objects added by migrations above targetVersion
+// (all DROP statements use IF EXISTS so they are idempotent) and resets
+// schema_migrations to the requested version.
 func resetMigrationState(t *testing.T, targetVersion int) {
 	t.Helper()
 	ctx := context.Background()
@@ -45,7 +46,25 @@ func resetMigrationState(t *testing.T, targetVersion int) {
 
 	pool := db.WritePool
 
-	// Drop the indexes that migration 12 creates (IF EXISTS → idempotent).
+	// --- Migration 13: optimize_acl_queries ---
+	// Drop indexes, trigger, function, and column added by migration 13.
+	for _, stmt := range []string{
+		`DROP INDEX IF EXISTS idx_mailboxes_shared_owner_domain`,
+		`DROP INDEX IF EXISTS idx_mailbox_acls_anyone_rights`,
+		`DROP INDEX IF EXISTS idx_mailbox_acls_mailbox_account_rights`,
+		`DROP INDEX IF EXISTS idx_credentials_account_primary`,
+		`DROP INDEX IF EXISTS idx_credentials_domain`,
+		`DROP TRIGGER IF EXISTS trigger_maintain_credentials_domain ON credentials`,
+		`DROP FUNCTION IF EXISTS maintain_credentials_domain()`,
+		`ALTER TABLE credentials DROP COLUMN IF EXISTS domain`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("resetMigrationState: %s: %v", stmt, err)
+		}
+	}
+
+	// --- Migration 12: prune_partial_indexes ---
+	// Drop the two partial indexes added by migration 12 (IF EXISTS → idempotent).
 	_, err := pool.Exec(ctx, `DROP INDEX IF EXISTS idx_message_contents_bodies_prunable`)
 	if err != nil {
 		t.Fatalf("resetMigrationState: drop bodies index: %v", err)

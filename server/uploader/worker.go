@@ -32,6 +32,10 @@ type EmailAddress interface {
 type UploaderDB interface {
 	AcquireAndLeasePendingUploadsWithRetry(ctx context.Context, instanceID string, batchSize int, retryInterval time.Duration, maxAttempts int) ([]db.PendingUpload, error)
 	MarkUploadAttemptWithRetry(ctx context.Context, contentHash string, accountID int64) error
+	// ExhaustUploadAttemptsWithRetry immediately sets attempts = maxAttempts for a
+	// permanently-lost upload (file missing AND not in S3) so it moves to the failed
+	// list without cycling through every remaining retry slot.
+	ExhaustUploadAttemptsWithRetry(ctx context.Context, contentHash string, accountID int64, maxAttempts int) error
 	GetPrimaryEmailForAccountWithRetry(ctx context.Context, accountID int64) (server.Address, error)
 	IsContentHashUploadedWithRetry(ctx context.Context, contentHash string, accountID int64) (bool, error)
 	CompleteS3UploadWithRetry(ctx context.Context, contentHash string, accountID int64) error
@@ -319,7 +323,7 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			// Unexpected error (e.g. permissions) — not a missing-file situation.
+			// Unexpected error (e.g. permissions) - not a missing-file situation.
 			if err := w.rdb.MarkUploadAttemptWithRetry(ctx, upload.ContentHash, upload.AccountID); err != nil {
 				logger.Error("Uploader: CRITICAL - Failed to mark upload attempt after file read failure", "hash", upload.ContentHash, "account_id", upload.AccountID, "error", err)
 			}
@@ -329,22 +333,22 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 
 		// Local file is missing (ENOENT). This can happen when:
 		//   a) cleanupOrphanedFiles deleted it just before the DB transaction committed
-		//      (the race condition fixed by the 1-hour grace period — this path is now
+		//      (the race condition fixed by the 1-hour grace period - this path is now
 		//       much rarer but still theoretically possible on very long transactions).
 		//   b) The file was uploaded to S3 by a prior attempt, CompleteS3UploadWithRetry
 		//      succeeded at marking messages uploaded but the pending_upload DELETE failed,
 		//      leaving the record stuck; a subsequent run then deleted the local file.
 		//
-		// In case (b) — and whenever S3 already has the content for any reason — we can
+		// In case (b) - and whenever S3 already has the content for any reason - we can
 		// self-heal by calling CompleteS3UploadWithRetry directly, without the local file.
 		// This prevents CleanupFailedUploads from eventually deleting the user's messages
 		// even though their content is safely stored in S3 (the ✓ EXISTS scenario).
-		logger.Warn("Uploader: Local file missing — checking S3 for existing content",
+		logger.Warn("Uploader: Local file missing -> checking S3 for existing content",
 			"hash", upload.ContentHash, "account", upload.AccountID, "path", filePath)
 
 		s3Exists, statErr := w.s3.ExistsWithRetry(ctx, s3Key)
 		if statErr != nil {
-			// S3 is unreachable — don't count as a permanent failure.
+			// S3 is unreachable - don't count as a permanent failure.
 			logger.Warn("Uploader: Could not check S3 existence after missing file",
 				"hash", upload.ContentHash, "account", upload.AccountID, "error", statErr)
 			// Do NOT increment attempts: the content may be in S3; we'll retry next cycle.
@@ -354,7 +358,7 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 		if s3Exists {
 			// Content is already in S3. Complete the upload (mark messages as uploaded,
 			// remove the pending_upload record) so the user's messages are accessible.
-			logger.Info("Uploader: Local file missing but content found in S3 — self-healing upload",
+			logger.Info("Uploader: Local file missing but content found in S3 - self-healing upload",
 				"hash", upload.ContentHash, "account", upload.AccountID)
 			if err := w.rdb.CompleteS3UploadWithRetry(ctx, upload.ContentHash, upload.AccountID); err != nil {
 				logger.Error("Uploader: CRITICAL - Failed to complete upload after S3 existence recovery",
@@ -367,12 +371,16 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 			return
 		}
 
-		// File is truly missing AND S3 doesn't have it — content is genuinely lost.
-		if err := w.rdb.MarkUploadAttemptWithRetry(ctx, upload.ContentHash, upload.AccountID); err != nil {
-			logger.Error("Uploader: CRITICAL - Failed to mark upload attempt after missing file",
-				"hash", upload.ContentHash, "account_id", upload.AccountID, "error", err)
+		// File is truly missing AND S3 doesn't have it - content is genuinely lost.
+		// Immediately exhaust all remaining attempts so this record moves to the
+		// "failed" list on the very next monitor tick, rather than cycling through
+		// every remaining retry slot (up to maxAttempts × retryInterval wasted time
+		// and S3 API calls).
+		if exhaustErr := w.rdb.ExhaustUploadAttemptsWithRetry(ctx, upload.ContentHash, upload.AccountID, w.maxAttempts); exhaustErr != nil {
+			logger.Error("Uploader: CRITICAL - Failed to exhaust upload attempts after missing file",
+				"hash", upload.ContentHash, "account_id", upload.AccountID, "error", exhaustErr)
 		}
-		logger.Error("Uploader: Could not read file — content lost",
+		logger.Error("Uploader: Could not read file - content permanently lost, exhausted attempts",
 			"path", filePath, "account_id", upload.AccountID, "error", err)
 		return
 	}
@@ -392,7 +400,7 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 				logger.Error("Uploader: CRITICAL - Failed to mark upload attempt after S3 failure", "hash", upload.ContentHash, "account_id", upload.AccountID, "error", err)
 			}
 		} else {
-			logger.Warn("Uploader: Transient S3 error — NOT counting toward max_attempts", "hash", upload.ContentHash, "account_id", upload.AccountID)
+			logger.Warn("Uploader: Transient S3 error - NOT counting toward max_attempts", "hash", upload.ContentHash, "account_id", upload.AccountID)
 		}
 		logger.Error("Uploader: Upload failed", "hash", upload.ContentHash, "account_id", upload.AccountID, "key", s3Key, "error", err)
 
@@ -626,7 +634,7 @@ func (w *UploadWorker) cleanupOrphanedFiles(ctx context.Context) error {
 	// upload id=6197517, account=22385, hash=66e220f4…).
 	gracePeriod := w.cleanupGracePeriod
 	if gracePeriod == 0 {
-		gracePeriod = time.Hour // safe default — see SetCleanupGracePeriod
+		gracePeriod = time.Hour // safe default - see SetCleanupGracePeriod
 	}
 	cutoffTime := time.Now().Add(-gracePeriod)
 
@@ -669,7 +677,7 @@ func (w *UploadWorker) cleanupOrphanedFiles(ctx context.Context) error {
 
 		// Parse path components.
 		// filepath.SplitList splits on the OS list-separator (":" on Unix, ";"
-		// on Windows) — it is intended for $PATH-style strings and is wrong here.
+		// on Windows) - it is intended for $PATH-style strings and is wrong here.
 		// Use strings.Split with the path separator instead.
 		parts := strings.Split(relPath, string(filepath.Separator))
 

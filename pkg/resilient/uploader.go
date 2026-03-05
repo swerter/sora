@@ -43,6 +43,14 @@ func (rd *ResilientDatabase) IsContentHashUploadedWithRetry(ctx context.Context,
 	return result.(bool), nil
 }
 
+func (rd *ResilientDatabase) ExhaustUploadAttemptsWithRetry(ctx context.Context, contentHash string, accountID int64, maxAttempts int) error {
+	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
+		return nil, rd.getOperationalDatabaseForOperation(true).ExhaustUploadAttempts(ctx, tx, contentHash, accountID, maxAttempts)
+	}
+	_, err := rd.executeWriteInTxWithRetry(ctx, cleanupRetryConfig, timeoutWrite, op)
+	return err
+}
+
 func (rd *ResilientDatabase) DeleteFailedUploadWithRetry(ctx context.Context, contentHash string, accountID int64) (int64, error) {
 	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return rd.getOperationalDatabaseForOperation(true).DeleteFailedUpload(ctx, tx, contentHash, accountID)

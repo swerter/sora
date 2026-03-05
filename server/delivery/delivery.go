@@ -241,9 +241,26 @@ func (d *DeliveryContext) DeliverMessage(recipient RecipientInfo, messageBytes [
 			// Don't notify uploader for duplicates
 			return result, err
 		}
-		// For non-duplicate errors, always clean up the file
+		// DO NOT delete the local file on non-duplicate errors.
+		//
+		// The DB transaction may have committed before the error was returned to us
+		// (e.g. a network timeout during the COMMIT acknowledgment — the server
+		// committed but the ACK never reached sora). In that case:
+		//   • The pending_uploads record IS in the database.
+		//   • If we delete the file here, the uploader will retry 5 times with
+		//     "no such file or directory", exhaust max_attempts, and the message
+		//     is permanently lost (S3 status: MISSING) — exactly the incident that
+		//     was reported (upload id=6197517, hash=66e220f4...).
+		//
+		// If the transaction truly rolled back (no pending_upload record), the file
+		// will be cleaned up by cleanupOrphanedFiles after the 1-hour grace period.
+		// That is a safe, conservative outcome — a harmless temporary orphan.
+		//
+		// Old code deleted the file here:
+		//   _ = d.Uploader.RemoveLocalFile(*filePath)
+		// That was the proximate cause of permanent message loss on transient DB errors.
 		if filePath != nil {
-			_ = d.Uploader.RemoveLocalFile(*filePath)
+			d.Logger.Log("Keeping local file after DB error (transaction may have committed): %s", *filePath)
 		}
 		result.ErrorMessage = fmt.Sprintf("Failed to save message: %v", err)
 		return result, err

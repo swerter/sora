@@ -242,6 +242,18 @@ func (db *Database) GetFailedUploadsWithEmail(ctx context.Context, maxAttempts i
 	return uploads, nil
 }
 
+// ExhaustUploadAttempts sets the attempt count to maxAttempts for the given upload,
+// immediately marking it as permanently failed without cycling through retries one by one.
+// Use this when the content is confirmed permanently lost (file missing AND not in S3).
+func (d *Database) ExhaustUploadAttempts(ctx context.Context, tx pgx.Tx, contentHash string, accountID int64, maxAttempts int) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE pending_uploads
+		SET attempts = $3, last_attempt = now()
+		WHERE content_hash = $1 AND account_id = $2`,
+		contentHash, accountID, maxAttempts)
+	return err
+}
+
 // DeleteFailedUpload deletes the pending_uploads record and any unuploaded message rows
 // for the given content hash + account. Used by the admin tool to clean up entries where
 // the content is permanently lost (✗ MISSING in S3 and no local file).
