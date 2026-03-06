@@ -9,15 +9,15 @@ import (
 
 // --- HTTP API Wrappers ---
 
-func (rd *ResilientDatabase) AccountExistsWithRetry(ctx context.Context, email string) (bool, error) {
+func (rd *ResilientDatabase) AccountExistsWithRetry(ctx context.Context, email string) (*db.AccountExistsResult, error) {
 	op := func(ctx context.Context) (any, error) {
 		return rd.getOperationalDatabaseForOperation(false).AccountExists(ctx, email)
 	}
 	result, err := rd.executeReadWithRetry(ctx, apiRetryConfig, timeoutRead, op)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return result.(bool), nil
+	return result.(*db.AccountExistsResult), nil
 }
 
 func (rd *ResilientDatabase) GetLatestCacheMetricsWithRetry(ctx context.Context) ([]*db.CacheMetricsRecord, error) {

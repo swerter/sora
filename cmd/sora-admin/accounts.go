@@ -554,7 +554,7 @@ func createAccount(ctx context.Context, cfg AdminConfig, email, password, passwo
 		HashType:     hashType,
 	}
 
-	if err := rdb.CreateAccountWithRetry(ctx, req); err != nil {
+	if _, err := rdb.CreateAccountWithRetry(ctx, req); err != nil {
 		return err
 	}
 

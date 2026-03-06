@@ -33,7 +33,7 @@ func TestSharedMailbox_DeleteWithChildren(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 
@@ -240,7 +240,7 @@ func TestSharedMailbox_RenameWithChildren(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 

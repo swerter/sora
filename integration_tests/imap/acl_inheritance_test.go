@@ -33,7 +33,7 @@ func TestACL_ChildMailboxInheritance(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 
@@ -191,7 +191,7 @@ func TestACL_ChildMailboxInheritance_ModifyParent(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 

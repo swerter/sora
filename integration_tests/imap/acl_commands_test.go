@@ -26,7 +26,7 @@ func createSecondUser(t *testing.T, server *common.TestServer, domain string, su
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second account: %v", err)
 	}
 	return email, password

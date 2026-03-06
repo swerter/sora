@@ -445,7 +445,7 @@ func TestUpdatePassword(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = testDB.CreateAccount(ctx, tx, req)
+	_, err = testDB.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 
 	err = tx.Commit(ctx)
@@ -503,7 +503,7 @@ func TestGetCredentialForAuth(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = testDB.CreateAccount(ctx, tx, req)
+	_, err = testDB.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 
 	err = tx.Commit(ctx)
@@ -558,7 +558,7 @@ func TestGetAccountIDByAddress(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit(ctx))
 
@@ -599,7 +599,7 @@ func TestGetPrimaryEmailForAccount(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit(ctx))
 

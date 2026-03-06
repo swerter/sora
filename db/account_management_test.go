@@ -43,16 +43,18 @@ func TestDeleteAccount(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 
 	err = tx.Commit(ctx)
 	require.NoError(t, err)
 
 	// Test 2: Verify account exists
-	exists, err := db.AccountExists(ctx, testEmail)
+	result, err := db.AccountExists(ctx, testEmail)
 	assert.NoError(t, err)
-	assert.True(t, exists)
+	assert.True(t, result.Exists)
+	assert.False(t, result.Deleted)
+	assert.Equal(t, "active", result.Status)
 
 	// Test 3: Delete the account
 	tx2, err := db.GetWritePool().Begin(ctx)
@@ -100,7 +102,7 @@ func TestRestoreAccount(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 
 	err = tx.Commit(ctx)
@@ -129,9 +131,11 @@ func TestRestoreAccount(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test 3: Verify account is restored and exists
-	exists, err := db.AccountExists(ctx, testEmail)
+	result, err := db.AccountExists(ctx, testEmail)
 	assert.NoError(t, err)
-	assert.True(t, exists)
+	assert.True(t, result.Exists)
+	assert.False(t, result.Deleted)
+	assert.Equal(t, "active", result.Status)
 
 	// Test 4: Try to restore non-deleted account
 	tx4, err := db.GetWritePool().Begin(ctx)
@@ -168,7 +172,7 @@ func TestUpdateAccount(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 
 	err = tx.Commit(ctx)
@@ -220,9 +224,11 @@ func TestAccountExists(t *testing.T) {
 	ctx := context.Background()
 
 	// Test 1: Check non-existent account
-	exists, err := db.AccountExists(ctx, testEmail)
+	result, err := db.AccountExists(ctx, testEmail)
 	assert.NoError(t, err)
-	assert.False(t, exists)
+	assert.False(t, result.Exists)
+	assert.False(t, result.Deleted)
+	assert.Equal(t, "not_found", result.Status)
 
 	// Test 2: Create account and check existence
 	tx, err := db.GetWritePool().Begin(ctx)
@@ -235,16 +241,18 @@ func TestAccountExists(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 
 	err = tx.Commit(ctx)
 	require.NoError(t, err)
 
 	// Test 3: Verify account now exists
-	exists, err = db.AccountExists(ctx, testEmail)
+	result, err = db.AccountExists(ctx, testEmail)
 	assert.NoError(t, err)
-	assert.True(t, exists)
+	assert.True(t, result.Exists)
+	assert.False(t, result.Deleted)
+	assert.Equal(t, "active", result.Status)
 
 	t.Logf("Successfully tested AccountExists with email: %s", testEmail)
 }
@@ -271,7 +279,7 @@ func TestGetAccountDetails(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 
 	err = tx.Commit(ctx)
@@ -327,7 +335,7 @@ func TestListAccounts(t *testing.T) {
 			IsPrimary: true, // Each is primary for its own account
 			HashType:  "bcrypt",
 		}
-		err = db.CreateAccount(ctx, tx, req)
+		_, err = db.CreateAccount(ctx, tx, req)
 		require.NoError(t, err)
 	}
 

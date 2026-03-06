@@ -717,7 +717,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 			HashType:     "bcrypt",
 		}
 
-		err := s.rdb.CreateAccountWithRetry(ctx, createReq)
+		accountID, err := s.rdb.CreateAccountWithRetry(ctx, createReq)
 		if err != nil {
 			if errors.Is(err, consts.ErrDBUniqueViolation) {
 				s.writeError(w, http.StatusConflict, "Account already exists")
@@ -725,14 +725,6 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 			}
 			logger.Warn("HTTP API: Error creating account", "name", s.name, "error", err)
 			s.writeError(w, http.StatusInternalServerError, "Failed to create account")
-			return
-		}
-
-		// Get the created account ID
-		accountID, err := s.rdb.GetAccountIDByAddressWithRetry(ctx, req.Email)
-		if err != nil {
-			logger.Warn("HTTP API: Error getting new account ID", "name", s.name, "error", err)
-			s.writeError(w, http.StatusInternalServerError, "Failed to retrieve new account ID")
 			return
 		}
 
@@ -780,7 +772,7 @@ func (s *Server) handleAccountExists(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	exists, err := s.rdb.AccountExistsWithRetry(ctx, email)
+	result, err := s.rdb.AccountExistsWithRetry(ctx, email)
 	if err != nil {
 		logger.Warn("HTTP API: Error checking account existence", "name", s.name, "error", err)
 		s.writeError(w, http.StatusInternalServerError, "Error checking account existence")
@@ -788,8 +780,10 @@ func (s *Server) handleAccountExists(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"email":  email,
-		"exists": exists,
+		"email":   email,
+		"exists":  result.Exists,
+		"deleted": result.Deleted,
+		"status":  result.Status,
 	})
 }
 

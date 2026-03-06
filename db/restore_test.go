@@ -32,7 +32,7 @@ func setupRestoreTestDatabase(t *testing.T) (*Database, int64, string, int64, in
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 
 	err = tx.Commit(ctx)

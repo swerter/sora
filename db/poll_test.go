@@ -74,7 +74,7 @@ func TestPollMailbox(t *testing.T) {
 	require.NoError(t, err)
 	testEmail := fmt.Sprintf("test_poll_%d@example.com", time.Now().UnixNano())
 	req := CreateAccountRequest{Email: testEmail, Password: "password", IsPrimary: true, HashType: "bcrypt"}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit(ctx))
 

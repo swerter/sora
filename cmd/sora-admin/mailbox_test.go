@@ -216,15 +216,9 @@ func createMailboxTestAccount(t *testing.T, rdb *resilient.ResilientDatabase, em
 	}
 
 	// Create account
-	err := rdb.CreateAccountWithRetry(ctx, req)
+	accountID, err := rdb.CreateAccountWithRetry(ctx, req)
 	if err != nil {
 		t.Fatalf("Failed to create test account: %v", err)
-	}
-
-	// Get account ID
-	accountID, err := rdb.GetAccountIDByEmailWithRetry(ctx, email)
-	if err != nil {
-		t.Fatalf("Failed to get account ID: %v", err)
 	}
 
 	t.Logf("Created test account: %s (ID: %d)", email, accountID)

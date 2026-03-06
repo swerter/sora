@@ -337,15 +337,9 @@ func createACLTestAccount(t *testing.T, rdb *resilient.ResilientDatabase, email,
 		IsPrimary: true,
 	}
 
-	err := rdb.CreateAccountWithRetry(ctx, req)
+	accountID, err := rdb.CreateAccountWithRetry(ctx, req)
 	if err != nil {
 		t.Fatalf("Failed to create account: %v", err)
-	}
-
-	// Get account ID
-	accountID, err := rdb.GetAccountIDByAddressWithRetry(ctx, email)
-	if err != nil {
-		t.Fatalf("Failed to get account ID: %v", err)
 	}
 
 	return TestAccount{

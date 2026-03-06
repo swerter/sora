@@ -133,7 +133,7 @@ func TestSharedMailbox_MultiUserAccess(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 	account2 := common.TestAccount{Email: email2, Password: password2}
@@ -195,7 +195,7 @@ func TestSharedMailbox_ACLEnforcement(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 
@@ -308,7 +308,7 @@ func TestACL_GetSetDeleteACL(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 
@@ -402,7 +402,7 @@ func TestACL_ListMyRights(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 
@@ -487,7 +487,7 @@ func TestACL_OwnerCannotBeLockedOut(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 
@@ -573,7 +573,7 @@ func TestSharedMailbox_CrossDomainRestriction(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create user from different domain: %v", err)
 	}
 

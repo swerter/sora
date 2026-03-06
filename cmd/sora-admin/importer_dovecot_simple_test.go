@@ -202,7 +202,7 @@ func createSimpleTestAccount(t *testing.T, rdb *resilient.ResilientDatabase, ema
 		IsPrimary: true,
 	}
 
-	err := rdb.CreateAccountWithRetry(context.Background(), req)
+	_, err := rdb.CreateAccountWithRetry(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Failed to create test account %s: %v", email, err)
 	}

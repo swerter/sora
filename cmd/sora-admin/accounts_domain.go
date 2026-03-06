@@ -52,14 +52,14 @@ func purgeDomain(ctx context.Context, cfg AdminConfig, domain string) error {
 		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 		// Check if already purged (account doesn't exist in DB anymore)
-		exists, err := rdb.AccountExistsWithRetry(ctx, acct.PrimaryEmail)
+		result, err := rdb.AccountExistsWithRetry(ctx, acct.PrimaryEmail)
 		if err != nil {
 			fmt.Printf("❌ Error checking account existence: %v\n\n", err)
 			failedCount++
 			continue
 		}
 
-		if !exists {
+		if !result.Exists {
 			fmt.Printf("⏭️  Account already purged, skipping\n\n")
 			skippedCount++
 			continue

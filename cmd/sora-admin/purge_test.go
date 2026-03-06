@@ -68,9 +68,9 @@ func TestAccountPurge(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify account deleted
-	exists, err := rdb.AccountExistsWithRetry(ctx, email)
+	result, err := rdb.AccountExistsWithRetry(ctx, email)
 	require.NoError(t, err)
-	require.False(t, exists, "Account should be deleted")
+	require.False(t, result.Exists, "Account should be deleted")
 
 	// Verify messages deleted from DB
 	messages, err = rdb.GetMessagesForAccount(ctx, accountID)
@@ -129,9 +129,9 @@ func TestAccountPurgeResumability(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify account fully purged
-	exists, err := rdb.AccountExistsWithRetry(ctx, email)
+	result, err := rdb.AccountExistsWithRetry(ctx, email)
 	require.NoError(t, err)
-	require.False(t, exists)
+	require.False(t, result.Exists)
 
 	// CRITICAL: Verify NO S3 objects remain after resume
 	s3CountAfter := countS3ObjectsForAccount(t, s3Storage, email)
@@ -188,9 +188,9 @@ func TestAccountPurgeIsolation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify account 1 deleted
-	exists, err := rdb.AccountExistsWithRetry(ctx, email1)
+	result, err := rdb.AccountExistsWithRetry(ctx, email1)
 	require.NoError(t, err)
-	require.False(t, exists)
+	require.False(t, result.Exists)
 
 	// Verify account 1's S3 objects deleted
 	for _, s3Key := range s3Keys1 {
@@ -200,9 +200,9 @@ func TestAccountPurgeIsolation(t *testing.T) {
 	}
 
 	// VERIFY ACCOUNT 2 UNAFFECTED
-	exists, err = rdb.AccountExistsWithRetry(ctx, email2)
+	result, err = rdb.AccountExistsWithRetry(ctx, email2)
 	require.NoError(t, err)
-	require.True(t, exists, "Account 2 should still exist")
+	require.True(t, result.Exists, "Account 2 should still exist")
 
 	messages2After, err := rdb.GetMessagesForAccount(ctx, accountID2)
 	require.NoError(t, err)
@@ -271,9 +271,9 @@ func TestDomainPurge(t *testing.T) {
 
 	// Verify all test domain accounts deleted
 	for _, email := range testEmails {
-		exists, err := rdb.AccountExistsWithRetry(ctx, email)
+		result, err := rdb.AccountExistsWithRetry(ctx, email)
 		require.NoError(t, err)
-		require.False(t, exists, "Account should be deleted: %s", email)
+		require.False(t, result.Exists, "Account should be deleted: %s", email)
 
 		// CRITICAL: Verify NO S3 objects remain for this account
 		s3Count := countS3ObjectsForAccount(t, s3Storage, email)
@@ -281,9 +281,9 @@ func TestDomainPurge(t *testing.T) {
 	}
 
 	// Verify other domain account still exists
-	exists, err := rdb.AccountExistsWithRetry(ctx, otherEmail)
+	result, err := rdb.AccountExistsWithRetry(ctx, otherEmail)
 	require.NoError(t, err)
-	require.True(t, exists, "Other domain account should still exist")
+	require.True(t, result.Exists, "Other domain account should still exist")
 
 	messages, err := rdb.GetMessagesForAccount(ctx, otherAccountID)
 	require.NoError(t, err)
@@ -340,10 +340,10 @@ func TestDomainPurgeResumability(t *testing.T) {
 		accountID := testAccountIDs[i]
 
 		// Check if exists first (this simulates resumability)
-		exists, err := rdb.AccountExistsWithRetry(ctx, email)
+		result, err := rdb.AccountExistsWithRetry(ctx, email)
 		require.NoError(t, err)
 
-		if exists {
+		if result.Exists {
 			err = purgeAccountWithStorage(ctx, cfg, rdb, accountID, email, s3Storage)
 			require.NoError(t, err)
 		}
@@ -351,9 +351,9 @@ func TestDomainPurgeResumability(t *testing.T) {
 
 	// Verify all accounts deleted
 	for _, email := range testEmails {
-		exists, err := rdb.AccountExistsWithRetry(ctx, email)
+		result, err := rdb.AccountExistsWithRetry(ctx, email)
 		require.NoError(t, err)
-		require.False(t, exists, "Account should be deleted: %s", email)
+		require.False(t, result.Exists, "Account should be deleted: %s", email)
 	}
 }
 
@@ -401,9 +401,9 @@ func TestAccountPurgeS3Missing(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify account fully purged
-	exists, err = rdb.AccountExistsWithRetry(ctx, email)
+	result, err := rdb.AccountExistsWithRetry(ctx, email)
 	require.NoError(t, err)
-	require.False(t, exists)
+	require.False(t, result.Exists)
 
 	// Verify messages deleted from DB
 	messages, err := rdb.GetMessagesForAccount(ctx, accountID)
@@ -501,15 +501,9 @@ func createPurgeTestAccount(t *testing.T, rdb *resilient.ResilientDatabase, emai
 		HashType:  "bcrypt",
 	}
 
-	err := rdb.CreateAccountWithRetry(ctx, req)
+	accountID, err := rdb.CreateAccountWithRetry(ctx, req)
 	if err != nil {
 		t.Fatalf("Failed to create test account: %v", err)
-	}
-
-	// Get account ID
-	accountID, err := rdb.GetAccountIDByEmailWithRetry(ctx, email)
-	if err != nil {
-		t.Fatalf("Failed to get account ID: %v", err)
 	}
 
 	// Create default mailboxes (INBOX, Sent, Drafts, Trash)

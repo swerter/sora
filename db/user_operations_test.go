@@ -32,7 +32,7 @@ func TestGetAllMessagesForUserVerification(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 	err = tx.Commit(ctx)
 	require.NoError(t, err)
@@ -154,7 +154,7 @@ func TestGetAllMessagesForUserVerification(t *testing.T) {
 			IsPrimary: true,
 			HashType:  "bcrypt",
 		}
-		err = db.CreateAccount(ctx, tx4, req2)
+		_, err = db.CreateAccount(ctx, tx4, req2)
 		require.NoError(t, err)
 		require.NoError(t, tx4.Commit(ctx))
 
@@ -227,7 +227,7 @@ func TestMarkMessagesAsNotUploaded(t *testing.T) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 	err = tx.Commit(ctx)
 	require.NoError(t, err)

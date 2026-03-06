@@ -564,6 +564,16 @@ func (s *Server) GetConnectionManager() *proxy.ConnectionManager {
 	return s.connManager
 }
 
+// Addr returns the server's listening address
+func (s *Server) Addr() string {
+	s.listenerMu.RLock()
+	defer s.listenerMu.RUnlock()
+	if s.listener != nil {
+		return s.listener.Addr().String()
+	}
+	return s.addr
+}
+
 // registerSession adds a session to the active sessions map for graceful shutdown tracking
 func (s *Server) registerSession(session *Session) {
 	s.activeSessionsMu.Lock()

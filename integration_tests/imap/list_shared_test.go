@@ -33,7 +33,7 @@ func TestLIST_SharedMailboxes_DirectACL(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 
@@ -123,7 +123,7 @@ func TestLIST_SharedMailboxes_AnyoneIdentifier(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 
@@ -200,7 +200,7 @@ func TestLIST_SharedMailboxes_CrossDomain(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 
@@ -272,7 +272,7 @@ func TestLIST_SharedMailboxes_NoLookupRight(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 

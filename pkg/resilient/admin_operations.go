@@ -65,12 +65,15 @@ var adminRetryConfig = retry.BackoffConfig{
 	OperationName:   "db_admin",
 }
 
-func (rd *ResilientDatabase) CreateAccountWithRetry(ctx context.Context, req db.CreateAccountRequest) error {
+func (rd *ResilientDatabase) CreateAccountWithRetry(ctx context.Context, req db.CreateAccountRequest) (int64, error) {
 	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
-		return nil, rd.getOperationalDatabaseForOperation(true).CreateAccount(ctx, tx, req)
+		return rd.getOperationalDatabaseForOperation(true).CreateAccount(ctx, tx, req)
 	}
-	_, err := rd.executeWriteInTxWithRetry(ctx, adminRetryConfig, timeoutAdmin, op)
-	return err
+	result, err := rd.executeWriteInTxWithRetry(ctx, adminRetryConfig, timeoutAdmin, op)
+	if err != nil {
+		return 0, err
+	}
+	return result.(int64), nil
 }
 
 func (rd *ResilientDatabase) CreateAccountWithCredentialsWithRetry(ctx context.Context, req db.CreateAccountWithCredentialsRequest) (int64, error) {

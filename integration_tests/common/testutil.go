@@ -93,14 +93,9 @@ func CreateTestAccount(t *testing.T, rdb *resilient.ResilientDatabase) TestAccou
 		IsPrimary: true,
 	}
 
-	if err := rdb.CreateAccountWithRetry(context.Background(), req); err != nil {
-		t.Fatalf("Failed to create test account: %v", err)
-	}
-
-	// Get account ID and create default mailboxes
-	accountID, err := rdb.GetAccountIDByAddressWithRetry(context.Background(), email)
+	accountID, err := rdb.CreateAccountWithRetry(context.Background(), req)
 	if err != nil {
-		t.Fatalf("Failed to get account ID: %v", err)
+		t.Fatalf("Failed to create test account: %v", err)
 	}
 
 	// Create default mailboxes (INBOX, Sent, Drafts, etc.)
@@ -132,14 +127,9 @@ func CreateTestAccountWithEmail(t *testing.T, rdb *resilient.ResilientDatabase, 
 		IsPrimary: true,
 	}
 
-	if err := rdb.CreateAccountWithRetry(context.Background(), req); err != nil {
-		t.Fatalf("Failed to create test account: %v", err)
-	}
-
-	// Get account ID and create default mailboxes
-	accountID, err := rdb.GetAccountIDByAddressWithRetry(context.Background(), email)
+	accountID, err := rdb.CreateAccountWithRetry(context.Background(), req)
 	if err != nil {
-		t.Fatalf("Failed to get account ID: %v", err)
+		t.Fatalf("Failed to create test account: %v", err)
 	}
 
 	// Create default mailboxes (INBOX, Sent, Drafts, etc.)

@@ -198,7 +198,20 @@ components:
           example: "user@example.com"
         exists:
           type: boolean
+          description: True if the account exists in the database (even if deleted)
           example: true
+        deleted:
+          type: boolean
+          description: True if the account is soft-deleted (in grace period)
+          example: false
+        status:
+          type: string
+          description: Account status - "active", "deleted", or "not_found"
+          example: "active"
+          enum:
+            - active
+            - deleted
+            - not_found
 
     ConnectionInfo:
       type: object

@@ -130,14 +130,10 @@ func (td *TestDatabase) CreateTestAccount(t *testing.T, email, password string) 
 		HashType:  "bcrypt",
 	}
 
-	err = td.Database.CreateAccount(ctx, tx, req)
+	accountID, err := td.Database.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 
 	err = tx.Commit(ctx)
-	require.NoError(t, err)
-
-	// Get the created account ID
-	accountID, err := td.Database.GetAccountIDByAddress(ctx, email)
 	require.NoError(t, err)
 
 	return accountID

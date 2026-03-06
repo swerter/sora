@@ -297,7 +297,7 @@ func createMigrationTestAccount(t *testing.T, rdb *resilient.ResilientDatabase, 
 		IsPrimary: true,
 	}
 
-	err := rdb.CreateAccountWithRetry(context.Background(), req)
+	_, err := rdb.CreateAccountWithRetry(context.Background(), req)
 	if err != nil {
 		// Account might already exist from previous test
 		t.Logf("Note: Account creation returned: %v", err)

@@ -30,7 +30,7 @@ func setupMailboxRenameTestDatabase(t *testing.T) (*Database, int64, int64) {
 		IsPrimary: true,
 		HashType:  "bcrypt",
 	}
-	err = db.CreateAccount(ctx, tx, req)
+	_, err = db.CreateAccount(ctx, tx, req)
 	require.NoError(t, err)
 
 	err = tx.Commit(ctx)

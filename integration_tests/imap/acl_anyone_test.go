@@ -32,7 +32,7 @@ func TestACL_AnyoneIdentifier_BasicGrant(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestACL_AnyoneIdentifier_SameDomainOnly(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 
@@ -211,7 +211,7 @@ func TestACL_AnyoneIdentifier_ModifyRights(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 
@@ -322,7 +322,7 @@ func TestACL_AnyoneIdentifier_DeleteACL(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 
@@ -425,7 +425,7 @@ func TestACL_AnyoneIdentifier_CombinedWithUserACL(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 
@@ -435,7 +435,7 @@ func TestACL_AnyoneIdentifier_CombinedWithUserACL(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req3); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req3); err != nil {
 		t.Fatalf("Failed to create account3: %v", err)
 	}
 
@@ -568,7 +568,7 @@ func TestACL_AnyoneIdentifier_MYRIGHTS(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req2); err != nil {
 		t.Fatalf("Failed to create account2: %v", err)
 	}
 

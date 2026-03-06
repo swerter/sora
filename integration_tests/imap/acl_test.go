@@ -93,7 +93,7 @@ func TestACL_GETACL(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestACL_SETACL(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 
@@ -300,7 +300,7 @@ func TestACL_DELETEACL(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 
@@ -412,7 +412,7 @@ func TestACL_LISTRIGHTS(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 
@@ -472,7 +472,7 @@ func TestACL_PermissionDenied(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create second user: %v", err)
 	}
 
@@ -561,7 +561,7 @@ func TestACL_CrossDomainDenied(t *testing.T) {
 		HashType:  "bcrypt",
 		IsPrimary: true,
 	}
-	if err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
+	if _, err := server.ResilientDB.CreateAccountWithRetry(context.Background(), req); err != nil {
 		t.Fatalf("Failed to create user from different domain: %v", err)
 	}
 

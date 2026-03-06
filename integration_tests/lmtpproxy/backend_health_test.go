@@ -36,9 +36,7 @@ func TestLMTPProxy_UserNotFound_AllBackendsUnhealthy(t *testing.T) {
 
 	// Start a database for the proxy (user does NOT exist in this database)
 	// This simulates a proxy with separate/incomplete database from backends
-	dbConfig := common.CreateTestDatabaseConfig(t)
-	rdb := common.CreateTestResilientDatabase(t, ctx, dbConfig)
-	defer rdb.Close()
+	rdb := common.SetupTestDatabase(t)
 
 	// Create a fake backend that accepts connections but then closes immediately
 	// This simulates an unhealthy backend (connection failures)
@@ -62,64 +60,61 @@ func TestLMTPProxy_UserNotFound_AllBackendsUnhealthy(t *testing.T) {
 	}()
 	defer backendListener.Close()
 
-	// Create LMTP proxy with the unhealthy backend
-	proxyListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Failed to create proxy listener: %v", err)
-	}
-	defer proxyListener.Close()
-
-	proxyServer, err := lmtpproxy.NewServer(lmtpproxy.ServerOptions{
+	// Create LMTP proxy with the unhealthy backend.
+	// Use "127.0.0.1:0" so the OS assigns a free port; retrieve it via Addr() after Start().
+	proxyServer, err := lmtpproxy.New(ctx, rdb, "test-proxy", lmtpproxy.ServerOptions{
 		Name:                     "test-proxy",
-		Addr:                     proxyListener.Addr().String(),
+		Addr:                     "127.0.0.1:0",
 		RemoteAddrs:              []string{backendAddr},
 		RemoteTLS:                false,
 		ConnectTimeout:           500 * time.Millisecond,
 		EnableBackendHealthCheck: true, // Enable health checks
 		MaxMessageSize:           10 * 1024 * 1024,
-	}, rdb, nil, nil)
+		TrustedProxies:           []string{"127.0.0.0/8", "::1/128"}, // Trust localhost connections
+		AuthIdleTimeout:          5 * time.Second,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create LMTP proxy server: %v", err)
 	}
 
 	// Start proxy server
 	go func() {
-		if err := proxyServer.ServeListener(proxyListener); err != nil {
+		if err := proxyServer.Start(); err != nil {
 			t.Logf("Proxy server stopped: %v", err)
 		}
 	}()
 	defer proxyServer.Stop()
 
-	// Wait for backend to be marked unhealthy (3 consecutive failures)
-	// Each connection attempt will fail immediately
-	time.Sleep(2 * time.Second)
+	// Wait for server to bind its listener, then retrieve the actual address.
+	time.Sleep(100 * time.Millisecond)
+	proxyAddress := proxyServer.Addr()
 
-	// Connect to proxy
-	client, err := NewLMTPClient(proxyListener.Addr().String())
+	// The connection manager only marks a backend unhealthy after RecordConnectionFailure
+	// is called 3 times. There is no background health-probe goroutine — health is updated
+	// reactively when sessions try to connect. Simulate the 3 failures directly so the
+	// backend is definitively unhealthy before the RCPT TO check.
+	cm := proxyServer.GetConnectionManager()
+	cm.RecordConnectionFailure(backendAddr)
+	cm.RecordConnectionFailure(backendAddr)
+	cm.RecordConnectionFailure(backendAddr)
+
+	// Connect to proxy (NewLMTPClient already reads and validates the 220 greeting).
+	client, err := NewLMTPClient(proxyAddress)
 	if err != nil {
 		t.Fatalf("Failed to connect to proxy: %v", err)
 	}
 	defer client.Close()
 
-	// Read greeting
-	greeting, err := client.ReadResponse()
-	if err != nil {
-		t.Fatalf("Failed to read greeting: %v", err)
-	}
-	if !strings.HasPrefix(greeting, "220") {
-		t.Fatalf("Unexpected greeting: %s", greeting)
-	}
-
-	// Send LHLO
+	// Send LHLO — response is multi-line so drain all capability lines.
 	if err := client.SendCommand("LHLO test"); err != nil {
 		t.Fatalf("Failed to send LHLO: %v", err)
 	}
-	lhlo, err := client.ReadResponse()
+	lhlo, err := client.ReadMultilineResponse()
 	if err != nil {
 		t.Fatalf("Failed to read LHLO response: %v", err)
 	}
-	if !strings.HasPrefix(lhlo, "250") {
-		t.Fatalf("Unexpected LHLO response: %s", lhlo)
+	if !strings.HasPrefix(lhlo[0], "250") {
+		t.Fatalf("Unexpected LHLO response: %v", lhlo)
 	}
 
 	// Send MAIL FROM
@@ -134,9 +129,9 @@ func TestLMTPProxy_UserNotFound_AllBackendsUnhealthy(t *testing.T) {
 		t.Fatalf("Unexpected MAIL FROM response: %s", mail)
 	}
 
-	// Send RCPT TO for non-existent user
+	// Send RCPT TO for non-existent user.
 	// Since all backends are unhealthy and user doesn't exist in proxy DB,
-	// we should get TEMPFAIL (450) not permanent reject (550)
+	// we should get TEMPFAIL (450) not permanent reject (550).
 	if err := client.SendCommand("RCPT TO:<nonexistent@example.com>"); err != nil {
 		t.Fatalf("Failed to send RCPT TO: %v", err)
 	}
@@ -145,17 +140,12 @@ func TestLMTPProxy_UserNotFound_AllBackendsUnhealthy(t *testing.T) {
 		t.Fatalf("Failed to read RCPT TO response: %v", err)
 	}
 
-	// Verify we get TEMPFAIL (450) not permanent reject (550)
+	// Verify we get TEMPFAIL (450) not permanent reject (550).
 	if strings.HasPrefix(rcpt, "550") {
 		t.Errorf("Got permanent reject (550) but expected tempfail (450) when backends are unhealthy.\nResponse: %s", rcpt)
 	}
 	if !strings.HasPrefix(rcpt, "450") {
 		t.Errorf("Expected tempfail (450) when backends are unhealthy, got: %s", rcpt)
-	}
-
-	// Verify the response indicates temporary failure
-	if !strings.Contains(rcpt, "Requested action not taken") && !strings.Contains(rcpt, "try again") {
-		t.Logf("Warning: Response doesn't clearly indicate temporary failure: %s", rcpt)
 	}
 }
 
@@ -168,70 +158,57 @@ func TestLMTPProxy_UserNotFound_BackendsHealthy(t *testing.T) {
 	defer cancel()
 
 	// Start a database for the proxy (user does NOT exist in this database)
-	dbConfig := common.CreateTestDatabaseConfig(t)
-	rdb := common.CreateTestResilientDatabase(t, ctx, dbConfig)
-	defer rdb.Close()
+	rdb := common.SetupTestDatabase(t)
 
 	// Start a healthy backend (responds to LMTP properly)
 	backendAddr := startHealthyLMTPBackend(t)
 
-	// Create LMTP proxy with the healthy backend
-	proxyListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Failed to create proxy listener: %v", err)
-	}
-	defer proxyListener.Close()
-
-	proxyServer, err := lmtpproxy.NewServer(lmtpproxy.ServerOptions{
+	// Create LMTP proxy with the healthy backend.
+	// Use "127.0.0.1:0" so the OS assigns a free port; retrieve it via Addr() after Start().
+	proxyServer, err := lmtpproxy.New(ctx, rdb, "test-proxy", lmtpproxy.ServerOptions{
 		Name:                     "test-proxy",
-		Addr:                     proxyListener.Addr().String(),
+		Addr:                     "127.0.0.1:0",
 		RemoteAddrs:              []string{backendAddr},
 		RemoteTLS:                false,
 		ConnectTimeout:           500 * time.Millisecond,
 		EnableBackendHealthCheck: true,
 		MaxMessageSize:           10 * 1024 * 1024,
-	}, rdb, nil, nil)
+		TrustedProxies:           []string{"127.0.0.0/8", "::1/128"}, // Trust localhost connections
+		AuthIdleTimeout:          5 * time.Second,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create LMTP proxy server: %v", err)
 	}
 
 	// Start proxy server
 	go func() {
-		if err := proxyServer.ServeListener(proxyListener); err != nil {
+		if err := proxyServer.Start(); err != nil {
 			t.Logf("Proxy server stopped: %v", err)
 		}
 	}()
 	defer proxyServer.Stop()
 
-	// Wait for backend health check
-	time.Sleep(500 * time.Millisecond)
+	// Wait for server to bind its listener, then retrieve the actual address.
+	time.Sleep(100 * time.Millisecond)
+	proxyAddress := proxyServer.Addr()
 
-	// Connect to proxy
-	client, err := NewLMTPClient(proxyListener.Addr().String())
+	// Connect to proxy (NewLMTPClient already reads and validates the 220 greeting).
+	client, err := NewLMTPClient(proxyAddress)
 	if err != nil {
 		t.Fatalf("Failed to connect to proxy: %v", err)
 	}
 	defer client.Close()
 
-	// Read greeting
-	greeting, err := client.ReadResponse()
-	if err != nil {
-		t.Fatalf("Failed to read greeting: %v", err)
-	}
-	if !strings.HasPrefix(greeting, "220") {
-		t.Fatalf("Unexpected greeting: %s", greeting)
-	}
-
-	// Send LHLO
+	// Send LHLO — response is multi-line so drain all capability lines.
 	if err := client.SendCommand("LHLO test"); err != nil {
 		t.Fatalf("Failed to send LHLO: %v", err)
 	}
-	lhlo, err := client.ReadResponse()
+	lhlo, err := client.ReadMultilineResponse()
 	if err != nil {
 		t.Fatalf("Failed to read LHLO response: %v", err)
 	}
-	if !strings.HasPrefix(lhlo, "250") {
-		t.Fatalf("Unexpected LHLO response: %s", lhlo)
+	if !strings.HasPrefix(lhlo[0], "250") {
+		t.Fatalf("Unexpected LHLO response: %v", lhlo)
 	}
 
 	// Send MAIL FROM
@@ -246,9 +223,9 @@ func TestLMTPProxy_UserNotFound_BackendsHealthy(t *testing.T) {
 		t.Fatalf("Unexpected MAIL FROM response: %s", mail)
 	}
 
-	// Send RCPT TO for non-existent user
+	// Send RCPT TO for non-existent user.
 	// Since backends are healthy and user doesn't exist,
-	// we should get permanent reject (550)
+	// we should get permanent reject (550).
 	if err := client.SendCommand("RCPT TO:<nonexistent@example.com>"); err != nil {
 		t.Fatalf("Failed to send RCPT TO: %v", err)
 	}
@@ -257,7 +234,7 @@ func TestLMTPProxy_UserNotFound_BackendsHealthy(t *testing.T) {
 		t.Fatalf("Failed to read RCPT TO response: %v", err)
 	}
 
-	// Verify we get permanent reject (550) when backends are healthy
+	// Verify we get permanent reject (550) when backends are healthy.
 	if !strings.HasPrefix(rcpt, "550") {
 		t.Errorf("Expected permanent reject (550) when backends are healthy, got: %s", rcpt)
 	}

@@ -23,11 +23,11 @@ type CreateAccountRequest struct {
 }
 
 // CreateAccount creates a new account with the specified email and password
-func (db *Database) CreateAccount(ctx context.Context, tx pgx.Tx, req CreateAccountRequest) error {
+func (db *Database) CreateAccount(ctx context.Context, tx pgx.Tx, req CreateAccountRequest) (int64, error) {
 	// Validate email address format using server.NewAddress
 	address, err := server.NewAddress(req.Email)
 	if err != nil {
-		return fmt.Errorf("invalid email address: %w", err)
+		return 0, fmt.Errorf("invalid email address: %w", err)
 	}
 
 	normalizedEmail := address.FullAddress()
@@ -36,7 +36,7 @@ func (db *Database) CreateAccount(ctx context.Context, tx pgx.Tx, req CreateAcco
 	var existingAccountID int64
 	var deletedAt *time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT a.id, a.deleted_at 
+		SELECT a.id, a.deleted_at
 		FROM accounts a
 		JOIN credentials c ON a.id = c.account_id
 		WHERE LOWER(c.address) = $1
@@ -44,11 +44,11 @@ func (db *Database) CreateAccount(ctx context.Context, tx pgx.Tx, req CreateAcco
 
 	if err == nil {
 		if deletedAt != nil {
-			return fmt.Errorf("cannot create account with email %s: an account with this email is in deletion grace period", normalizedEmail)
+			return 0, fmt.Errorf("cannot create account with email %s: an account with this email is in deletion grace period", normalizedEmail)
 		}
-		return fmt.Errorf("%w: account with email %s already exists", consts.ErrAccountAlreadyExists, normalizedEmail)
+		return 0, fmt.Errorf("%w: account with email %s already exists", consts.ErrAccountAlreadyExists, normalizedEmail)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("error checking for existing account: %w", err)
+		return 0, fmt.Errorf("error checking for existing account: %w", err)
 	}
 
 	// Generate password hash or use provided hash
@@ -59,24 +59,24 @@ func (db *Database) CreateAccount(ctx context.Context, tx pgx.Tx, req CreateAcco
 	} else {
 		// Generate hash from password
 		if req.Password == "" {
-			return fmt.Errorf("either password or password_hash must be provided")
+			return 0, fmt.Errorf("either password or password_hash must be provided")
 		}
 
 		switch req.HashType {
 		case "ssha512":
 			hashedPassword, err = GenerateSSHA512Hash(req.Password)
 			if err != nil {
-				return fmt.Errorf("failed to generate SSHA512 hash: %w", err)
+				return 0, fmt.Errorf("failed to generate SSHA512 hash: %w", err)
 			}
 		case "sha512":
 			hashedPassword = GenerateSHA512Hash(req.Password)
 		case "bcrypt":
 			hashedPassword, err = GenerateBcryptHash(req.Password)
 			if err != nil {
-				return fmt.Errorf("failed to generate bcrypt hash: %w", err)
+				return 0, fmt.Errorf("failed to generate bcrypt hash: %w", err)
 			}
 		default:
-			return fmt.Errorf("unsupported hash type: %s", req.HashType)
+			return 0, fmt.Errorf("unsupported hash type: %s", req.HashType)
 		}
 	}
 
@@ -84,7 +84,7 @@ func (db *Database) CreateAccount(ctx context.Context, tx pgx.Tx, req CreateAcco
 	var accountID int64
 	err = tx.QueryRow(ctx, "INSERT INTO accounts (created_at) VALUES (now()) RETURNING id").Scan(&accountID)
 	if err != nil {
-		return fmt.Errorf("failed to create account: %w", err)
+		return 0, fmt.Errorf("failed to create account: %w", err)
 	}
 
 	// Create credential
@@ -94,12 +94,12 @@ func (db *Database) CreateAccount(ctx context.Context, tx pgx.Tx, req CreateAcco
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
-			return consts.ErrDBUniqueViolation
+			return 0, consts.ErrDBUniqueViolation
 		}
-		return fmt.Errorf("failed to create credential: %w", err)
+		return 0, fmt.Errorf("failed to create credential: %w", err)
 	}
 
-	return nil
+	return accountID, nil
 }
 
 // AddCredentialRequest represents the parameters for adding a credential to an existing account
@@ -398,21 +398,29 @@ func (db *Database) DeleteCredential(ctx context.Context, tx pgx.Tx, email strin
 	return nil
 }
 
-// AccountExists checks if an account with the given email exists and is not soft-deleted
-func (db *Database) AccountExists(ctx context.Context, email string) (bool, error) {
+// AccountExistsResult contains the result of checking if an account exists
+type AccountExistsResult struct {
+	Exists  bool   // True if the account exists in the database (even if deleted)
+	Deleted bool   // True if the account is soft-deleted (in grace period)
+	Status  string // "active", "deleted", or "not_found"
+}
+
+// AccountExists checks if an account with the given email exists
+// Returns existence status including whether it's deleted (in grace period)
+func (db *Database) AccountExists(ctx context.Context, email string) (*AccountExistsResult, error) {
 	// Validate email address format using server.NewAddress
 	address, err := server.NewAddress(email)
 	if err != nil {
-		return false, fmt.Errorf("invalid email address: %w", err)
+		return nil, fmt.Errorf("invalid email address: %w", err)
 	}
 
 	normalizedEmail := address.FullAddress()
 
-	// Check if account exists and is not soft-deleted
+	// Check if account exists (including soft-deleted accounts)
 	var accountID int64
 	var deletedAt any
 	err = db.GetReadPool().QueryRow(ctx, `
-		SELECT a.id, a.deleted_at 
+		SELECT a.id, a.deleted_at
 		FROM accounts a
 		JOIN credentials c ON a.id = c.account_id
 		WHERE LOWER(c.address) = $1
@@ -420,13 +428,27 @@ func (db *Database) AccountExists(ctx context.Context, email string) (bool, erro
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
+			return &AccountExistsResult{
+				Exists:  false,
+				Deleted: false,
+				Status:  "not_found",
+			}, nil
 		}
-		return false, fmt.Errorf("error checking account existence: %w", err)
+		return nil, fmt.Errorf("error checking account existence: %w", err)
 	}
 
-	// Return false if account is soft-deleted
-	return deletedAt == nil, nil
+	// Account exists - determine if it's deleted
+	isDeleted := deletedAt != nil
+	status := "active"
+	if isDeleted {
+		status = "deleted"
+	}
+
+	return &AccountExistsResult{
+		Exists:  true,
+		Deleted: isDeleted,
+		Status:  status,
+	}, nil
 }
 
 var (
