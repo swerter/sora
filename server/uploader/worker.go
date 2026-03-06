@@ -268,14 +268,6 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 
 	logger.Info("Uploader: Uploading hash", "hash", upload.ContentHash, "account", upload.AccountID)
 
-	// Check for context cancellation early
-	select {
-	case <-ctx.Done():
-		logger.Info("Uploader: Request aborted during upload", "hash", upload.ContentHash)
-		return
-	default:
-	}
-
 	// Get primary address to construct S3 path
 	address, err := w.rdb.GetPrimaryEmailForAccountWithRetry(ctx, upload.AccountID)
 	if err != nil {
@@ -389,6 +381,15 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 	// The storage layer should handle checking for existence.
 	start := time.Now()
 	err = w.s3.PutWithRetry(ctx, s3Key, bytes.NewReader(data), upload.Size)
+
+	// Check if shutdown was requested during S3 upload
+	shutdownRequested := false
+	select {
+	case <-ctx.Done():
+		shutdownRequested = true
+	default:
+	}
+
 	if err != nil {
 		// Only count toward max_attempts for permanent errors (e.g., invalid data).
 		// Transient S3 errors (network, timeout, circuit breaker) should NOT count,
@@ -413,7 +414,20 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 
 	// Finalize the upload in the database. This is a transactional operation.
 	// It's critical to do this *before* removing the local source file.
-	err = w.rdb.CompleteS3UploadWithRetry(ctx, upload.ContentHash, upload.AccountID)
+	//
+	// During shutdown, use a background context with a timeout to ensure the database
+	// update completes even though the main context is canceled. This prevents the
+	// "context canceled" error that leaves uploads in an inconsistent state (uploaded
+	// to S3 but not marked complete in the database).
+	dbCtx := ctx
+	if shutdownRequested {
+		var cancel context.CancelFunc
+		dbCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		logger.Info("Uploader: Using background context for DB finalization during shutdown", "hash", upload.ContentHash)
+	}
+
+	err = w.rdb.CompleteS3UploadWithRetry(dbCtx, upload.ContentHash, upload.AccountID)
 	if err != nil {
 		// If this fails, the S3 object might be orphaned temporarily, but the task is not lost.
 		// The task will be retried after the lease expires. Because the local file still

@@ -347,6 +347,14 @@ func (db *Database) migrate(ctx context.Context, migrationTimeout time.Duration)
 	migrateCtx, cancel := context.WithTimeout(ctx, migrationTimeout)
 	defer cancel()
 
+	// migrationCancelled is set to true when migrateCtx fires before the
+	// migration goroutine has had a chance to run m.Up(). The goroutine
+	// checks this flag after unblocking from pg_advisory_lock() so it can
+	// exit without writing dirty=true or applying any schema changes.
+	// This prevents a race where the goroutine wakes up *after* migrate()
+	// has already returned and modifies schema_migrations behind the caller's back.
+	var migrationCancelled atomic.Bool
+
 	// errChan carries the result of the entire migration sequence.
 	// Buffered so the goroutine can exit even if we have already moved on to
 	// the polling path after a timeout.
@@ -389,6 +397,18 @@ func (db *Database) migrate(ctx context.Context, migrationTimeout time.Duration)
 		}
 		if dirty {
 			errChan <- fmt.Errorf("database is in a dirty migration state (version %d). Manual intervention required", ver)
+			return
+		}
+
+		// IMPORTANT: Check whether migrateCtx already fired while this goroutine
+		// was blocked in pg_advisory_lock() inside WithInstance(). If it did, the
+		// caller has already moved on to the polling path and returned an error.
+		// Running m.Up() here would write dirty=true and apply schema changes
+		// AFTER migrate() has returned — corrupting the database state from the
+		// caller's perspective and causing races with test cleanup / peer servers.
+		if migrationCancelled.Load() {
+			logger.Info("Database: migration goroutine: cancelled while waiting for advisory lock — skipping m.Up() to avoid post-return schema mutation")
+			errChan <- fmt.Errorf("migration cancelled: timed out while waiting for advisory lock")
 			return
 		}
 
@@ -441,6 +461,12 @@ func (db *Database) migrate(ctx context.Context, migrationTimeout time.Duration)
 		}
 	case <-migrateCtx.Done():
 		// Timeout occurred - likely another instance is running migrations.
+		// Signal the migration goroutine not to run m.Up() if it is still waiting
+		// on pg_advisory_lock(). Without this, the goroutine could wake up after
+		// migrate() has returned and write dirty=true / apply schema changes behind
+		// the caller's back, causing test cleanup races and production inconsistency.
+		migrationCancelled.Store(true)
+
 		// IMPORTANT: The migration goroutine may be blocked on pg_advisory_lock().
 		// We MUST NOT call sqlDB.Close() here because it waits for in-flight queries,
 		// which would deadlock. Instead, spawn a cleanup goroutine that waits for

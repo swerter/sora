@@ -548,3 +548,68 @@ func TestProcessPendingUploads(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to list pending uploads")
 	})
 }
+
+// TestProcessSingleUpload_ShutdownDuringFinalization tests that when shutdown is requested
+// after S3 upload completes but before DB finalization, the worker uses a background context
+// to complete the DB update instead of failing with "context canceled".
+func TestProcessSingleUpload_ShutdownDuringFinalization(t *testing.T) {
+	worker, rdb, s3, cache, _ := setupTestWorker(t)
+
+	// Create test upload
+	upload := db.PendingUpload{
+		ID:          1,
+		AccountID:   100,
+		ContentHash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+		Size:        100,
+		CreatedAt:   time.Now(),
+		Attempts:    0,
+	}
+
+	// Write local file
+	filePath := worker.FilePath(upload.ContentHash, upload.AccountID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(filePath), 0755))
+	require.NoError(t, os.WriteFile(filePath, []byte("test data"), 0644))
+
+	// Create a context that will be canceled
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Track S3 upload completion
+	s3UploadCompleted := false
+	s3.PutWithRetryFunc = func(ctx context.Context, key string, reader io.Reader, size int64) error {
+		s3UploadCompleted = true
+		// Simulate shutdown happening right after S3 upload
+		cancel()
+		return nil
+	}
+
+	// Track if DB finalization was attempted and succeeded
+	dbFinalizationAttempted := false
+	dbFinalizationSucceeded := false
+	rdb.CompleteS3UploadWithRetryFunc = func(ctx context.Context, contentHash string, accountID int64) error {
+		dbFinalizationAttempted = true
+		// Verify we're using a background context (not canceled)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("DB finalization context is canceled")
+		default:
+			dbFinalizationSucceeded = true
+			return nil
+		}
+	}
+
+	rdb.IsContentHashUploadedWithRetryFunc = func(ctx context.Context, contentHash string, accountID int64) (bool, error) {
+		return false, nil
+	}
+
+	cache.MoveInFunc = func(srcPath, contentHash string) error {
+		return nil
+	}
+
+	// Process the upload
+	worker.processSingleUpload(ctx, upload)
+
+	// Verify expectations
+	assert.True(t, s3UploadCompleted, "S3 upload should have completed")
+	assert.True(t, dbFinalizationAttempted, "DB finalization should have been attempted")
+	assert.True(t, dbFinalizationSucceeded, "DB finalization should have succeeded with background context")
+}

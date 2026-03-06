@@ -41,10 +41,19 @@ func resetMigrationState(t *testing.T, targetVersion int) {
 	t.Helper()
 	ctx := context.Background()
 
-	db := setupTestDatabase(t)
-	defer db.Close()
+	// Open a connection WITHOUT running migrations (runMigrations=false).
+	// resetMigrationState must be callable even when schema_migrations is in a
+	// dirty state — e.g., left by a background migration goroutine after a
+	// migrate() timeout. Using setupTestDatabase / NewDatabaseFromConfig with
+	// runMigrations=true would hit the dirty-state guard and fail before we
+	// can clean anything up.
+	database, err := NewDatabaseFromConfig(ctx, makeTestDBConfig(), false, false)
+	if err != nil {
+		t.Fatalf("resetMigrationState: connect to DB: %v", err)
+	}
+	defer database.Close()
 
-	pool := db.WritePool
+	pool := database.WritePool
 
 	// --- Migration 13: optimize_acl_queries ---
 	// Drop indexes, trigger, function, and column added by migration 13.
@@ -65,7 +74,7 @@ func resetMigrationState(t *testing.T, targetVersion int) {
 
 	// --- Migration 12: prune_partial_indexes ---
 	// Drop the two partial indexes added by migration 12 (IF EXISTS → idempotent).
-	_, err := pool.Exec(ctx, `DROP INDEX IF EXISTS idx_message_contents_bodies_prunable`)
+	_, err = pool.Exec(ctx, `DROP INDEX IF EXISTS idx_message_contents_bodies_prunable`)
 	if err != nil {
 		t.Fatalf("resetMigrationState: drop bodies index: %v", err)
 	}
