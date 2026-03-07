@@ -308,7 +308,7 @@ func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag
 	// Query to select messages with the specified flag, including custom_flags
 	// and other necessary fields to populate the Message struct.
 	rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, `
-		SELECT 
+		SELECT
 			m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
 			m.internal_date, m.size, m.body_structure, m.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
 			m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
@@ -328,6 +328,43 @@ func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag
 	}
 
 	return messages, nil
+}
+
+// MessageUIDSeq holds the UID and sequence number of a message, used for
+// lightweight operations like EXPUNGE that do not need full message data.
+type MessageUIDSeq struct {
+	UID imap.UID
+	Seq uint32
+}
+
+// GetDeletedMessageUIDsAndSeqs efficiently retrieves only UIDs and sequence numbers
+// for messages with the \Deleted flag, optimized for EXPUNGE operations.
+// This avoids fetching unnecessary columns like body_structure and recipients_json.
+func (db *Database) GetDeletedMessageUIDsAndSeqs(ctx context.Context, mailboxID int64) ([]MessageUIDSeq, error) {
+	rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, `
+		SELECT m.uid, ms.seqnum
+		FROM messages m
+		JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
+		WHERE m.mailbox_id = $1
+		  AND (m.flags & $2) != 0
+		  AND m.expunged_at IS NULL
+		ORDER BY m.uid
+	`, mailboxID, FlagToBitwise(imap.FlagDeleted))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []MessageUIDSeq
+	for rows.Next() {
+		var entry MessageUIDSeq
+		if err := rows.Scan(&entry.UID, &entry.Seq); err != nil {
+			return nil, err
+		}
+		results = append(results, entry)
+	}
+
+	return results, rows.Err()
 }
 
 // GetMessageHeaders retrieves the raw headers for a specific message.

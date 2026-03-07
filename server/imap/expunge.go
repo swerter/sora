@@ -42,7 +42,8 @@ func (s *IMAPSession) Expunge(w *imapserver.ExpungeWriter, uidSet *imap.UIDSet) 
 	}
 
 	// Middle phase: Get messages to expunge (outside lock)
-	messages, err := s.server.rdb.GetMessagesByFlagWithRetry(s.ctx, mailboxID, imap.FlagDeleted)
+	// Use optimized function that only fetches UIDs and sequence numbers
+	deletedMessages, err := s.server.rdb.GetDeletedMessageUIDsAndSeqsWithRetry(s.ctx, mailboxID)
 	if err != nil {
 		return s.internalError("failed to fetch deleted messages: %v", err)
 	}
@@ -53,7 +54,7 @@ func (s *IMAPSession) Expunge(w *imapserver.ExpungeWriter, uidSet *imap.UIDSet) 
 	}
 
 	if uidSet != nil {
-		for _, msg := range messages {
+		for _, msg := range deletedMessages {
 			if uidSet.Contains(msg.UID) {
 				messagesToExpunge = append(messagesToExpunge, struct {
 					uid imap.UID
@@ -62,7 +63,7 @@ func (s *IMAPSession) Expunge(w *imapserver.ExpungeWriter, uidSet *imap.UIDSet) 
 			}
 		}
 	} else {
-		for _, msg := range messages {
+		for _, msg := range deletedMessages {
 			messagesToExpunge = append(messagesToExpunge, struct {
 				uid imap.UID
 				seq uint32

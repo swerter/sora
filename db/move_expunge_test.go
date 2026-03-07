@@ -255,6 +255,103 @@ func TestExpungeMessageUIDs(t *testing.T) {
 	t.Logf("Successfully tested ExpungeMessageUIDs with accountID: %d, mailboxID: %d, messageUID: %d", accountID, srcMailboxID, messageUID)
 }
 
+// TestGetDeletedMessageUIDsAndSeqs tests the optimized query used by the EXPUNGE command.
+func TestGetDeletedMessageUIDsAndSeqs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration test in short mode")
+	}
+
+	db, accountID, mailboxID, _, firstUID := setupMoveExpungeTestDatabase(t)
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// Insert a second message so we can test partial deletion
+	tx, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+
+	now := time.Now()
+	options := &InsertMessageOptions{
+		AccountID:     accountID,
+		MailboxID:     mailboxID,
+		MailboxName:   "INBOX",
+		S3Domain:      "example.com",
+		S3Localpart:   "test/second",
+		ContentHash:   "second123",
+		MessageID:     "<second@example.com>",
+		Flags:         []imap.Flag{imap.FlagSeen},
+		InternalDate:  now,
+		Size:          256,
+		Subject:       "Second Message",
+		PlaintextBody: "Second test message",
+		SentDate:      now.Add(-time.Hour),
+		InReplyTo:     []string{},
+	}
+	upload := PendingUpload{
+		AccountID:   accountID,
+		ContentHash: "second123",
+		InstanceID:  "test-instance",
+		Size:        256,
+		Attempts:    0,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	_, secondUID, err := db.InsertMessage(ctx, tx, options, upload)
+	require.NoError(t, err)
+	err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	// Test 1: No deleted messages initially
+	results, err := db.GetDeletedMessageUIDsAndSeqs(ctx, mailboxID)
+	require.NoError(t, err)
+	assert.Empty(t, results, "Expected no deleted messages before any flags are set")
+
+	// Test 2: Mark only the first message as deleted
+	tx2, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx2.Rollback(ctx)
+	_, _, err = db.SetMessageFlags(ctx, tx2, firstUID, mailboxID, []imap.Flag{imap.FlagDeleted})
+	require.NoError(t, err)
+	err = tx2.Commit(ctx)
+	require.NoError(t, err)
+
+	results, err = db.GetDeletedMessageUIDsAndSeqs(ctx, mailboxID)
+	require.NoError(t, err)
+	require.Len(t, results, 1, "Expected exactly one deleted message")
+	assert.Equal(t, firstUID, results[0].UID)
+	assert.Greater(t, results[0].Seq, uint32(0), "Sequence number should be positive")
+
+	// Test 3: Expunge the deleted message; it must no longer appear in results
+	tx3, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx3.Rollback(ctx)
+	_, err = db.ExpungeMessageUIDs(ctx, tx3, mailboxID, firstUID)
+	require.NoError(t, err)
+	err = tx3.Commit(ctx)
+	require.NoError(t, err)
+
+	results, err = db.GetDeletedMessageUIDsAndSeqs(ctx, mailboxID)
+	require.NoError(t, err)
+	assert.Empty(t, results, "Already-expunged message must not appear in deleted UIDs")
+
+	// Test 4: Mark the second message deleted; verify it is returned with correct UID
+	tx4, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx4.Rollback(ctx)
+	_, _, err = db.SetMessageFlags(ctx, tx4, imap.UID(secondUID), mailboxID, []imap.Flag{imap.FlagDeleted})
+	require.NoError(t, err)
+	err = tx4.Commit(ctx)
+	require.NoError(t, err)
+
+	results, err = db.GetDeletedMessageUIDsAndSeqs(ctx, mailboxID)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, imap.UID(secondUID), results[0].UID)
+
+	t.Logf("Successfully tested GetDeletedMessageUIDsAndSeqs with accountID: %d, mailboxID: %d", accountID, mailboxID)
+}
+
 // TestCopyMessagesAdvanced tests advanced message copying scenarios
 func TestCopyMessagesAdvanced(t *testing.T) {
 	if testing.Short() {

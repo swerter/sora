@@ -159,6 +159,20 @@ func (rd *ResilientDatabase) GetMessagesByFlagWithRetry(ctx context.Context, mai
 	return result.([]db.Message), nil
 }
 
+func (rd *ResilientDatabase) GetDeletedMessageUIDsAndSeqsWithRetry(ctx context.Context, mailboxID int64) ([]db.MessageUIDSeq, error) {
+	op := func(ctx context.Context) (any, error) {
+		return rd.getOperationalDatabaseForOperation(false).GetDeletedMessageUIDsAndSeqs(ctx, mailboxID)
+	}
+	result, err := rd.executeReadWithRetry(ctx, readRetryConfig, timeoutRead, op)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return []db.MessageUIDSeq{}, nil
+	}
+	return result.([]db.MessageUIDSeq), nil
+}
+
 func (rd *ResilientDatabase) ExpungeMessageUIDsWithRetry(ctx context.Context, mailboxID int64, uids ...imap.UID) (int64, error) {
 	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return rd.getOperationalDatabaseForOperation(true).ExpungeMessageUIDs(ctx, tx, mailboxID, uids...)
