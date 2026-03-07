@@ -384,6 +384,18 @@ func (rd *ResilientDatabase) executeWriteInTxWithRetry(ctx context.Context, conf
 			// Save result even on error (for cases like ErrMessageExists that return useful data)
 			result = res
 
+			// When the write pool is pointed at a server that became a read-only
+			// standby after a failover, all write operations fail with SQLSTATE 25006
+			// ("read_only_sql_transaction"). A plain Ping still succeeds against the
+			// old primary, so the health check does not detect the problem on its own.
+			// Resetting the pool here drops all existing connections immediately, so
+			// the next attempt — once the circuit breaker transitions to HALF_OPEN —
+			// will open a fresh connection that DNS / the load balancer can route to
+			// the new primary.
+			if isReadOnlyTransactionError(cbErr) {
+				rd.resetCurrentWritePool()
+			}
+
 			for _, nonRetryableErr := range nonRetryableErrors {
 				if errors.Is(cbErr, nonRetryableErr) {
 					return retry.Stop(cbErr)

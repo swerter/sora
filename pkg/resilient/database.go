@@ -1089,6 +1089,35 @@ func (rd *ResilientDatabase) performHealthChecks(ctx context.Context) {
 	rd.attemptReconnectFailedReplicas(ctx)
 }
 
+// isReadOnlyTransactionError returns true when err is a PostgreSQL
+// "read_only_sql_transaction" error (SQLSTATE 25006).  This happens when a
+// write operation is sent to a server that has become a read-only standby after
+// a failover.
+func isReadOnlyTransactionError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "25006"
+}
+
+// resetCurrentWritePool resets all connections in the current write pool.
+// This should be called when we detect the write pool is connected to a read-only
+// server (e.g. after a PostgreSQL failover). Resetting forces fresh connections
+// that may be routed to the new primary by DNS or a load balancer.
+func (rd *ResilientDatabase) resetCurrentWritePool() {
+	rd.failoverManager.mu.RLock()
+	defer rd.failoverManager.mu.RUnlock()
+
+	currentIdx := rd.failoverManager.currentWriteIdx.Load()
+	pools := rd.failoverManager.writePools
+	if int(currentIdx) < len(pools) {
+		pool := pools[currentIdx]
+		if pool.database != nil && pool.database.WritePool != nil {
+			logger.Info("Resetting write pool connections after read-only error (failover recovery)",
+				"component", "RESILIENT-FAILOVER", "host", pool.host)
+			pool.database.WritePool.Reset()
+		}
+	}
+}
+
 // checkPoolHealth checks the health of a single pool
 func (rd *ResilientDatabase) checkPoolHealth(ctx context.Context, pool *DatabasePool, poolType string) {
 	healthCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -1102,6 +1131,24 @@ func (rd *ResilientDatabase) checkPoolHealth(ctx context.Context, pool *Database
 		err = pool.database.ReadPool.Ping(healthCtx)
 	} else {
 		err = pool.database.WritePool.Ping(healthCtx)
+		if err == nil {
+			// After a PostgreSQL failover the old primary becomes a read-only standby.
+			// It still accepts connections and responds to Ping successfully, so a plain
+			// Ping cannot detect this situation. We query pg_is_in_recovery() explicitly:
+			// it returns true on any standby/replica and false only on the writable primary.
+			// When the server is in recovery mode we synthesise an error so the pool is
+			// marked unhealthy and its connections are reset, allowing the next connection
+			// attempt (after DNS / load-balancer propagation) to reach the new primary.
+			var inRecovery bool
+			if queryErr := pool.database.WritePool.QueryRow(healthCtx, "SELECT pg_is_in_recovery()").Scan(&inRecovery); queryErr == nil && inRecovery {
+				err = fmt.Errorf("write pool host is in read-only recovery mode (failover occurred)")
+				logger.Warn("Write pool host is in recovery mode (became a standby replica after failover), resetting connection pool",
+					"component", "RESILIENT-FAILOVER", "host", pool.host)
+				// Reset pool connections immediately so the next attempt uses a fresh TCP
+				// connection that may be routed to the new primary.
+				pool.database.WritePool.Reset()
+			}
+		}
 	}
 
 	wasHealthy := pool.isHealthy.Load()
