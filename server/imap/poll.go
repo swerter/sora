@@ -265,11 +265,25 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 		}
 
 		if canReconcile {
-			s.DebugLog("syncing message count to database",
+			// The database has fewer messages than the tracker expects, but
+			// we don't have EXPUNGE updates with the specific sequence numbers
+			// that disappeared. This happens when expunged messages were
+			// hard-deleted by the cleanup worker before this session polled —
+			// the rows are gone, so the poll can't generate EXPUNGE events.
+			// We can't call QueueExpunge without knowing which sequence numbers
+			// to remove. Just updating currentNumMessages would desync it from
+			// the tracker's internal count, causing subsequent FETCH commands
+			// to resolve wrong UIDs.
+			// Force reconnect so SELECT rebuilds the tracker from scratch.
+			s.WarnLog("message count desync detected - forcing reconnect to rebuild tracker",
 				"session_count", finalCount, "db_count", poll.NumMessages,
 				"diff", diff, "reason", reconcileReason,
 				"skipped_expunges", skippedExpunges, "processed_expunges", processedExpunges)
-			s.currentNumMessages.Store(poll.NumMessages)
+			return &imap.Error{
+				Type: imap.StatusResponseTypeBye,
+				Code: imap.ResponseCodeUnavailable,
+				Text: "Mailbox state changed externally, please reconnect",
+			}
 		} else {
 			// Large unexplained mismatch - unsafe to continue
 			s.WarnLog("state desync: unexplained message count mismatch",
