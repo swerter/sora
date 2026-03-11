@@ -218,6 +218,12 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	copy(appendFlags, sanitizedFlags)
 	appendFlags = append(appendFlags, imap.Flag("\\Recent"))
 
+	// Save the current message count BEFORE the insert (which runs outside the lock).
+	// A concurrent Poll can run between InsertMessageWithRetry returning and us
+	// acquiring the write lock, potentially syncing the count from the DB.
+	// We use this to detect double-counting.
+	countBeforeAppend := s.currentNumMessages.Load()
+
 	_, messageUID, err := s.server.rdb.InsertMessageWithRetry(s.ctx,
 		&db.InsertMessageOptions{
 			AccountID:          s.AccountID(),
@@ -313,14 +319,22 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 
 	// Update session state if this message was appended to the currently selected mailbox
 	if s.selectedMailbox != nil && s.selectedMailbox.ID == mailbox.ID {
-		// Unconditionally increment the current message count.
-		// If this append replaced an old draft (net change = 0 in the DB),
-		// Poll() will pick up the EXPUNGE event for the old draft, process it,
-		// and bring the count back down cleanly. Fetching actual count from DB here
-		// and storing it directly causes desyncs if the count decreased (due to
-		// concurrent expunges or draft replacement) because we cannot decrement
-		// the tracker's internal count without knowing the specific sequence number.
-		newCount := s.currentNumMessages.Add(1)
+		// Check if a concurrent Poll (which can run between InsertMessageWithRetry
+		// completing and us acquiring the write lock) already synced the session
+		// count from the database. If so, Add(1) would double-count the message.
+		// We detect this by comparing the count we saved before the insert.
+		currentCount := s.currentNumMessages.Load()
+		var newCount uint32
+		if currentCount > countBeforeAppend {
+			// Poll already ran and updated the count (it picked up our insert
+			// and/or other concurrent deliveries). Don't increment again.
+			newCount = currentCount
+			s.DebugLog("poll already synced message count after append, skipping increment",
+				"count_before", countBeforeAppend, "current_count", currentCount)
+		} else {
+			// Poll hasn't run yet — we need to increment ourselves.
+			newCount = s.currentNumMessages.Add(1)
+		}
 
 		if s.mailboxTracker != nil {
 			panicOccurred := false
