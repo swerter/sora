@@ -313,26 +313,16 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 
 	// Update session state if this message was appended to the currently selected mailbox
 	if s.selectedMailbox != nil && s.selectedMailbox.ID == mailbox.ID {
-		// Query the actual message count from the database instead of incrementing,
-		// because the append operation may have deleted a conflicting draft (net change = 0).
-		// This fixes the Thunderbird draft replacement issue where clients repeatedly save
-		// drafts with the same Message-ID, causing the old draft to be deleted.
-		// See test: TestIMAP_AppendOperation/Draft_Replacement_-_Same_Message-ID
-		oldCount := s.currentNumMessages.Load()
-		actualCount, _, err := s.server.rdb.GetMailboxMessageCountAndSizeSumWithRetry(s.ctx, mailbox.ID)
-		if err != nil {
-			s.DebugLog("failed to get message count after append", "error", err)
-			// Fall back to incrementing, which may be incorrect but prevents complete failure
-			actualCount = int(s.currentNumMessages.Add(1))
-		} else {
-			s.currentNumMessages.Store(uint32(actualCount))
-		}
+		// Unconditionally increment the current message count.
+		// If this append replaced an old draft (net change = 0 in the DB),
+		// Poll() will pick up the EXPUNGE event for the old draft, process it,
+		// and bring the count back down cleanly. Fetching actual count from DB here
+		// and storing it directly causes desyncs if the count decreased (due to
+		// concurrent expunges or draft replacement) because we cannot decrement
+		// the tracker's internal count without knowing the specific sequence number.
+		newCount := s.currentNumMessages.Add(1)
 
-		// Only queue if the count increased
-		// NOTE: QueueNumMessages() only accepts increases - it panics on decreases or equal values
-		// Also, QueueNumMessages panics if the new count is less than the tracker's internal count,
-		// which can happen if there's a desync between s.currentNumMessages and tracker.numMessages.
-		if s.mailboxTracker != nil && uint32(actualCount) > oldCount {
+		if s.mailboxTracker != nil {
 			panicOccurred := false
 			func() {
 				defer func() {
@@ -340,29 +330,20 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 						panicOccurred = true
 						s.WarnLog("tracker desync detected when updating after append",
 							"error", r,
-							"old_count", oldCount,
-							"new_count", actualCount,
+							"new_count", newCount,
 							"mailbox_id", mailbox.ID)
 					}
 				}()
-				s.mailboxTracker.QueueNumMessages(uint32(actualCount))
+				s.mailboxTracker.QueueNumMessages(newCount)
 			}()
 
-			// If tracker update failed due to desync, other sessions won't be notified
-			// of the new message. Log this clearly so it's visible in monitoring.
-			// The APPEND itself succeeded, so we don't fail the operation.
-			// The next IDLE/Poll will reconcile the state.
 			if panicOccurred {
 				s.WarnLog("append succeeded but tracker notification failed - other sessions may not see new message until next poll",
 					"mailbox_id", mailbox.ID,
 					"message_uid", messageUID)
 			}
-		} else if s.mailboxTracker == nil {
-			// This would indicate an inconsistent state if a mailbox is selected but has no tracker.
+		} else {
 			s.DebugLog("inconsistent state: mailbox selected but tracker is nil", "mailbox_id", s.selectedMailbox.ID)
-		} else if actualCount > 0 && uint32(actualCount) == oldCount {
-			// Draft replacement case - count didn't change
-			s.DebugLog("message count unchanged after append (draft replacement)", "count", actualCount)
 		}
 	}
 

@@ -105,17 +105,14 @@ func TestIMAP_PollTrackerDesync_ExpungeOnEmptyMailbox(t *testing.T) {
 	}
 
 	// Now the database has 0 messages, but the client's session might still think it has 1
-	// and might have an expunge update queued for seq 1
 
-	// Trigger a poll with NOOP - this should handle the desync gracefully
+	// Trigger a poll with NOOP - this should detect the hard delete and force a disconnect
 	t.Log("Triggering poll with NOOP command")
 	err = c1.Noop().Wait()
-	if err != nil {
-		t.Logf("NOOP returned error: %v (may indicate forced reconnect)", err)
-		// If we get an error, it might be a BYE forcing reconnect - that's acceptable
-	} else {
-		t.Log("NOOP succeeded - desync handled gracefully")
+	if err == nil {
+		t.Fatal("Expected NOOP to return an error (BYE) due to desync, but it succeeded")
 	}
+	t.Logf("NOOP returned expected error (BYE forcing reconnect): %v", err)
 
 	// Verify state by reconnecting
 	t.Log("Reconnecting to verify correct state")
@@ -223,9 +220,8 @@ func TestIMAP_PollTrackerDesync_AppendWithTrackerHigher(t *testing.T) {
 		t.Fatalf("Failed to delete message: %v", err)
 	}
 
-	// Now append a new message - this should trigger the desync handling in append.go
-	// The session might still think mailbox has 2 messages (or tracker has wrong count)
-	// After append, DB will have 2 messages (we deleted UID 1, still have UID 2, now adding UID 3)
+	// Now append a new message - this will trigger a Poll which detects the desync
+	// and forces a BYE to protect the sequence mappings.
 	t.Log("Appending new message - this may trigger desync detection")
 	testMessage := fmt.Sprintf("From: test@example.com\r\n"+
 		"To: %s\r\n"+
@@ -244,21 +240,27 @@ func TestIMAP_PollTrackerDesync_AppendWithTrackerHigher(t *testing.T) {
 		t.Fatalf("APPEND close failed: %v", err)
 	}
 	_, err = appendCmd.Wait()
-	if err != nil {
-		t.Fatalf("APPEND failed: %v", err)
+	if err == nil {
+		t.Fatal("Expected APPEND to fail with BYE due to hard-delete desync, but it succeeded")
 	}
+	t.Logf("APPEND returned expected error (BYE forcing reconnect): %v", err)
 
-	t.Log("APPEND succeeded - no panic occurred")
+	// Verify state by reconnecting
+	t.Log("Reconnecting to verify correct state")
+	time.Sleep(100 * time.Millisecond)
 
-	// Trigger a NOOP to see if state reconciles
-	t.Log("Triggering NOOP to reconcile state")
-	err = c1.Noop().Wait()
+	c2, err := imapclient.DialInsecure(server.Address, nil)
 	if err != nil {
-		t.Logf("NOOP returned error: %v", err)
+		t.Fatalf("Failed to dial IMAP server for reconnect: %v", err)
+	}
+	defer c2.Logout()
+
+	if err := c2.Login(account.Email, account.Password).Wait(); err != nil {
+		t.Fatalf("Login after reconnect failed: %v", err)
 	}
 
 	// Verify final state
-	mbox, err = c1.Select("INBOX", nil).Wait()
+	mbox, err = c2.Select("INBOX", nil).Wait()
 	if err != nil {
 		t.Fatalf("Select INBOX failed: %v", err)
 	}
@@ -268,5 +270,5 @@ func TestIMAP_PollTrackerDesync_AppendWithTrackerHigher(t *testing.T) {
 		t.Errorf("Expected 2 messages, got %d", mbox.NumMessages)
 	}
 
-	t.Log("Test completed - no panic occurred, state reconciled")
+	t.Log("Test completed - desync handled by BYE correctly")
 }

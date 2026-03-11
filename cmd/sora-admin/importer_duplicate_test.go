@@ -13,7 +13,10 @@ import (
 )
 
 // TestImporter_DuplicateMessageHandling tests that the importer gracefully handles
-// duplicate messages (unique constraint violations) without aborting the entire batch.
+// duplicate messages without aborting the entire batch.
+// With the relaxed unique constraint (migration 000014), messages with the same
+// Message-ID but different content are allowed to coexist. Only exact duplicates
+// (same Message-ID AND same content) are skipped.
 func TestImporter_DuplicateMessageHandling(t *testing.T) {
 	if os.Getenv("SKIP_DB_TESTS") == "true" {
 		t.Skip("Skipping database tests")
@@ -46,7 +49,9 @@ func TestImporter_DuplicateMessageHandling(t *testing.T) {
 		t.Fatalf("Failed to create maildir structure: %v", err)
 	}
 
-	// Create test messages with the SAME Message-ID (to trigger unique constraint)
+	// Create test messages with the SAME Message-ID but different content.
+	// With the relaxed unique constraint, both should be imported successfully.
+	// message3 has a unique Message-ID and should always be imported.
 	message1 := []byte("Message-ID: <duplicate@test.com>\r\nSubject: First\r\n\r\nBody 1")
 	message2 := []byte("Message-ID: <duplicate@test.com>\r\nSubject: Second\r\n\r\nBody 2")
 	message3 := []byte("Message-ID: <unique@test.com>\r\nSubject: Third\r\n\r\nBody 3")
@@ -94,15 +99,15 @@ func TestImporter_DuplicateMessageHandling(t *testing.T) {
 	// Verify results
 	// Expected:
 	// - message1 imported successfully
-	// - message2 skipped (duplicate Message-ID)
-	// - message3 imported successfully
-	// Total imported: 2, skipped: 1
+	// - message2 imported successfully (same Message-ID, different content - allowed now)
+	// - message3 imported successfully (unique Message-ID)
+	// Total imported: 3, skipped: 0
 
-	if importer.importedMessages != 2 {
-		t.Errorf("Expected 2 imported messages, got %d", importer.importedMessages)
+	if importer.importedMessages != 3 {
+		t.Errorf("Expected 3 imported messages, got %d", importer.importedMessages)
 	}
-	if importer.skippedMessages != 1 {
-		t.Errorf("Expected 1 skipped message, got %d", importer.skippedMessages)
+	if importer.skippedMessages != 0 {
+		t.Errorf("Expected 0 skipped messages, got %d", importer.skippedMessages)
 	}
 	if importer.failedMessages != 0 {
 		t.Errorf("Expected 0 failed messages, got %d", importer.failedMessages)
@@ -124,8 +129,8 @@ func TestImporter_DuplicateMessageHandling(t *testing.T) {
 		t.Fatalf("Failed to query message count: %v", err)
 	}
 
-	if count != 2 {
-		t.Errorf("Expected 2 messages in database, got %d", count)
+	if count != 3 {
+		t.Errorf("Expected 3 messages in database, got %d", count)
 	}
 }
 

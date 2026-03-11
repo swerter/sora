@@ -202,11 +202,11 @@ func TestIMAP_AppendOperation(t *testing.T) {
 		t.Logf("Fetched message with correct Unicode subject: %s", msgs[0].Envelope.Subject)
 	})
 
-	t.Run("Draft Replacement - Same Message-ID", func(t *testing.T) {
-		// This test verifies the fix for the Thunderbird draft replacement issue.
-		// When a client saves a draft multiple times with the same Message-ID,
-		// the server should delete the old draft and replace it with the new one,
-		// maintaining the correct message count.
+	t.Run("Multiple Append - Same Message-ID", func(t *testing.T) {
+		// This test verifies that the server allows multiple messages with the
+		// same Message-ID to be appended to the same mailbox, as per IMAP RFC semantics.
+		// Thunderbird uses this behavior when saving drafts: it APPENDs the new draft,
+		// then marks the old one \Deleted and EXPUNGEs it.
 
 		// Select Drafts folder
 		mbox, err := c.Select("Drafts", nil).Wait()
@@ -248,7 +248,7 @@ func TestIMAP_AppendOperation(t *testing.T) {
 		}
 		t.Logf("After first append: Drafts has %d messages", mbox.NumMessages)
 
-		// Append second draft with the SAME Message-ID (simulating Thunderbird draft save)
+		// Append second draft with the SAME Message-ID
 		draft2 := "Message-ID: " + messageID + "\r\n" +
 			"Subject: Draft Version 2\r\n" +
 			"\r\n" +
@@ -267,40 +267,18 @@ func TestIMAP_AppendOperation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Second APPEND command failed: %v", err)
 		}
-		t.Logf("Second draft appended with UID=%d (replacing UID=%d)", appendData2.UID, appendData1.UID)
+		t.Logf("Second draft appended with UID=%d", appendData2.UID)
 
-		// CRITICAL: Verify message count stayed the same (old draft replaced, not added)
+		// Verify message count increased AGAIN by 1 (both drafts exist)
 		mbox, err = c.Select("Drafts", nil).Wait()
 		if err != nil {
-			t.Fatalf("Reselect Drafts after replacement failed: %v", err)
+			t.Fatalf("Reselect Drafts after second append failed: %v", err)
 		}
-		expectedCount := initialMessages + 1 // Should still be +1, not +2
+		expectedCount := initialMessages + 2
 		if mbox.NumMessages != expectedCount {
-			t.Errorf("After draft replacement: expected %d messages (same as after first append), got %d", expectedCount, mbox.NumMessages)
+			t.Errorf("After second append: expected %d messages, got %d", expectedCount, mbox.NumMessages)
 		}
-		t.Logf("After second append: Drafts CORRECTLY has %d messages (old draft was replaced)", mbox.NumMessages)
-
-		// Verify the old draft is gone and new draft exists
-		fetchCmd := c.Fetch(imap.SeqSetNum(mbox.NumMessages), &imap.FetchOptions{
-			Envelope: true,
-			UID:      true,
-		})
-		msgs, err := fetchCmd.Collect()
-		if err != nil {
-			t.Fatalf("FETCH failed: %v", err)
-		}
-		if len(msgs) != 1 {
-			t.Fatalf("Expected 1 message, got %d", len(msgs))
-		}
-
-		// Verify we got the NEW draft (subject should be "Draft Version 2")
-		if msgs[0].Envelope.Subject != "Draft Version 2" {
-			t.Errorf("Expected subject 'Draft Version 2', got '%s'", msgs[0].Envelope.Subject)
-		}
-		if msgs[0].UID != appendData2.UID {
-			t.Errorf("Expected UID %d, got %d", appendData2.UID, msgs[0].UID)
-		}
-		t.Logf("Verified: New draft (UID=%d, subject='%s') exists, old draft was replaced", msgs[0].UID, msgs[0].Envelope.Subject)
+		t.Logf("After second append: Drafts CORRECTLY has %d messages (both drafts exist)", mbox.NumMessages)
 	})
 
 	t.Run("Duplicate Append - No Orphaned Files", func(t *testing.T) {

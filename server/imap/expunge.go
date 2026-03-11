@@ -107,18 +107,34 @@ func (s *IMAPSession) Expunge(w *imapserver.ExpungeWriter, uidSet *imap.UIDSet) 
 		s.currentHighestModSeq.Store(uint64(newModSeq))
 	}
 
-	release()
-
-	// Sort messages to expunge by sequence number in descending order
+	// Sort messages to expunge by sequence number in descending order.
 	// This ensures that when expunging multiple messages, we start with the
-	// highest sequence number and work downward, avoiding problems with shifting sequence numbers
+	// highest sequence number and work downward, avoiding problems with shifting sequence numbers.
 	sort.Slice(messagesToExpunge, func(i, j int) bool {
 		return messagesToExpunge[i].seq > messagesToExpunge[j].seq
 	})
 
-	// Send notifications using database sequence numbers directly
+	// Update the tracker inside the write lock so that currentNumMessages and the
+	// tracker's internal count stay in sync. If we released the lock first, a concurrent
+	// Poll could see currentNumMessages already decremented but the tracker still at the
+	// old count, causing a desync and unnecessary BYE disconnection.
 	for _, m := range messagesToExpunge {
-		// Use database sequence number directly (no encoding needed)
+		if m.seq > 0 && s.mailboxTracker != nil {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						s.WarnLog("tracker panic during expunge", "seq", m.seq, "error", r)
+					}
+				}()
+				s.mailboxTracker.QueueExpunge(m.seq)
+			}()
+		}
+	}
+
+	release()
+
+	// Send expunge notifications to the client (network I/O, outside the lock).
+	for _, m := range messagesToExpunge {
 		if m.seq > 0 {
 			if err := w.WriteExpunge(m.seq); err != nil {
 				s.DebugLog("error writing expunge", "seq", m.seq, "uid", m.uid, "error", err)

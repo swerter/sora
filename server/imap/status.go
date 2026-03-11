@@ -58,11 +58,10 @@ func (s *IMAPSession) Status(mboxName string, options *imap.StatusOptions) (*ima
 	if options.NumMessages {
 		num := uint32(summary.NumMessages)
 
-		// Only update currentNumMessages if this is the currently selected mailbox
-		// STATUS can query any mailbox, but currentNumMessages tracks the selected mailbox
-		if s.selectedMailbox != nil && s.selectedMailbox.ID == mailbox.ID {
-			s.currentNumMessages.Store(num)
-		}
+		// We DO NOT update s.currentNumMessages here even if this is the selected mailbox.
+		// s.currentNumMessages must stay in sync with s.mailboxTracker's internal count.
+		// Updating it here without updating the tracker causes desync panics later
+		// during Poll or Append if the database count decreased (e.g., due to expunges).
 
 		statusData.NumMessages = &num
 	}

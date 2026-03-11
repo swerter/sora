@@ -271,47 +271,28 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		uidToUse = highestUID
 	}
 
-	// Check for existing message with same message_id
+	// Check for existing EXACT duplicate message
 	var existingUID int64
 	var existingContentHash string
 	err = tx.QueryRow(ctx, `
 		SELECT uid, content_hash FROM messages
 		WHERE mailbox_id = $1
 		AND message_id = $2
+		AND content_hash = $3
 		AND expunged_at IS NULL
 		LIMIT 1`,
-		options.MailboxID, saneMessageID).Scan(&existingUID, &existingContentHash)
+		options.MailboxID, saneMessageID, options.ContentHash).Scan(&existingUID, &existingContentHash)
 
 	if err == nil {
-		// Message with same message_id exists
-		if existingContentHash == options.ContentHash {
-			// True duplicate (same Message-ID + same content_hash) - skip insert
-			logger.Info("Database: duplicate message detected, skipping insert", "message_id", saneMessageID, "content_hash", options.ContentHash, "mailbox_id", options.MailboxID, "existing_uid", existingUID)
-			return 0, existingUID, consts.ErrMessageExists
-		}
-
-		// Same Message-ID but different content - this is draft replacement
-		// Delete the old message before inserting the new one
-		logger.Info("Database: message with same Message-ID but different content detected. Deleting old message for draft replacement", "message_id", saneMessageID, "existing_hash", truncateHash(existingContentHash), "new_hash", truncateHash(options.ContentHash), "mailbox_id", options.MailboxID, "existing_uid", existingUID)
-
-		deleteResult, err := tx.Exec(ctx, `
-			DELETE FROM messages
-			WHERE mailbox_id = $1
-			  AND message_id = $2
-		`, options.MailboxID, saneMessageID)
-		if err != nil {
-			logger.Error("Database: failed to delete conflicting message for draft replacement", "err", err)
-			return 0, 0, fmt.Errorf("failed to delete conflicting message: %w", err)
-		}
-		if deleteResult.RowsAffected() > 0 {
-			logger.Info("Database: deleted message(s) for draft replacement", "count", deleteResult.RowsAffected())
-		}
+		// True duplicate (same Message-ID + same content_hash) - skip insert
+		logger.Info("Database: duplicate message detected, skipping insert", "message_id", saneMessageID, "content_hash", options.ContentHash, "mailbox_id", options.MailboxID, "existing_uid", existingUID)
+		return 0, existingUID, consts.ErrMessageExists
 	} else if err != pgx.ErrNoRows {
 		// Unexpected error
 		logger.Error("Database: failed to check for duplicate message", "err", err)
 		return 0, 0, consts.ErrDBQueryFailed
 	}
-	// err == pgx.ErrNoRows means no existing message found, continue with insert
+	// err == pgx.ErrNoRows means no exact duplicate found, continue with insert
 
 	recipientsJSON, err := json.Marshal(options.Recipients)
 	if err != nil {
@@ -433,8 +414,7 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 	}).Scan(&messageRowId)
 
 	if err != nil {
-		// Check for a unique constraint violation specifically on the message_id.
-		// Note: We check both old constraint name and new index name for backward compatibility during rolling deploys.
+		// Check for a unique constraint violation
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" &&
 			(pgErr.ConstraintName == "messages_message_id_mailbox_id_key" ||
 				pgErr.ConstraintName == "messages_message_id_mailbox_id_active_idx") {
@@ -609,28 +589,20 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 		uidToUse = highestUID
 	}
 
-	// Deduplication: Check if message with same message_id already exists (regardless of content_hash)
-	// The unique constraint is on (message_id, mailbox_id, expunged_at IS NULL), so we must check
-	// for any existing message with this message_id to avoid unique violations.
+	// Deduplication: Check if an EXACT duplicate exists
 	var existingUID int64
 	var existingContentHash string
 	err = tx.QueryRow(ctx, `
 		SELECT uid, content_hash FROM messages
 		WHERE mailbox_id = $1
 		AND message_id = $2
+		AND content_hash = $3
 		AND expunged_at IS NULL
 		LIMIT 1`,
-		options.MailboxID, options.MessageID).Scan(&existingUID, &existingContentHash)
+		options.MailboxID, options.MessageID, options.ContentHash).Scan(&existingUID, &existingContentHash)
 	if err == nil {
-		// Message with same message_id already exists
-		if existingContentHash == options.ContentHash {
-			// True duplicate (same Message-ID + same content) - skip insert
-			logger.Info("Database: duplicate message detected, skipping insert", "message_id", options.MessageID, "content_hash", options.ContentHash, "mailbox_id", options.MailboxID, "existing_uid", existingUID)
-		} else {
-			// Same Message-ID but different content - this shouldn't happen in normal mail flow
-			// but can occur during import if maildir has duplicates with same Message-ID header
-			logger.Info("Database: message with same Message-ID but different content detected. Skipping insert to avoid unique violation", "message_id", options.MessageID, "existing_hash", truncateHash(existingContentHash), "new_hash", truncateHash(options.ContentHash), "mailbox_id", options.MailboxID, "existing_uid", existingUID)
-		}
+		// True duplicate (same Message-ID + same content) - skip insert
+		logger.Info("Database: duplicate message detected, skipping insert", "message_id", options.MessageID, "content_hash", options.ContentHash, "mailbox_id", options.MailboxID, "existing_uid", existingUID)
 		// Return unique violation error so importer can count it as skipped
 		return 0, existingUID, consts.ErrDBUniqueViolation
 	} else if err != pgx.ErrNoRows {
@@ -638,7 +610,7 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 		logger.Error("Database: failed to check for duplicate message", "err", err)
 		return 0, 0, consts.ErrDBQueryFailed
 	}
-	// err == pgx.ErrNoRows means no duplicate found, continue with insert
+	// err == pgx.ErrNoRows means no exact duplicate found, continue with insert
 
 	recipientsJSON, err := json.Marshal(options.Recipients)
 	if err != nil {
@@ -760,8 +732,7 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 	}).Scan(&messageRowId)
 
 	if err != nil {
-		// Check for a unique constraint violation specifically on the message_id.
-		// Note: We check both old constraint name and new index name for backward compatibility during rolling deploys.
+		// Check for a unique constraint violation
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" &&
 			(pgErr.ConstraintName == "messages_message_id_mailbox_id_key" ||
 				pgErr.ConstraintName == "messages_message_id_mailbox_id_active_idx") {

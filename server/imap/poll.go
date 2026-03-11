@@ -117,6 +117,7 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 		// is to disconnect this session to force a fresh SELECT and rebuild tracker state
 		if panicOccurred {
 			s.WarnLog("forcing disconnection due to tracker desync")
+			release()
 			return &imap.Error{
 				Type: imap.StatusResponseTypeBye,
 				Code: imap.ResponseCodeUnavailable,
@@ -279,6 +280,7 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 				"session_count", finalCount, "db_count", poll.NumMessages,
 				"diff", diff, "reason", reconcileReason,
 				"skipped_expunges", skippedExpunges, "processed_expunges", processedExpunges)
+			release()
 			return &imap.Error{
 				Type: imap.StatusResponseTypeBye,
 				Code: imap.ResponseCodeUnavailable,
@@ -290,6 +292,7 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 				"session_count", finalCount, "db_count", poll.NumMessages,
 				"diff", diff, "skipped_expunges", skippedExpunges,
 				"processed_expunges", processedExpunges)
+			release()
 			return &imap.Error{
 				Type: imap.StatusResponseTypeBye,
 				Code: imap.ResponseCodeUnavailable,
@@ -320,6 +323,7 @@ func (s *IMAPSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 		// If we couldn't update the tracker due to desync, force disconnection
 		if panicOccurred {
 			s.WarnLog("forcing disconnection due to tracker desync")
+			release()
 			return &imap.Error{
 				Type: imap.StatusResponseTypeBye,
 				Code: imap.ResponseCodeUnavailable,
