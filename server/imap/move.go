@@ -150,67 +150,12 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 		}
 	}
 
-	// RFC 6851 §3.3: MOVE MUST include EXPUNGE notifications for the removed messages
-	// before the tagged OK response. Sequence numbers must be reported in descending order
-	// because each EXPUNGE causes renumbering of higher sequence numbers.
-	if len(messages) > 0 {
-		// Collect sequence numbers of moved messages and sort descending
-		seqNums := make([]uint32, 0, len(messages))
-		for _, msg := range messages {
-			// Only include messages that were actually moved (present in the UID map)
-			if _, ok := messageUIDMap[msg.UID]; ok {
-				seqNums = append(seqNums, msg.Seq)
-			}
-		}
-
-		// Sort descending — each EXPUNGE renumbers, so highest first
-		for i, j := 0, len(seqNums)-1; i < j; i, j = i+1, j-1 {
-			seqNums[i], seqNums[j] = seqNums[j], seqNums[i]
-		}
-
-		// Use the session tracker to queue expunge events. This ensures:
-		// 1. The tracker's internal message count is decremented correctly
-		// 2. EXPUNGE notifications are sent to the client when flushed
-		// 3. No tracker desync on next poll (which would force disconnection)
-		// We previously used w.WriteExpunge() which bypassed the tracker.
-		//
-		// RACE CONDITION PROTECTION: Between GetMessagesByNumSetWithRetry and here,
-		// a concurrent poll cycle may have already detected some expunges and
-		// decremented the tracker's numMessages. If our sequence numbers are now
-		// out of range, the tracker panics. We recover from this because:
-		// - The poll already handled the EXPUNGE notifications for those messages
-		// - The tracker's state is consistent (poll decremented it correctly)
-		// - We just skip the redundant expunge notification
-		if s.mailboxTracker != nil {
-			for _, seq := range seqNums {
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							s.DebugLog("skipping expunge notification (tracker already updated by poll)",
-								"seq", seq, "panic", r)
-						}
-					}()
-					s.mailboxTracker.QueueExpunge(seq)
-				}()
-			}
-		} else {
-			// Fallback: write directly if no tracker (shouldn't happen in normal operation)
-			for _, seq := range seqNums {
-				if err := w.WriteExpunge(seq); err != nil {
-					s.DebugLog("failed to write EXPUNGE", "seq", seq, "error", err)
-				}
-			}
-		}
-
-		// Update session message count to match
-		current := s.currentNumMessages.Load()
-		removed := uint32(len(seqNums))
-		if removed > current {
-			removed = current
-		}
-		s.currentNumMessages.Store(current - removed)
-		s.DebugLog("sent EXPUNGE notifications for moved messages", "count", len(seqNums))
-	}
+	// NOTE: We do NOT send EXPUNGE notifications here directly.
+	//
+	// go-imap calls conn.poll() (which runs sora's DB poll) BEFORE sending the
+	// tagged OK response. The DB poll detects the soft-expunges from MoveMessages,
+	// queues them via QueueExpunge on the tracker, and flushes them to the client.
+	// This satisfies RFC 6851 §3.3 (EXPUNGE must appear before tagged OK).
 
 	// Track for session summary
 	s.messagesMoved.Add(uint32(len(messageUIDMap)))
