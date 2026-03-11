@@ -98,33 +98,10 @@ func (db *Database) MoveMessages(ctx context.Context, tx pgx.Tx, ids *[]imap.UID
 		return nil, fmt.Errorf("failed to get destination mailbox name: %w", err)
 	}
 
-	// Delete any expunged messages in the destination mailbox that have the same message_id
-	// as the messages we're about to move. This prevents unique constraint violations when
-	// moving messages that had previously been moved from/to this mailbox.
-	// For example: INBOX->Trash (creates tombstone in INBOX), then later Trash->INBOX would
-	// fail because the old INBOX tombstone still exists.
-	//
-	// When moving within the same mailbox, we must exclude the source messages themselves
-	// from deletion (they're not tombstones, they're the messages we're moving).
-	deleteResult, err := tx.Exec(ctx, `
-		DELETE FROM messages
-		WHERE mailbox_id = $1
-		  AND message_id IN (SELECT message_id FROM messages WHERE id = ANY($2))
-		  AND id != ALL($2)
-	`, destMailboxID, messageIDs)
-	if err != nil {
-		logger.Error("Database: failed to delete conflicting tombstones in destination mailbox", "err", err)
-		return nil, fmt.Errorf("failed to delete conflicting tombstones: %w", err)
-	}
-	if deleteResult.RowsAffected() > 0 {
-		logger.Info("Database: deleted conflicting message(s) from destination mailbox before move", "count", deleteResult.RowsAffected())
-	}
-
 	// Batch insert the moved messages.
 	//
-	// For same-mailbox moves, we must mark old messages as expunged BEFORE inserting new ones.
-	// The partial unique index (WHERE expunged_at IS NULL) allows this since expunged messages
-	// are excluded from the index.
+	// For same-mailbox moves, we must mark old messages as expunged BEFORE inserting
+	// new ones to avoid having two active copies of the same message.
 	if srcMailboxID == destMailboxID {
 		// Step 1: Mark old messages as expunged to remove them from the unique index
 		_, err = tx.Exec(ctx, `

@@ -656,16 +656,11 @@ func TestInsertMessageFromImporter_DuplicateMessageIDDifferentContent(t *testing
 	err = tx.Commit(ctx)
 	require.NoError(t, err)
 
-	// Now try to insert a message with SAME message_id but DIFFERENT content_hash
-	// Before the fix, this would:
-	// 1. Pass the deduplication check (because content_hash differs)
-	// 2. Fail on INSERT with unique constraint violation (because message_id matches)
-	// 3. Cause an aborted transaction error when trying to query for the existing message
-	//
-	// After the fix, this should:
-	// 1. Find the existing message by message_id (regardless of content_hash)
-	// 2. Return the existing UID without attempting INSERT
-	// 3. Log that same message_id with different content was found
+	// Now try to insert a message with SAME message_id but DIFFERENT content_hash.
+	// With the relaxed unique constraint (migration 000014), this should succeed.
+	// Only exact duplicates (same message_id AND same content_hash) are rejected.
+	// Different content with the same Message-ID is standard IMAP behavior
+	// (e.g., drafts, re-sent messages).
 
 	tx2, err := db.WritePool.Begin(ctx)
 	require.NoError(t, err)
@@ -679,37 +674,28 @@ func TestInsertMessageFromImporter_DuplicateMessageIDDifferentContent(t *testing
 		S3Localpart: "duplicate-test",
 		ContentHash: "hash-content-v2",           // DIFFERENT content hash
 		MessageID:   "unique-msg-id@example.com", // SAME message_id
-		Subject:     "Second Version (should be skipped)",
+		Subject:     "Second Version",
 		Size:        200,
 		SentDate:    time.Now(),
 	}
 
 	messageID2, uid2, err := db.InsertMessageFromImporter(ctx, tx2, options2)
 
-	// Should return ErrDBUniqueViolation (duplicate detected before INSERT)
-	require.Error(t, err, "Second insert should return error for duplicate")
-	require.ErrorIs(t, err, consts.ErrDBUniqueViolation, "Should return ErrDBUniqueViolation")
+	// With relaxed constraint, different content_hash means NOT a duplicate — insert succeeds
+	require.NoError(t, err, "Second insert with different content_hash should succeed")
+	require.Greater(t, messageID2, int64(0), "messageID should be assigned")
+	require.Greater(t, uid2, int64(0), "UID should be assigned")
+	assert.NotEqual(t, uid1, uid2, "Second message should get a different UID")
 
-	// Should return 0 for messageID (indicating duplicate was found)
-	assert.Equal(t, int64(0), messageID2, "messageID should be 0 for duplicate")
-
-	// Should return the SAME UID as the first message
-	assert.Equal(t, uid1, uid2, "UID should match the existing message")
-
-	// Commit should succeed (error was handled gracefully)
 	err = tx2.Commit(ctx)
 	require.NoError(t, err)
 
-	// Verify only ONE message exists (the duplicate was NOT inserted)
+	// Verify BOTH messages exist (different content_hash = different messages)
 	messages, err := db.ListMessages(ctx, mailboxID)
 	require.NoError(t, err)
-	assert.Len(t, messages, 1, "Only one message should exist (duplicate was skipped)")
+	assert.Len(t, messages, 2, "Both messages should exist (different content)")
 
-	// Verify the FIRST message is the one that was kept
-	assert.Equal(t, "First Version", messages[0].Subject)
-	assert.Equal(t, "hash-content-v1", messages[0].ContentHash)
-
-	t.Logf("Successfully tested duplicate message_id with different content_hash: kept UID=%d, skipped duplicate with different content", uid1)
+	t.Logf("Successfully tested same message_id with different content_hash: uid1=%d, uid2=%d (both kept)", uid1, uid2)
 }
 
 // TestInsertMessage_DuplicateDoesNotCreateOrphanedPendingUpload tests that when a duplicate
