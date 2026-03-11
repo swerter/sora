@@ -81,7 +81,7 @@ func (s *IMAPSession) Expunge(w *imapserver.ExpungeWriter, uidSet *imap.UIDSet) 
 	}
 
 	// Database operation - no lock needed
-	newModSeq, err := s.server.rdb.ExpungeMessageUIDsWithRetry(s.ctx, mailboxID, uidsToDelete...)
+	_, err = s.server.rdb.ExpungeMessageUIDsWithRetry(s.ctx, mailboxID, uidsToDelete...)
 	if err != nil {
 		return s.internalError("failed to expunge messages: %v", err)
 	}
@@ -102,10 +102,13 @@ func (s *IMAPSession) Expunge(w *imapserver.ExpungeWriter, uidSet *imap.UIDSet) 
 	// Atomically subtract the number of expunged messages from the total count.
 	s.currentNumMessages.Add(^uint32(len(messagesToExpunge) - 1))
 
-	// Update highest MODSEQ to prevent POLL from re-processing these expunges
-	if newModSeq > 0 {
-		s.currentHighestModSeq.Store(uint64(newModSeq))
-	}
+	// NOTE: We intentionally do NOT advance currentHighestModSeq here.
+	// If we set it to newModSeq, we jump the poll cursor forward and skip any
+	// events from OTHER sessions that happened between the old modseq and newModSeq
+	// (e.g., deliveries, flag changes, or expunges by other sessions).
+	// Instead, we let Poll naturally discover ALL events. When Poll encounters
+	// this session's own expunge events, QueueExpunge will harmlessly panic
+	// (already processed), be recovered, and counted as skippedExpunges.
 
 	// Sort messages to expunge by sequence number in descending order.
 	// This ensures that when expunging multiple messages, we start with the
