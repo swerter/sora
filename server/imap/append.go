@@ -218,12 +218,6 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	copy(appendFlags, sanitizedFlags)
 	appendFlags = append(appendFlags, imap.Flag("\\Recent"))
 
-	// Save the current message count BEFORE the insert (which runs outside the lock).
-	// A concurrent Poll can run between InsertMessageWithRetry returning and us
-	// acquiring the write lock, potentially syncing the count from the DB.
-	// We use this to detect double-counting.
-	countBeforeAppend := s.currentNumMessages.Load()
-
 	_, messageUID, err := s.server.rdb.InsertMessageWithRetry(s.ctx,
 		&db.InsertMessageOptions{
 			AccountID:          s.AccountID(),
@@ -317,49 +311,18 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		}, nil
 	}
 
-	// Update session state if this message was appended to the currently selected mailbox
-	if s.selectedMailbox != nil && s.selectedMailbox.ID == mailbox.ID {
-		// Check if a concurrent Poll (which can run between InsertMessageWithRetry
-		// completing and us acquiring the write lock) already synced the session
-		// count from the database. If so, Add(1) would double-count the message.
-		// We detect this by comparing the count we saved before the insert.
-		currentCount := s.currentNumMessages.Load()
-		var newCount uint32
-		if currentCount > countBeforeAppend {
-			// Poll already ran and updated the count (it picked up our insert
-			// and/or other concurrent deliveries). Don't increment again.
-			newCount = currentCount
-			s.DebugLog("poll already synced message count after append, skipping increment",
-				"count_before", countBeforeAppend, "current_count", currentCount)
-		} else {
-			// Poll hasn't run yet — we need to increment ourselves.
-			newCount = s.currentNumMessages.Add(1)
-		}
-
-		if s.mailboxTracker != nil {
-			panicOccurred := false
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						panicOccurred = true
-						s.WarnLog("tracker desync detected when updating after append",
-							"error", r,
-							"new_count", newCount,
-							"mailbox_id", mailbox.ID)
-					}
-				}()
-				s.mailboxTracker.QueueNumMessages(newCount)
-			}()
-
-			if panicOccurred {
-				s.WarnLog("append succeeded but tracker notification failed - other sessions may not see new message until next poll",
-					"mailbox_id", mailbox.ID,
-					"message_uid", messageUID)
-			}
-		} else {
-			s.DebugLog("inconsistent state: mailbox selected but tracker is nil", "mailbox_id", s.selectedMailbox.ID)
-		}
-	}
+	// NOTE: We intentionally do NOT update currentNumMessages or the tracker here.
+	// The InsertMessageWithRetry call above runs outside the session lock. Between
+	// its return and us acquiring the write lock, a concurrent Poll (from the
+	// go-imap write goroutine) can run and sync the session count from the DB.
+	// If we also Add(1) here, we double-count the message, causing session_count
+	// to be 1 ahead of db_count — leading to missed_old_expunges BYE.
+	//
+	// Instead, we let Poll naturally discover the new message via the DB's
+	// mailbox_stats.message_count (updated by the INSERT trigger) and call
+	// QueueNumMessages to update the tracker. The EXISTS notification reaches
+	// the client during the next Poll cycle (typically immediate, as the
+	// go-imap write goroutine polls after each command response).
 
 	metrics.MessageThroughput.WithLabelValues("imap", "appended", "success").Inc()
 
