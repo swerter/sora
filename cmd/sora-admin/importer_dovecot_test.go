@@ -469,7 +469,7 @@ func TestImporter_PendingUploads(t *testing.T) {
 			t.Fatalf("Failed to scan pending upload: %v", err)
 		}
 		pendingUploadCount++
-		t.Logf("Found pending upload: hash=%s, size=%d, account_id=%d", contentHash[:12], size, uploadAccountID)
+		t.Logf("Found pending upload: hash=%s, size=%d, account=%d", contentHash[:12], size, uploadAccountID)
 	}
 
 	if pendingUploadCount != 1 {

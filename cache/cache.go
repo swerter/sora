@@ -623,38 +623,52 @@ func (c *Cache) deleteFiles(paths []string) []string {
 }
 
 // removeIndexEntries removes a batch of paths from the cache index.
+// Handles large batches by splitting into smaller chunks to avoid SQLite variable limits.
 func (c *Cache) removeIndexEntries(ctx context.Context, paths []string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	tx, err := c.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction for index removal: %w", err)
-	}
-	defer tx.Rollback()
-
-	// For SQLite, we build a query with placeholders for batch delete.
-	// This is safe as paths are generated internally.
 	if len(paths) == 0 {
 		return nil
 	}
-	query := `DELETE FROM cache_index WHERE path IN (?` + strings.Repeat(",?", len(paths)-1) + `)`
-	args := make([]any, len(paths))
-	for i, p := range paths {
-		args[i] = p
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	const batchSize = 500 // SQLite variable limit is typically 999, use 500 for safety
+	totalRemoved := int64(0)
+
+	for i := 0; i < len(paths); i += batchSize {
+		end := i + batchSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		batch := paths[i:end]
+
+		tx, err := c.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for index removal (batch %d): %w", i/batchSize, err)
+		}
+
+		query := `DELETE FROM cache_index WHERE path IN (?` + strings.Repeat(",?", len(batch)-1) + `)`
+		args := make([]any, len(batch))
+		for j, p := range batch {
+			args[j] = p
+		}
+
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to batch delete from index (batch %d): %w", i/batchSize, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit index deletions (batch %d): %w", i/batchSize, err)
+		}
+
+		if rowsAffected, _ := result.RowsAffected(); rowsAffected > 0 {
+			totalRemoved += rowsAffected
+		}
 	}
 
-	result, err := tx.ExecContext(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("failed to batch delete from index: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit index deletions: %w", err)
-	}
-
-	rowsAffected, _ := result.RowsAffected()
-	logger.Info("Cache: Removed entries from index", "count", rowsAffected)
+	logger.Info("Cache: Removed entries from index", "count", totalRemoved)
 	return nil
 }
 

@@ -40,7 +40,7 @@ func (db *Database) AcquireAndLeasePendingUploads(ctx context.Context, tx pgx.Tx
 		WHERE instance_id = $1
 		  AND (attempts < $2)
 		  AND ((last_attempt IS NULL) OR (last_attempt < $3))
-		ORDER BY id
+		ORDER BY created_at ASC, id ASC
 		LIMIT $4
 		FOR UPDATE SKIP LOCKED
 	`, instanceId, maxAttempts, retryTasksLastAttemptBefore, limit)

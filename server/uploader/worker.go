@@ -134,10 +134,10 @@ func (w *UploadWorker) run(ctx context.Context) {
 	cleanupTicker := time.NewTicker(5 * time.Minute)
 	defer cleanupTicker.Stop()
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	logger.Info("Uploader: worker processing every 30s, cleanup and monitoring every 5min")
+	logger.Info("Uploader: worker processing every 10s, cleanup and monitoring every 5min")
 
 	// Process immediately on start
 	w.processQueue(ctx)
@@ -266,7 +266,7 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 		return
 	}
 
-	logger.Info("Uploader: Uploading hash", "hash", upload.ContentHash, "account", upload.AccountID)
+	logger.Info("Uploader: Uploading hash", "hash", upload.ContentHash, "account_id", upload.AccountID)
 
 	// Get primary address to construct S3 path
 	address, err := w.rdb.GetPrimaryEmailForAccountWithRetry(ctx, upload.AccountID)
@@ -294,16 +294,16 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 	}
 
 	if isUploaded {
-		logger.Info("Uploader: Content hash already uploaded - skipping S3 upload", "hash", upload.ContentHash, "account", upload.AccountID)
+		logger.Info("Uploader: Content hash already uploaded - skipping S3 upload", "hash", upload.ContentHash, "account_id", upload.AccountID)
 		// Content is already in S3. Mark this specific message instance as uploaded
 		// and delete the pending upload record.
 		err := w.rdb.CompleteS3UploadWithRetry(ctx, upload.ContentHash, upload.AccountID)
 		if err != nil {
-			logger.Warn("Uploader: Failed to finalize S3 upload - keeping local file for retry", "hash", upload.ContentHash, "account", upload.AccountID, "error", err)
+			logger.Warn("Uploader: Failed to finalize S3 upload - keeping local file for retry", "hash", upload.ContentHash, "account_id", upload.AccountID, "error", err)
 			return
 		}
 		// Only delete after successful DB update
-		logger.Info("Uploader: Upload completed (already uploaded hash)", "hash", upload.ContentHash, "account", upload.AccountID)
+		logger.Info("Uploader: Upload completed (already uploaded hash)", "hash", upload.ContentHash, "account_id", upload.AccountID)
 
 		// The local file is unique to this upload task, so it can be safely removed.
 		if err := w.RemoveLocalFile(filePath); err != nil {
@@ -336,13 +336,13 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 		// This prevents CleanupFailedUploads from eventually deleting the user's messages
 		// even though their content is safely stored in S3 (the ✓ EXISTS scenario).
 		logger.Warn("Uploader: Local file missing -> checking S3 for existing content",
-			"hash", upload.ContentHash, "account", upload.AccountID, "path", filePath)
+			"hash", upload.ContentHash, "account_id", upload.AccountID, "path", filePath)
 
 		s3Exists, statErr := w.s3.ExistsWithRetry(ctx, s3Key)
 		if statErr != nil {
 			// S3 is unreachable - don't count as a permanent failure.
 			logger.Warn("Uploader: Could not check S3 existence after missing file",
-				"hash", upload.ContentHash, "account", upload.AccountID, "error", statErr)
+				"hash", upload.ContentHash, "account_id", upload.AccountID, "error", statErr)
 			// Do NOT increment attempts: the content may be in S3; we'll retry next cycle.
 			return
 		}
@@ -351,14 +351,14 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 			// Content is already in S3. Complete the upload (mark messages as uploaded,
 			// remove the pending_upload record) so the user's messages are accessible.
 			logger.Info("Uploader: Local file missing but content found in S3 - self-healing upload",
-				"hash", upload.ContentHash, "account", upload.AccountID)
+				"hash", upload.ContentHash, "account_id", upload.AccountID)
 			if err := w.rdb.CompleteS3UploadWithRetry(ctx, upload.ContentHash, upload.AccountID); err != nil {
 				logger.Error("Uploader: CRITICAL - Failed to complete upload after S3 existence recovery",
 					"hash", upload.ContentHash, "account_id", upload.AccountID, "error", err)
 				return // Retry next cycle; do NOT increment attempts
 			}
 			logger.Info("Uploader: Upload self-healed via S3 existence check",
-				"hash", upload.ContentHash, "account", upload.AccountID)
+				"hash", upload.ContentHash, "account_id", upload.AccountID)
 			metrics.UploadWorkerJobs.WithLabelValues("success").Inc()
 			return
 		}
@@ -452,7 +452,7 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 	metrics.S3UploadAttempts.WithLabelValues("success").Inc()
 	metrics.UploadWorkerDuration.Observe(time.Since(start).Seconds())
 
-	logger.Info("Uploader: Upload completed", "hash", upload.ContentHash, "account", upload.AccountID)
+	logger.Info("Uploader: Upload completed", "hash", upload.ContentHash, "account_id", upload.AccountID)
 }
 
 // reportError sends an error to the error channel if configured, otherwise logs it
@@ -599,7 +599,7 @@ func (w *UploadWorker) monitorStuckUploads(ctx context.Context) error {
 			logger.Error("UploaderMonitor: Failed to get failed upload details", "error", err)
 		} else {
 			for _, upload := range failed {
-				logger.Warn("UploaderMonitor: Stuck upload", "id", upload.ID, "account", upload.AccountID, "hash", upload.ContentHash[:16], "attempts", upload.Attempts, "age", time.Since(upload.CreatedAt).Round(time.Minute))
+				logger.Warn("UploaderMonitor: Stuck upload", "id", upload.ID, "account_id", upload.AccountID, "hash", upload.ContentHash[:16], "attempts", upload.Attempts, "age", time.Since(upload.CreatedAt).Round(time.Minute))
 			}
 		}
 	}
@@ -728,7 +728,7 @@ func (w *UploadWorker) cleanupOrphanedFiles(ctx context.Context) error {
 		// Check if pending upload exists in database
 		exists, err := w.rdb.PendingUploadExistsWithRetry(ctx, contentHash, accountID)
 		if err != nil {
-			logger.Warn("UploaderCleanup: Failed to check pending upload", "hash", contentHash, "account", accountID, "error", err)
+			logger.Warn("UploaderCleanup: Failed to check pending upload", "hash", contentHash, "account_id", accountID, "error", err)
 			return nil // Don't delete if we can't verify
 		}
 
@@ -739,7 +739,7 @@ func (w *UploadWorker) cleanupOrphanedFiles(ctx context.Context) error {
 			} else {
 				filesRemoved++
 				totalSize += info.Size()
-				logger.Info("UploaderCleanup: Removed orphaned file", "hash", contentHash, "account", accountID, "size", info.Size())
+				logger.Info("UploaderCleanup: Removed orphaned file", "hash", contentHash, "account_id", accountID, "size", info.Size())
 
 				// Try to remove empty parent directories
 				stopAt, _ := filepath.Abs(w.path)

@@ -453,18 +453,54 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 	}
 
-	_, err = tx.Exec(ctx, `
-	INSERT INTO pending_uploads (instance_id, content_hash, size, created_at, account_id)
-	VALUES ($1, $2, $3, $4, $5) ON CONFLICT (content_hash, account_id) DO NOTHING`,
-		upload.InstanceID,
-		upload.ContentHash,
-		upload.Size,
-		time.Now(),
-		upload.AccountID,
-	)
+	// Check if content is already uploaded for this account (content deduplication).
+	// If so, mark this message as uploaded immediately without creating a pending_upload.
+	var alreadyUploaded bool
+	err = tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM messages
+			WHERE content_hash = $1
+			  AND account_id = $2
+			  AND uploaded = TRUE
+			LIMIT 1
+		)
+	`, options.ContentHash, upload.AccountID).Scan(&alreadyUploaded)
 	if err != nil {
-		logger.Error("Database: failed to insert into pending_uploads", "content_hash", upload.ContentHash, "err", err)
-		return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
+		logger.Error("Database: failed to check if content already uploaded", "content_hash", upload.ContentHash, "err", err)
+		return 0, 0, consts.ErrDBQueryFailed
+	}
+
+	if alreadyUploaded {
+		// Content already exists in S3 for this account - mark this message as uploaded immediately
+		_, err = tx.Exec(ctx, `
+			UPDATE messages
+			SET uploaded = TRUE
+			WHERE id = $1
+		`, messageRowId)
+		if err != nil {
+			logger.Error("Database: failed to mark message as uploaded (dedup)", "content_hash", upload.ContentHash, "err", err)
+			return 0, 0, consts.ErrDBUpdateFailed
+		}
+		logger.Info("Database: message marked as uploaded via content deduplication",
+			"content_hash", truncateHash(options.ContentHash), "account_id", upload.AccountID)
+	} else {
+		// Content not yet uploaded - create pending_upload
+		_, err = tx.Exec(ctx, `
+			INSERT INTO pending_uploads (instance_id, content_hash, size, created_at, account_id)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (content_hash, account_id) DO NOTHING`,
+			upload.InstanceID,
+			upload.ContentHash,
+			upload.Size,
+			time.Now(),
+			upload.AccountID,
+		)
+		if err != nil {
+			logger.Error("Database: failed to insert into pending_uploads", "content_hash", upload.ContentHash, "err", err)
+			return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
+		}
+		logger.Info("Database: pending_upload created",
+			"content_hash", truncateHash(options.ContentHash), "account_id", upload.AccountID)
 	}
 
 	return messageRowId, uidToUse, nil

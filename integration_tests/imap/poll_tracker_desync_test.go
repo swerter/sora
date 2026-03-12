@@ -143,11 +143,11 @@ func TestIMAP_PollTrackerDesync_ExpungeOnEmptyMailbox(t *testing.T) {
 }
 
 // TestIMAP_PollTrackerDesync_AppendWithTrackerHigher tests the scenario where:
-// 1. Session has currentNumMessages = 1, but tracker has numMessages = 2 (desync)
-// 2. User appends a message, DB now has 2
-// 3. We try to call QueueNumMessages(2) but tracker already has 2
-// 4. This would cause "cannot decrease" panic (2 is not > 2)
-// OR worse: if tracker has 3, we'd try to go from 3 to 2 (decrease panic)
+// 1. Session syncs to N messages via Poll (NOOP)
+// 2. A message is hard-deleted from the DB (simulating background cleanup)
+// 3. DB now has N-1 messages, but session still thinks N
+// 4. Next Poll (via NOOP) detects the count mismatch and forces BYE
+// This ensures hard-deletes outside the MODSEQ window cause a safe reconnect.
 func TestIMAP_PollTrackerDesync_AppendWithTrackerHigher(t *testing.T) {
 	common.SkipIfDatabaseUnavailable(t)
 
@@ -172,8 +172,8 @@ func TestIMAP_PollTrackerDesync_AppendWithTrackerHigher(t *testing.T) {
 	}
 	t.Logf("Initial mailbox state: %d messages", mbox.NumMessages)
 
-	// Add 2 messages
-	for i := 1; i <= 2; i++ {
+	// Add 3 messages
+	for i := 1; i <= 3; i++ {
 		testMessage := fmt.Sprintf("From: test@example.com\r\n"+
 			"To: %s\r\n"+
 			"Subject: Test Message %d\r\n"+
@@ -196,7 +196,15 @@ func TestIMAP_PollTrackerDesync_AppendWithTrackerHigher(t *testing.T) {
 		}
 	}
 
-	t.Logf("Added 2 messages")
+	t.Logf("Added 3 messages")
+
+	// Force a Poll so the session discovers the 3 messages.
+	// APPEND has sendOK=false in go-imap, so Poll is NOT called after APPEND.
+	// The session only learns about new messages when Poll runs (e.g., during NOOP).
+	if err := c1.Noop().Wait(); err != nil {
+		t.Fatalf("NOOP (sync) failed: %v", err)
+	}
+	t.Log("Session synced via NOOP - session now knows about 3 messages")
 
 	// Get account and mailbox
 	ctx := context.Background()
@@ -210,9 +218,9 @@ func TestIMAP_PollTrackerDesync_AppendWithTrackerHigher(t *testing.T) {
 		t.Fatalf("Failed to get mailbox: %v", err)
 	}
 
-	// Simulate desync: Delete one message directly from DB
-	// This creates a state where DB has 1 message, but session might think it has 2
-	t.Log("Deleting one message via direct database manipulation to create desync")
+	// Simulate hard-delete by background cleanup worker: delete one message directly from DB.
+	// This creates a state where DB has 2 messages, but session thinks it has 3.
+	t.Log("Hard-deleting one message via direct database manipulation to create desync")
 	_, err = server.ResilientDB.GetDatabase().GetWritePool().Exec(ctx,
 		"DELETE FROM messages WHERE mailbox_id = $1 AND uid = 1",
 		mailbox.ID)
@@ -220,30 +228,14 @@ func TestIMAP_PollTrackerDesync_AppendWithTrackerHigher(t *testing.T) {
 		t.Fatalf("Failed to delete message: %v", err)
 	}
 
-	// Now append a new message - this will trigger a Poll which detects the desync
-	// and forces a BYE to protect the sequence mappings.
-	t.Log("Appending new message - this may trigger desync detection")
-	testMessage := fmt.Sprintf("From: test@example.com\r\n"+
-		"To: %s\r\n"+
-		"Subject: Test Message After Desync\r\n"+
-		"Date: %s\r\n"+
-		"\r\n"+
-		"This message is appended after desync.\r\n", account.Email, time.Now().Format(time.RFC1123Z))
-
-	appendCmd := c1.Append("INBOX", int64(len(testMessage)), nil)
-	_, err = appendCmd.Write([]byte(testMessage))
-	if err != nil {
-		t.Fatalf("APPEND write failed: %v", err)
-	}
-	err = appendCmd.Close()
-	if err != nil {
-		t.Fatalf("APPEND close failed: %v", err)
-	}
-	_, err = appendCmd.Wait()
+	// NOOP triggers Poll which detects session_count(3) > db_count(2)
+	// and forces a BYE to rebuild the tracker from scratch.
+	t.Log("Triggering NOOP to force poll and desync detection")
+	err = c1.Noop().Wait()
 	if err == nil {
-		t.Fatal("Expected APPEND to fail with BYE due to hard-delete desync, but it succeeded")
+		t.Fatal("Expected NOOP to return an error (BYE) due to desync, but it succeeded")
 	}
-	t.Logf("APPEND returned expected error (BYE forcing reconnect): %v", err)
+	t.Logf("NOOP returned expected error (BYE forcing reconnect): %v", err)
 
 	// Verify state by reconnecting
 	t.Log("Reconnecting to verify correct state")
