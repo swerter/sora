@@ -19,7 +19,11 @@ func ParseMessage(r io.Reader) (*message.Entity, error) {
 	// Read the message from the reader
 	m, err := message.Read(r)
 	if message.IsUnknownCharset(err) {
-		logger.Debug("Unknown encoding:", err)
+		logger.Debug("Unknown charset, using fallback", "error", err)
+		// Continue with degraded entity - charset errors are non-fatal
+	} else if message.IsUnknownEncoding(err) {
+		logger.Warn("Unknown or malformed Content-Transfer-Encoding, using fallback", "error", err)
+		// Continue with degraded entity - encoding errors are non-fatal
 	} else if err != nil {
 		// Check if this is a malformed MIME header error
 		if strings.Contains(err.Error(), "malformed MIME header") {

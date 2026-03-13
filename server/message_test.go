@@ -107,6 +107,38 @@ Body
 	}
 }
 
+func TestParseMessage_MalformedEncoding(t *testing.T) {
+	// Test the real-world case from production logs:
+	// "encoding error: unhandled encoding "7BITquoted-printable""
+	// This is a malformed Content-Transfer-Encoding that concatenates two valid values
+	malformedEncodingMsg := `From: sender@example.com
+To: recipient@example.com
+Subject: Test with malformed encoding
+Content-Type: text/plain
+Content-Transfer-Encoding: 7BITquoted-printable
+
+This message has a malformed Content-Transfer-Encoding header.
+It should be either "7bit" or "quoted-printable", not concatenated.
+`
+	msg, err := ParseMessage(strings.NewReader(malformedEncodingMsg))
+
+	// Should NOT return an error (graceful fallback)
+	if err != nil {
+		t.Fatalf("ParseMessage should handle malformed encoding gracefully, got error: %v", err)
+	}
+
+	if msg == nil {
+		t.Fatal("ParseMessage should return an entity even with malformed encoding")
+	}
+
+	// The message should still be readable (degraded mode)
+	// The go-message library will have logged the encoding error but allowed parsing to continue
+	from := msg.Header.Get("From")
+	if from != "sender@example.com" {
+		t.Errorf("Expected From: sender@example.com, got: %s", from)
+	}
+}
+
 func TestCreateFallbackEntity(t *testing.T) {
 	originalErr := bytes.ErrTooLarge
 
