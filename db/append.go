@@ -344,8 +344,8 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 	// These are typically spam, newsletters, or malformed messages - not legitimate correspondence.
 	// Use empty strings for FTS to avoid indexing overhead while still storing the full content.
 	const maxFTSBytes = 1024 * 1024 // 1 MB
-	sanePlaintextBodyForFTS := sanePlaintextBody
-	saneRawHeadersForFTS := saneRawHeaders
+	sanePlaintextBodyForFTS := helpers.SanitizeForFTS(sanePlaintextBody)
+	saneRawHeadersForFTS := helpers.SanitizeForFTS(saneRawHeaders)
 
 	skipFTS := false
 	if len(sanePlaintextBody) > maxFTSBytes {
@@ -698,8 +698,8 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 	// These are typically spam, newsletters, or malformed messages - not legitimate correspondence.
 	// Use empty strings for FTS to avoid indexing overhead while still storing the full content.
 	const maxFTSBytes = 1024 * 1024 // 1 MB
-	sanePlaintextBodyForFTS := sanePlaintextBody
-	saneRawHeadersForFTS := saneRawHeaders
+	sanePlaintextBodyForFTS := helpers.SanitizeForFTS(sanePlaintextBody)
+	saneRawHeadersForFTS := helpers.SanitizeForFTS(saneRawHeaders)
 
 	skipFTS := false
 	if len(sanePlaintextBody) > maxFTSBytes {

@@ -141,6 +141,79 @@ func TestSanitizeFlags_PreservesOrder(t *testing.T) {
 	}
 }
 
+func TestSanitizeForFTS(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "No backslashes",
+			input:    "Hello, World!",
+			expected: "Hello, World!",
+		},
+		{
+			name:     "Empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "Single backslash",
+			input:    "Hello\\World",
+			expected: "Hello World",
+		},
+		{
+			name:     "Multiple backslashes",
+			input:    "C:\\Users\\Admin\\Documents",
+			expected: "C: Users Admin Documents",
+		},
+		{
+			name:     "Unicode escape pattern that causes PostgreSQL error",
+			input:    "Text with \\u0000 escape",
+			expected: "Text with  u0000 escape",
+		},
+		{
+			name:     "Backslash at start",
+			input:    "\\start",
+			expected: " start",
+		},
+		{
+			name:     "Backslash at end",
+			input:    "end\\",
+			expected: "end ",
+		},
+		{
+			name:     "Consecutive backslashes",
+			input:    "double\\\\backslash",
+			expected: "double  backslash",
+		},
+		{
+			name:     "Real-world Unicode escape error",
+			input:    "Message with \\u1234 and \\uABCD patterns",
+			expected: "Message with  u1234 and  uABCD patterns",
+		},
+		{
+			name:     "Backslash-heavy path",
+			input:    "\\\\server\\share\\folder\\file.txt",
+			expected: "  server share folder file.txt",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := SanitizeForFTS(tt.input)
+			if result != tt.expected {
+				t.Errorf("Expected %q, got %q", tt.expected, result)
+			}
+
+			// Verify result contains no backslashes
+			if strings.ContainsRune(result, '\\') {
+				t.Errorf("Result still contains backslashes: %q", result)
+			}
+		})
+	}
+}
+
 func TestSanitizeUTF8(t *testing.T) {
 	tests := []struct {
 		name     string

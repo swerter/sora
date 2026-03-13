@@ -37,6 +37,20 @@ func SanitizeUTF8(s string) string {
 	return string(buf)
 }
 
+// SanitizeForFTS removes characters that could cause PostgreSQL errors when passed
+// to to_tsvector(). Specifically, it replaces backslashes with spaces to prevent
+// "unsupported Unicode escape sequence" errors (SQLSTATE 22P05) when messages
+// contain patterns like \uXXXX that PostgreSQL tries to interpret as Unicode escapes.
+//
+// Backslashes are not meaningful for full-text search, so replacing them with spaces
+// is safe and improves search reliability.
+func SanitizeForFTS(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	return strings.ReplaceAll(s, "\\", " ")
+}
+
 // SanitizeFlags removes invalid flag values that could cause IMAP protocol errors.
 // This prevents issues like NIL appearing as a flag, which triggers errors:
 // "Keyword used without being in FLAGS: NIL"
