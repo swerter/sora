@@ -344,25 +344,22 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 	// These are typically spam, newsletters, or malformed messages - not legitimate correspondence.
 	// Use empty strings for FTS to avoid indexing overhead while still storing the full content.
 	const maxFTSBytes = 1024 * 1024 // 1 MB
-	sanePlaintextBodyForFTS := helpers.SanitizeForFTS(sanePlaintextBody)
-	saneRawHeadersForFTS := helpers.SanitizeForFTS(saneRawHeaders)
 
-	skipFTS := false
+	// Note: sanePlaintextBody and saneRawHeaders are already sanitized via SanitizeUTF8
+	// (which handles NULL bytes, invalid UTF-8, and backslashes)
+	sanePlaintextBodyForFTS := sanePlaintextBody
+	saneRawHeadersForFTS := saneRawHeaders
+
 	if len(sanePlaintextBody) > maxFTSBytes {
 		logger.Info("Database: skipping FTS indexing for very large message body",
 			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(sanePlaintextBody))
 		sanePlaintextBodyForFTS = ""
-		skipFTS = true
+		metrics.LargeFTSSkipped.Inc()
 	}
 	if len(saneRawHeaders) > maxFTSBytes {
 		logger.Info("Database: skipping FTS indexing for very large headers",
 			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(saneRawHeaders))
 		saneRawHeadersForFTS = ""
-		skipFTS = true
-	}
-
-	if skipFTS {
-		// Increment metric for monitoring
 		metrics.LargeFTSSkipped.Inc()
 	}
 
@@ -460,7 +457,18 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		ON CONFLICT (content_hash) DO NOTHING
 	`, options.ContentHash, textBodyArg, sanePlaintextBodyForFTS, headersArg, saneRawHeadersForFTS)
 	if err != nil {
-		logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+		// Log the actual error details for debugging
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			logger.Error("Database: failed to insert message content",
+				"content_hash", options.ContentHash,
+				"err", err,
+				"pg_code", pgErr.Code,
+				"pg_message", pgErr.Message,
+				"pg_detail", pgErr.Detail)
+		} else {
+			logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+		}
 		return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 	}
 
@@ -709,25 +717,22 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 	// These are typically spam, newsletters, or malformed messages - not legitimate correspondence.
 	// Use empty strings for FTS to avoid indexing overhead while still storing the full content.
 	const maxFTSBytes = 1024 * 1024 // 1 MB
-	sanePlaintextBodyForFTS := helpers.SanitizeForFTS(sanePlaintextBody)
-	saneRawHeadersForFTS := helpers.SanitizeForFTS(saneRawHeaders)
 
-	skipFTS := false
+	// Note: sanePlaintextBody and saneRawHeaders are already sanitized via SanitizeUTF8
+	// (which handles NULL bytes, invalid UTF-8, and backslashes)
+	sanePlaintextBodyForFTS := sanePlaintextBody
+	saneRawHeadersForFTS := saneRawHeaders
+
 	if len(sanePlaintextBody) > maxFTSBytes {
 		logger.Info("Database: skipping FTS indexing for very large message body",
 			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(sanePlaintextBody))
 		sanePlaintextBodyForFTS = ""
-		skipFTS = true
+		metrics.LargeFTSSkipped.Inc()
 	}
 	if len(saneRawHeaders) > maxFTSBytes {
 		logger.Info("Database: skipping FTS indexing for very large headers",
 			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(saneRawHeaders))
 		saneRawHeadersForFTS = ""
-		skipFTS = true
-	}
-
-	if skipFTS {
-		// Increment metric for monitoring
 		metrics.LargeFTSSkipped.Inc()
 	}
 
@@ -825,7 +830,18 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 		ON CONFLICT (content_hash) DO NOTHING
 	`, options.ContentHash, textBodyArg, sanePlaintextBodyForFTS, headersArg, saneRawHeadersForFTS)
 	if err != nil {
-		logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+		// Log the actual error details for debugging
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			logger.Error("Database: failed to insert message content",
+				"content_hash", options.ContentHash,
+				"err", err,
+				"pg_code", pgErr.Code,
+				"pg_message", pgErr.Message,
+				"pg_detail", pgErr.Detail)
+		} else {
+			logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+		}
 		return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 	}
 

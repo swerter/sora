@@ -9,9 +9,10 @@ import (
 
 // SanitizeUTF8 removes invalid UTF-8 sequences, NULL bytes, and backslashes from a string.
 // PostgreSQL's text type has several restrictions:
-// - NULL bytes (0x00) are not allowed even though they are valid UTF-8
-// - Backslashes can cause "unsupported Unicode escape sequence" errors (SQLSTATE 22P05)
-//   when PostgreSQL encounters patterns like \uXXXX in text processing
+//   - NULL bytes (0x00) are not allowed even though they are valid UTF-8
+//   - Backslashes can cause "unsupported Unicode escape sequence" errors (SQLSTATE 22P05)
+//     when PostgreSQL encounters patterns like \uXXXX in text processing
+//
 // This function ensures the string is safe to store in any PostgreSQL text column.
 func SanitizeUTF8(s string) string {
 	// Quick check: if string is valid UTF-8 and has no problematic characters, return as-is
