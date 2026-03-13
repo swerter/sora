@@ -1441,6 +1441,7 @@ type Config struct {
 	SharedMailboxes  SharedMailboxesConfig  `toml:"shared_mailboxes"`
 	Sieve            SieveConfig            `toml:"sieve"`
 	Relay            RelayConfig            `toml:"relay"`
+	SpamTraining     SpamTrainingConfig     `toml:"spam_training"`     // Spam filter training configuration
 	AdminCLI         AdminCLIConfig         `toml:"admin_cli"`         // Admin CLI tool configuration
 	TimeoutScheduler TimeoutSchedulerConfig `toml:"timeout_scheduler"` // Global timeout scheduler configuration
 

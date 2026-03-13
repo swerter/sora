@@ -116,6 +116,11 @@ func (s *IMAPSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest st
 		return s.internalError("failed to move messages: %v", err)
 	}
 
+	// Trigger spam training if configured and moving to/from Junk folder
+	if s.server.spamTraining != nil && len(messageUIDMap) > 0 {
+		s.triggerSpamTraining(s.ctx, selectedMailboxID, destMailbox.ID, s.selectedMailbox.Name, dest, messageUIDMap)
+	}
+
 	var mappedSourceUIDs []imap.UID
 	var mappedDestUIDs []imap.UID
 

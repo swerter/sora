@@ -31,7 +31,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-
 // ImporterOptions contains configuration options for the importer
 type ImporterOptions struct {
 	DryRun               bool

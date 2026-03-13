@@ -17,6 +17,7 @@ import (
 	"github.com/migadu/sora/config"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/pkg/resilient"
+	"github.com/migadu/sora/pkg/spamtraining"
 	"github.com/migadu/sora/server/imap"
 	"github.com/migadu/sora/server/lmtp"
 	"github.com/migadu/sora/server/managesieve"
@@ -35,6 +36,16 @@ type TestServer struct {
 type TestAccount struct {
 	Email    string
 	Password string
+}
+
+// IMAPServerOpts contains optional configuration for IMAP server setup
+type IMAPServerOpts struct {
+	SpamTrainingEnabled           bool
+	SpamTrainingEndpoint          string
+	SpamTrainingToken             string
+	SpamTrainingCircuitThreshold  int
+	SpamTrainingCircuitTimeout    string
+	SpamTrainingCircuitMaxRequest int
 }
 
 func (ts *TestServer) Close() {
@@ -224,6 +235,138 @@ func SetupIMAPServer(t *testing.T) (*TestServer, TestAccount) {
 		imap.IMAPServerOptions{
 			InsecureAuth: true, // Allow PLAIN auth (no TLS in tests)
 			Config:       testConfig,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Failed to create IMAP server: %v", err)
+	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		if err := server.Serve(address); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+			errChan <- fmt.Errorf("IMAP server error: %w", err)
+		}
+	}()
+
+	// Wait for server to start
+	time.Sleep(100 * time.Millisecond)
+
+	cleanup := func() {
+		server.Close()
+		select {
+		case err := <-errChan:
+			if err != nil {
+				t.Logf("IMAP server error during shutdown: %v", err)
+			}
+		case <-time.After(1 * time.Second):
+			// Timeout waiting for server to shut down
+		}
+		// Clean up temporary directory
+		os.RemoveAll(tempDir)
+	}
+
+	return &TestServer{
+		Address:     address,
+		Server:      server,
+		cleanup:     cleanup,
+		ResilientDB: rdb,
+	}, account
+}
+
+// SetupIMAPServerWithOptions creates an IMAP server with custom options (e.g., spam training)
+func SetupIMAPServerWithOptions(t *testing.T, opts *IMAPServerOpts) (*TestServer, TestAccount) {
+	t.Helper()
+
+	rdb := SetupTestDatabase(t)
+	account := CreateTestAccount(t, rdb)
+	address := GetRandomAddress(t)
+
+	// Create a temporary directory for the uploader
+	tempDir, err := os.MkdirTemp("", "sora-test-upload-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+
+	// Create error channel for uploader
+	errCh := make(chan error, 1)
+
+	// Create UploadWorker for testing
+	uploadWorker, err := uploader.New(
+		context.Background(),
+		tempDir,              // path
+		10,                   // batchSize
+		1,                    // concurrency
+		3,                    // maxAttempts
+		time.Second,          // retryInterval
+		"test-instance",      // instanceID
+		rdb,                  // database
+		&storage.S3Storage{}, // S3 storage
+		nil,                  // cache (can be nil)
+		errCh,                // error channel
+	)
+	if err != nil {
+		t.Fatalf("Failed to create upload worker: %v", err)
+	}
+
+	// Create test config with shared mailboxes enabled
+	testConfig := &config.Config{
+		SharedMailboxes: config.SharedMailboxesConfig{
+			Enabled:               true,
+			NamespacePrefix:       "Shared/",
+			AllowUserCreate:       true,
+			DefaultRights:         "lrswipkxtea",
+			AllowAnyoneIdentifier: true,
+		},
+	}
+
+	// Configure spam training if enabled
+	var spamTrainingClient *spamtraining.Client
+	if opts != nil && opts.SpamTrainingEnabled {
+		cfg := &config.SpamTrainingConfig{
+			Enabled:           true,
+			Endpoint:          opts.SpamTrainingEndpoint,
+			AuthToken:         opts.SpamTrainingToken,
+			Timeout:           "10s",
+			MaxMessageSize:    "10MB",
+			MaxAttachmentSize: "5MB",
+			Async:             true,
+			CircuitBreaker: config.SpamTrainingCircuitBreakerConfig{
+				Threshold:   opts.SpamTrainingCircuitThreshold,
+				Timeout:     opts.SpamTrainingCircuitTimeout,
+				MaxRequests: opts.SpamTrainingCircuitMaxRequest,
+			},
+		}
+
+		// Set defaults if not specified
+		if cfg.CircuitBreaker.Threshold == 0 {
+			cfg.CircuitBreaker.Threshold = 5
+		}
+		if cfg.CircuitBreaker.Timeout == "" {
+			cfg.CircuitBreaker.Timeout = "30s"
+		}
+		if cfg.CircuitBreaker.MaxRequests == 0 {
+			cfg.CircuitBreaker.MaxRequests = 3
+		}
+
+		spamTrainingClient, err = spamtraining.NewClient(cfg)
+		if err != nil {
+			t.Fatalf("Failed to create spam training client: %v", err)
+		}
+	}
+
+	server, err := imap.New(
+		context.Background(),
+		"test",
+		"localhost",
+		address,
+		&storage.S3Storage{},
+		rdb,
+		uploadWorker, // properly initialized UploadWorker
+		nil,          // cache.Cache
+		imap.IMAPServerOptions{
+			InsecureAuth: true, // Allow PLAIN auth (no TLS in tests)
+			Config:       testConfig,
+			SpamTraining: spamTrainingClient,
 		},
 	)
 	if err != nil {

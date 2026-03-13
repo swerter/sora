@@ -653,6 +653,90 @@ enabled_extensions = []
 # - The NAMESPACE command will advertise the shared namespace when enabled
 
 
+# SPAM FILTER TRAINING CONFIGURATION
+# =============================================================================
+# Automatic spam filter training based on user feedback.
+# When users move messages to/from the Junk folder via IMAP, the message
+# (without attachments) is automatically submitted to a remote endpoint
+# for spam filter training. This enables continuous improvement of spam
+# detection based on real user feedback.
+#
+# OPERATION:
+# - Move TO Junk folder   → Submit as SPAM training
+# - Move FROM Junk folder → Submit as HAM (not spam) training
+#
+# TRAINING REQUEST FORMAT (JSON POST to endpoint):
+# {
+#   "type": "spam",                    // or "ham"
+#   "message": "From: sender@...",     // RFC822 message without attachments
+#   "user": "user@example.com",        // User who performed the action
+#   "source_mailbox": "INBOX",         // Source mailbox name
+#   "dest_mailbox": "Junk",            // Destination mailbox name
+#   "timestamp": "2026-03-13T10:30:00Z"
+# }
+
+[spam_training]
+# Enable spam filter training (default: false)
+enabled = false
+
+# HTTP endpoint to submit training data (POST requests with JSON payload)
+# Example: "https://spam-filter.example.com/train"
+# endpoint = "https://your-spam-service.example.com/api/train"
+
+# Bearer token for authentication (optional)
+# If provided, sent as "Authorization: Bearer <token>" header
+# auth_token = "your-secret-api-token-here"
+
+# HTTP request timeout (default: "10s")
+# Maximum time to wait for the training endpoint to respond
+# timeout = "10s"
+
+# Maximum message size to submit (default: "10mb")
+# Messages larger than this are skipped (not submitted for training)
+# Attachments are already stripped, so this applies to the text content size
+# max_message_size = "10mb"
+
+# Maximum attachment size threshold (default: "0")
+# If set to "0" (default): Always strip attachments and submit for training
+# If set to a size: Skip training if total attachments exceed this size
+# This is a pre-filter - attachments are always stripped before submission
+# max_attachment_size = "0"
+
+# Async mode (default: true)
+# When true, training submissions happen in background (non-blocking)
+# When false, MOVE command waits for training submission to complete
+# RECOMMENDED: Keep true to avoid slowing down IMAP operations
+# async = true
+
+# Circuit breaker configuration for training endpoint
+# Protects against cascading failures if the training endpoint becomes unavailable
+[spam_training.circuit_breaker]
+# Consecutive failures before opening circuit (default: 5)
+# After this many failures, circuit opens and requests fail immediately
+# threshold = 5
+
+# Recovery test interval when circuit is open (default: "30s")
+# How long to wait before testing if the endpoint has recovered
+# timeout = "30s"
+
+# Max requests in half-open state (default: 3)
+# Number of test requests allowed when testing endpoint recovery
+# max_requests = 3
+
+# EXAMPLE CONFIGURATION:
+# [spam_training]
+# enabled = true
+# endpoint = "https://rspamd.example.com/learnspam"
+# auth_token = "secret-token-123"
+# timeout = "15s"
+# async = true
+#
+# [spam_training.circuit_breaker]
+# threshold = 10
+# timeout = "1m"
+# max_requests = 5
+
+
 # TIMEOUT SCHEDULER CONFIGURATION
 # =============================================================================
 # Global timeout scheduler configuration for connection timeout management.

@@ -27,6 +27,7 @@ import (
 	"github.com/migadu/sora/pkg/lookupcache"
 	"github.com/migadu/sora/pkg/metrics"
 	"github.com/migadu/sora/pkg/resilient"
+	"github.com/migadu/sora/pkg/spamtraining"
 	serverPkg "github.com/migadu/sora/server"
 	"github.com/migadu/sora/server/idgen"
 	"github.com/migadu/sora/server/uploader"
@@ -234,7 +235,8 @@ type IMAPServer struct {
 	appendLimit        int64
 	ftsSourceRetention time.Duration
 	version            string
-	config             *config.Config // Full config reference for shared mailboxes
+	config             *config.Config       // Full config reference for shared mailboxes
+	spamTraining       *spamtraining.Client // Spam filter training client (optional)
 
 	// Metadata limits (RFC 5464)
 	metadataMaxEntrySize         int
@@ -344,6 +346,8 @@ type IMAPServerOptions struct {
 	InsecureAuth bool // Allow PLAIN auth over non-TLS connections (default: true for backends behind proxy)
 	// Full config for shared mailboxes and other features
 	Config *config.Config
+	// Spam training client (optional)
+	SpamTraining *spamtraining.Client
 }
 
 func New(appCtx context.Context, name, hostname, imapAddr string, s3 *storage.S3Storage, rdb *resilient.ResilientDatabase, uploadWorker *uploader.UploadWorker, cache *cache.Cache, options IMAPServerOptions) (*IMAPServer, error) {
@@ -473,6 +477,7 @@ func New(appCtx context.Context, name, hostname, imapAddr string, s3 *storage.S3
 		ftsSourceRetention:           options.FTSSourceRetention,
 		version:                      options.Version,
 		config:                       options.Config,
+		spamTraining:                 options.SpamTraining,
 		metadataMaxEntrySize:         options.MetadataMaxEntrySize,
 		metadataMaxEntriesPerMailbox: options.MetadataMaxEntriesPerMailbox,
 		metadataMaxEntriesPerServer:  options.MetadataMaxEntriesPerServer,

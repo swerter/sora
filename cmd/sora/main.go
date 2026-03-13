@@ -21,6 +21,7 @@ import (
 	"github.com/migadu/sora/pkg/health"
 	"github.com/migadu/sora/pkg/metrics"
 	"github.com/migadu/sora/pkg/resilient"
+	"github.com/migadu/sora/pkg/spamtraining"
 	"github.com/migadu/sora/server"
 	"github.com/migadu/sora/server/adminapi"
 	"github.com/migadu/sora/server/cleaner"
@@ -85,6 +86,7 @@ type serverDependencies struct {
 	clusterManager        *cluster.Manager
 	tlsManager            *tlsmanager.Manager
 	affinityManager       *server.AffinityManager
+	spamTrainingClient    *spamtraining.Client // Spam filter training client (optional)
 	hostname              string
 	config                config.Config
 	serverManager         *serverManager
@@ -901,6 +903,21 @@ func initializeServices(ctx context.Context, cfg config.Config, errorHandler *er
 		go deps.metricsCollector.Start(ctx)
 	}
 
+	// Initialize spam training client if configured
+	if cfg.SpamTraining.IsConfigured() {
+		var err error
+		deps.spamTrainingClient, err = spamtraining.NewClient(&cfg.SpamTraining)
+		if err != nil {
+			logger.Warn("Failed to initialize spam training client", "error", err)
+			deps.spamTrainingClient = nil
+		} else {
+			logger.Info("Spam training client initialized",
+				"endpoint", cfg.SpamTraining.Endpoint,
+				"async", cfg.SpamTraining.Async,
+				"cb_threshold", cfg.SpamTraining.CircuitBreaker.GetThreshold())
+		}
+	}
+
 	return deps, nil
 }
 
@@ -1132,6 +1149,7 @@ func startDynamicIMAPServer(ctx context.Context, deps *serverDependencies, serve
 			MetadataMaxTotalSize:         deps.config.Metadata.MaxTotalSize,
 			InsecureAuth:                 serverConfig.InsecureAuth || !serverConfig.TLS, // Default true when TLS not enabled (backend behind proxy)
 			Config:                       &deps.config,
+			SpamTraining:                 deps.spamTrainingClient,
 		})
 	if err != nil {
 		errChan <- err
