@@ -217,13 +217,13 @@ func TestBuildSearchCriteria(t *testing.T) {
 			hasError: false,
 		},
 		{
-			name: "search with unsupported header",
+			name: "search with generic header (now supported via FTS)",
 			criteria: &imap.SearchCriteria{
 				Header: []imap.SearchCriteriaHeaderField{
 					{Key: "X-Custom-Header", Value: "value"},
 				},
 			},
-			hasError: true,
+			hasError: false,
 		},
 	}
 
@@ -644,11 +644,11 @@ func TestSearchCriteriaValidation(t *testing.T) {
 			valid: false,
 		},
 		{
-			name: "unsupported header field",
+			name: "generic header field (now supported)",
 			criteria: &imap.SearchCriteria{
 				Header: []imap.SearchCriteriaHeaderField{{Key: "x-custom-header", Value: "test"}},
 			},
-			valid: false,
+			valid: true,
 		},
 		{
 			name: "valid complex search",

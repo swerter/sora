@@ -210,10 +210,14 @@ func (db *Database) buildSearchCriteriaWithPrefix(criteria *imap.SearchCriteria,
 			args[recipientJSONParam] = string(recipientJSON)
 			conditions = append(conditions, fmt.Sprintf(`%srecipients_json @> @%s::jsonb`, datePrefix, recipientJSONParam))
 		default:
-			return "", nil, &imap.Error{
-				Type: imap.StatusResponseTypeNo,
-				Text: "SEARCH criteria generic HEADER is not supported",
-			}
+			// Generic HEADER search for arbitrary headers (e.g., HEADER List-ID "value")
+			// Use FTS search on headers_tsv column
+			// Note: needsComplexQuery() will detect this and use complex query path
+			param := nextParam()
+			args[param] = lowerValue
+			conditions = append(conditions, fmt.Sprintf(
+				"headers_tsv IS NOT NULL AND headers_tsv @@ plainto_tsquery('simple', @%s)",
+				param))
 		}
 	}
 
@@ -392,6 +396,20 @@ func (db *Database) needsComplexQuery(criteria *imap.SearchCriteria, orderByClau
 		return true
 	}
 
+	// Need complex query for generic header searches (requires headers_tsv from message_contents)
+	for _, headerField := range criteria.Header {
+		lowerKey := strings.ToLower(headerField.Key)
+		// Check if this is a generic header (not one with a dedicated column)
+		switch lowerKey {
+		case "from", "to", "cc", "bcc", "subject", "message-id", "in-reply-to", "reply-to":
+			// These have dedicated columns, no need for complex query
+			continue
+		default:
+			// Generic header requires headers_tsv search
+			return true
+		}
+	}
+
 	// Need complex query for sequence number searches (requires seqnum calculation)
 	for _, seqSet := range criteria.SeqNum {
 		if len(seqSet) > 0 {
@@ -505,7 +523,7 @@ func (db *Database) getMessagesQueryExecutor(ctx context.Context, mailboxID int6
 				m.internal_date, m.size, m.body_structure, m.created_modseq, m.updated_modseq, m.expunged_modseq,
 				m.flags_changed_at, m.subject, m.sent_date, m.message_id,
 				m.in_reply_to, m.recipients_json, mc.text_body_tsv, mc.headers_tsv,
-				m.subject_sort, m.from_name_sort, m.from_email_sort, m.to_email_sort, m.cc_email_sort
+				m.subject_sort, m.from_name_sort, m.from_email_sort, m.to_name_sort, m.to_email_sort, m.cc_email_sort
 			FROM messages m
 			JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
 			LEFT JOIN message_contents mc ON m.content_hash = mc.content_hash
