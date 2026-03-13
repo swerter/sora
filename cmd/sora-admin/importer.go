@@ -31,9 +31,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const (
-	maxMessageSize = 100 * 1024 * 1024 // 100MB max message size
-)
 
 // ImporterOptions contains configuration options for the importer
 type ImporterOptions struct {
@@ -54,6 +51,7 @@ type ImporterOptions struct {
 	BatchSize            int           // Number of messages to process in each batch (default: 20)
 	BatchTransactionMode bool          // Use single transaction per batch (faster but less resilient, default: false)
 	Incremental          bool          // Use SQLite cache to skip already-imported messages (default: false = always read all)
+	MaxMessageSize       int64         // Maximum message size to import (bytes, 0 = use default)
 }
 
 // resilientDB defines the interface for database operations needed by the importer.
@@ -1013,12 +1011,12 @@ func (i *Importer) parseMaildirFlags(filename string) []imap.Flag {
 }
 
 // validateMessage performs basic validation on a message.
-func validateMessage(size int64) error {
+func (i *Importer) validateMessage(size int64) error {
 	if size == 0 {
 		return errors.New("empty message")
 	}
-	if size > maxMessageSize {
-		return fmt.Errorf("message too large: %d bytes (max: %d)", size, maxMessageSize)
+	if i.options.MaxMessageSize > 0 && size > i.options.MaxMessageSize {
+		return fmt.Errorf("message too large: %d bytes (max: %d)", size, i.options.MaxMessageSize)
 	}
 	return nil
 }
@@ -1138,7 +1136,7 @@ func (i *Importer) scanMaildir() error {
 				}
 
 				// Validate message
-				if err := validateMessage(size); err != nil {
+				if err := i.validateMessage(size); err != nil {
 					logger.Info("Invalid message", "path", file.path, "error", err)
 					atomic.AddInt64(&i.skippedMessages, 1)
 					continue

@@ -224,6 +224,7 @@ Examples:
 		BatchSize:            *batchSize,
 		BatchTransactionMode: *batchTxMode,
 		Incremental:          *incremental,
+		MaxMessageSize:       globalConfig.AppendLimit,
 	}
 
 	importer, err := NewImporter(ctx, *maildirPath, *email, *jobs, rdb, s3, options)

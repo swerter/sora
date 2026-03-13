@@ -40,6 +40,7 @@ type AdminConfig struct {
 	HTTPAPIAddr               string                       `toml:"http_api_addr"`                 // HTTP API address for kick operations (e.g., "http://localhost:8080")
 	HTTPAPIKey                string                       `toml:"http_api_key"`                  // HTTP API key for authentication
 	HTTPAPIInsecureSkipVerify bool                         `toml:"http_api_insecure_skip_verify"` // Skip TLS certificate verification (default: true for localhost)
+	AppendLimit               int64                        // IMAP append limit from config (populated from full config)
 }
 
 // newAdminDatabase creates a resilient database for admin CLI operations.
@@ -96,6 +97,14 @@ func loadAdminConfig(configPath string, cfg *AdminConfig) error {
 	if fullCfg.AdminCLI.InsecureSkipVerify != nil {
 		cfg.HTTPAPIInsecureSkipVerify = *fullCfg.AdminCLI.InsecureSkipVerify
 	}
+
+	// Extract append limit from IMAP server config (used by importer)
+	appendLimit, err := fullCfg.Servers.GetAppendLimit()
+	if err != nil {
+		// Use default if parsing fails
+		appendLimit = 25 * 1024 * 1024 // 25MB default
+	}
+	cfg.AppendLimit = appendLimit
 
 	return nil
 }
