@@ -41,13 +41,12 @@ func TestValidateBodyStructure(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "invalid multipart with no children",
+			name: "valid multipart with no children (unusual but allowed)",
 			bs: &imap.BodyStructureMultiPart{
-				Subtype:  "mixed",
+				Subtype:  "report",
 				Children: []imap.BodyStructure{},
 			},
-			wantErr: true,
-			errMsg:  "no children",
+			wantErr: false,
 		},
 		{
 			name: "valid nested multipart",
@@ -68,18 +67,17 @@ func TestValidateBodyStructure(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "invalid nested multipart with empty child",
+			name: "valid nested multipart with empty child (unusual but allowed)",
 			bs: &imap.BodyStructureMultiPart{
 				Subtype: "alternative",
 				Children: []imap.BodyStructure{
 					&imap.BodyStructureMultiPart{
 						Subtype:  "mixed",
-						Children: []imap.BodyStructure{}, // Invalid!
+						Children: []imap.BodyStructure{}, // Unusual but valid
 					},
 				},
 			},
-			wantErr: true,
-			errMsg:  "invalid child 0",
+			wantErr: false,
 		},
 		{
 			name: "valid message/rfc822",

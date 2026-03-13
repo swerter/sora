@@ -124,9 +124,11 @@ func ValidateBodyStructure(bs *imap.BodyStructure) error {
 
 	switch v := (*bs).(type) {
 	case *imap.BodyStructureMultiPart:
-		if len(v.Children) == 0 {
-			return fmt.Errorf("invalid multipart body structure: no children (subtype=%s)", v.Subtype)
-		}
+		// Empty multipart structures (no children) are unusual but valid MIME.
+		// RFC 2046 says "there must be at least one body part", but real-world
+		// messages (e.g., malformed DSN reports) can violate this. IMAP clients
+		// handle this gracefully, so we allow it to avoid unnecessary fallbacks.
+
 		// Recursively validate children
 		for i, child := range v.Children {
 			if err := ValidateBodyStructure(&child); err != nil {
