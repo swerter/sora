@@ -409,7 +409,18 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 			logger.Error("Database: unique constraint violation, returning error to caller", "message_id", saneMessageID, "mailbox_id", options.MailboxID)
 			return 0, 0, consts.ErrDBUniqueViolation
 		}
-		logger.Error("Database: failed to insert message into database", "err", err)
+		// Log the actual error details for debugging
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			logger.Error("Database: failed to insert message into database",
+				"err", err,
+				"pg_code", pgErr.Code,
+				"pg_message", pgErr.Message,
+				"pg_detail", pgErr.Detail,
+				"pg_constraint", pgErr.ConstraintName)
+		} else {
+			logger.Error("Database: failed to insert message into database", "err", err)
+		}
 		return 0, 0, consts.ErrDBInsertFailed
 	}
 
@@ -763,7 +774,18 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 			logger.Error("Database: unique constraint violation, returning error to caller", "message_id", saneMessageID, "mailbox_id", options.MailboxID)
 			return 0, 0, consts.ErrDBUniqueViolation
 		}
-		logger.Error("Database: failed to insert message into database", "err", err)
+		// Log the actual error details for debugging
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			logger.Error("Database: failed to insert message into database",
+				"err", err,
+				"pg_code", pgErr.Code,
+				"pg_message", pgErr.Message,
+				"pg_detail", pgErr.Detail,
+				"pg_constraint", pgErr.ConstraintName)
+		} else {
+			logger.Error("Database: failed to insert message into database", "err", err)
+		}
 		return 0, 0, consts.ErrDBInsertFailed
 	}
 
