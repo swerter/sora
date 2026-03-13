@@ -112,6 +112,19 @@ func (db *Database) GetMailboxes(ctx context.Context, AccountID int64, subscribe
 	return mailboxes, nil
 }
 
+// GetMailboxesCount returns the number of mailboxes for an account
+func (db *Database) GetMailboxesCount(ctx context.Context, AccountID int64) (int, error) {
+	var count int
+	err := db.GetReadPoolWithContext(ctx).QueryRow(ctx,
+		"SELECT COUNT(*) FROM mailboxes WHERE account_id = $1",
+		AccountID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count mailboxes for account %d: %w", AccountID, err)
+	}
+	return count, nil
+}
+
 // GetMailbox fetches the mailbox
 func (db *Database) GetMailbox(ctx context.Context, mailboxID int64, AccountID int64) (*DBMailbox, error) {
 	var mailbox DBMailbox

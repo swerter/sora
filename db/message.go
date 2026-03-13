@@ -394,6 +394,16 @@ func (db *Database) GetRecentMessagesForWarmup(ctx context.Context, AccountID in
 		return make(map[string][]string), nil
 	}
 
+	// Check if account has any mailboxes - skip warmup for new accounts to avoid noise
+	mailboxCount, err := db.GetMailboxesCount(ctx, AccountID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count mailboxes: %w", err)
+	}
+	if mailboxCount == 0 {
+		// New account with no mailboxes yet - skip warmup silently
+		return make(map[string][]string), nil
+	}
+
 	result := make(map[string][]string)
 
 	for _, mailboxName := range mailboxNames {

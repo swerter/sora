@@ -101,6 +101,17 @@ func (rd *ResilientDatabase) GetMailboxesWithRetry(ctx context.Context, AccountI
 	return result.([]*db.DBMailbox), nil
 }
 
+func (rd *ResilientDatabase) GetMailboxesCountWithRetry(ctx context.Context, AccountID int64) (int, error) {
+	op := func(ctx context.Context) (any, error) {
+		return rd.getOperationalDatabaseForOperation(false).GetMailboxesCount(ctx, AccountID)
+	}
+	result, err := rd.executeReadWithRetry(ctx, readRetryConfig, timeoutRead, op)
+	if err != nil {
+		return 0, err
+	}
+	return result.(int), nil
+}
+
 func (rd *ResilientDatabase) GetAccountIDByAddressWithRetry(ctx context.Context, address string) (int64, error) {
 	op := func(ctx context.Context) (any, error) {
 		return rd.getOperationalDatabaseForOperation(false).GetAccountIDByAddress(ctx, address)
