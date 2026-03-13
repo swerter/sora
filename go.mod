@@ -37,7 +37,7 @@ replace github.com/foxcpp/go-sieve => github.com/migadu/go-sieve v0.0.0-20260206
 
 replace github.com/emersion/go-imap/v2 => github.com/migadu/go-imap/v2 v2.0.0-20260128111640-3fb460c84dc0
 
-replace github.com/emersion/go-smtp => github.com/dejanstrbac/go-smtp v0.0.0-20251029052528-e0c3029cea7e
+replace github.com/emersion/go-smtp => github.com/dejanstrbac/go-smtp v0.0.0-20260313205502-a1dea4f0d630
 
 replace github.com/emersion/go-message => github.com/migadu/go-message v0.0.0-20251204083122-d583d81190da
 
