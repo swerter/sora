@@ -74,6 +74,7 @@ func (d *Database) GetUserScopedObjectsForCleanup(ctx context.Context, olderThan
 	rows, err := d.GetReadPool().Query(ctx, `
 		SELECT account_id, s3_domain, s3_localpart, content_hash
 		FROM messages
+		WHERE uploaded = TRUE AND expunged_at IS NOT NULL
 		GROUP BY account_id, s3_domain, s3_localpart, content_hash
 		HAVING bool_and(uploaded = TRUE AND expunged_at IS NOT NULL AND expunged_at < $1)
 		LIMIT $2;
