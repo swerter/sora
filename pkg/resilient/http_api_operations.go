@@ -118,6 +118,20 @@ func (rd *ResilientDatabase) GetUploaderStatsWithRetry(ctx context.Context, maxA
 	return result.(*db.UploaderStats), nil
 }
 
+func (rd *ResilientDatabase) GetPendingUploadsByInstanceWithRetry(ctx context.Context) ([]db.InstanceUploadStats, error) {
+	op := func(ctx context.Context) (any, error) {
+		return rd.getOperationalDatabaseForOperation(false).GetPendingUploadsByInstance(ctx)
+	}
+	result, err := rd.executeReadWithRetry(ctx, apiRetryConfig, timeoutRead, op)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, nil
+	}
+	return result.([]db.InstanceUploadStats), nil
+}
+
 func (rd *ResilientDatabase) GetFailedUploadsWithRetry(ctx context.Context, maxAttempts, limit int) ([]db.PendingUpload, error) {
 	op := func(ctx context.Context) (any, error) {
 		return rd.getOperationalDatabaseForOperation(false).GetFailedUploads(ctx, maxAttempts, limit)

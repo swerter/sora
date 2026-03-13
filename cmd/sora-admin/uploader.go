@@ -277,6 +277,17 @@ func showUploaderStatus(ctx context.Context, cfg AdminConfig, showFailed bool, f
 		fmt.Printf("  Oldest pending:     N/A\n")
 	}
 
+	// Get per-instance breakdown
+	instanceStats, err := rdb.GetPendingUploadsByInstanceWithRetry(ctx)
+	if err != nil {
+		logger.Warn("Failed to get per-instance breakdown", "error", err)
+	} else if len(instanceStats) > 0 {
+		fmt.Printf("\nPending Uploads by Instance:\n")
+		for _, inst := range instanceStats {
+			fmt.Printf("  %-40s %d\n", inst.InstanceID, inst.Count)
+		}
+	}
+
 	// Show failed uploads if requested
 	if showFailed && stats.FailedUploads > 0 {
 		// Initialize S3 storage for checking existence

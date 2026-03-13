@@ -145,6 +145,12 @@ type UploaderStats struct {
 	OldestPending    sql.NullTime
 }
 
+// InstanceUploadStats holds upload statistics for a specific instance
+type InstanceUploadStats struct {
+	InstanceID string
+	Count      int64
+}
+
 // GetUploaderStats returns statistics about pending and failed uploads
 func (db *Database) GetUploaderStats(ctx context.Context, maxAttempts int) (*UploaderStats, error) {
 	var stats UploaderStats
@@ -173,6 +179,35 @@ func (db *Database) GetUploaderStats(ctx context.Context, maxAttempts int) (*Upl
 	}
 
 	return &stats, nil
+}
+
+// GetPendingUploadsByInstance returns upload counts grouped by instance_id
+func (db *Database) GetPendingUploadsByInstance(ctx context.Context) ([]InstanceUploadStats, error) {
+	rows, err := db.GetReadPool().Query(ctx, `
+		SELECT instance_id, COUNT(*)
+		FROM pending_uploads
+		GROUP BY instance_id
+		ORDER BY COUNT(*) DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pending uploads by instance: %w", err)
+	}
+	defer rows.Close()
+
+	var result []InstanceUploadStats
+	for rows.Next() {
+		var stat InstanceUploadStats
+		if err := rows.Scan(&stat.InstanceID, &stat.Count); err != nil {
+			return nil, fmt.Errorf("failed to scan instance stats: %w", err)
+		}
+		result = append(result, stat)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating instance stats: %w", err)
+	}
+
+	return result, nil
 }
 
 // GetFailedUploads returns detailed information about failed uploads
