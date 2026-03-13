@@ -7,13 +7,15 @@ import (
 	"github.com/emersion/go-imap/v2"
 )
 
-// SanitizeUTF8 removes invalid UTF-8 sequences and NULL bytes from a string.
-// PostgreSQL's text type does not allow NULL bytes (0x00) even though they are
-// valid UTF-8 characters. This function ensures the string is safe to store in
-// PostgreSQL text columns.
+// SanitizeUTF8 removes invalid UTF-8 sequences, NULL bytes, and backslashes from a string.
+// PostgreSQL's text type has several restrictions:
+// - NULL bytes (0x00) are not allowed even though they are valid UTF-8
+// - Backslashes can cause "unsupported Unicode escape sequence" errors (SQLSTATE 22P05)
+//   when PostgreSQL encounters patterns like \uXXXX in text processing
+// This function ensures the string is safe to store in any PostgreSQL text column.
 func SanitizeUTF8(s string) string {
-	// Quick check: if string is valid UTF-8 and has no NULL bytes, return as-is
-	if utf8.ValidString(s) && !strings.ContainsRune(s, '\x00') {
+	// Quick check: if string is valid UTF-8 and has no problematic characters, return as-is
+	if utf8.ValidString(s) && !strings.ContainsRune(s, '\x00') && !strings.ContainsRune(s, '\\') {
 		return s
 	}
 
@@ -21,6 +23,13 @@ func SanitizeUTF8(s string) string {
 	for i, r := range s {
 		// Skip NULL bytes (0x00) - PostgreSQL text columns don't allow them
 		if r == '\x00' {
+			continue
+		}
+
+		// Replace backslashes with spaces to prevent PostgreSQL escape sequence errors
+		// Backslashes in user content are rarely meaningful and can cause issues
+		if r == '\\' {
+			buf = append(buf, ' ')
 			continue
 		}
 
@@ -35,20 +44,6 @@ func SanitizeUTF8(s string) string {
 		buf = append(buf, r)
 	}
 	return string(buf)
-}
-
-// SanitizeForFTS removes characters that could cause PostgreSQL errors when passed
-// to to_tsvector(). Specifically, it replaces backslashes with spaces to prevent
-// "unsupported Unicode escape sequence" errors (SQLSTATE 22P05) when messages
-// contain patterns like \uXXXX that PostgreSQL tries to interpret as Unicode escapes.
-//
-// Backslashes are not meaningful for full-text search, so replacing them with spaces
-// is safe and improves search reliability.
-func SanitizeForFTS(s string) string {
-	if !strings.ContainsRune(s, '\\') {
-		return s
-	}
-	return strings.ReplaceAll(s, "\\", " ")
 }
 
 // SanitizeFlags removes invalid flag values that could cause IMAP protocol errors.
