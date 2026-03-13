@@ -203,29 +203,29 @@ func TestSanitizeUTF8(t *testing.T) {
 			expected: "Subject: Test\nFrom: sender@example.com",
 		},
 		{
-			name:     "String with backslash",
+			name:     "String with backslash is preserved",
 			input:    "Hello\\World",
-			expected: "Hello World",
+			expected: "Hello\\World",
 		},
 		{
-			name:     "String with multiple backslashes",
+			name:     "String with multiple backslashes is preserved",
 			input:    "C:\\Users\\Admin",
-			expected: "C: Users Admin",
+			expected: "C:\\Users\\Admin",
 		},
 		{
-			name:     "String with Unicode escape pattern (PostgreSQL SQLSTATE 22P05)",
+			name:     "Unicode escape pattern is preserved (safe for regular text columns)",
 			input:    "Text with \\u0000 escape",
-			expected: "Text with  u0000 escape",
+			expected: "Text with \\u0000 escape",
 		},
 		{
-			name:     "Real-world case: message with backslashes causing PostgreSQL error",
-			input:    "Message with \\u1234 and \\uABCD patterns",
-			expected: "Message with  u1234 and  uABCD patterns",
+			name:     "Backslashes with NULL bytes: NULL stripped, backslash preserved",
+			input:    "Hello\x00\\World",
+			expected: "Hello\\World",
 		},
 		{
-			name:     "Combined: NULL bytes, invalid UTF-8, and backslashes",
-			input:    "Hello\x00\\World\xFF\\Test",
-			expected: "Hello World Test",
+			name:     "Unicode replacement character (U+FFFD) passes through",
+			input:    "Hello\xEF\xBF\xBDWorld",
+			expected: "Hello\xEF\xBF\xBDWorld",
 		},
 	}
 
@@ -240,8 +240,86 @@ func TestSanitizeUTF8(t *testing.T) {
 			if strings.ContainsRune(result, '\x00') {
 				t.Errorf("Result still contains NULL bytes: %q", result)
 			}
+		})
+	}
+}
 
-			// Verify result contains no backslashes
+func TestSanitizeUTF8ForFTS(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "Valid UTF-8 string without backslashes",
+			input:    "Hello, World!",
+			expected: "Hello, World!",
+		},
+		{
+			name:     "UTF-8 with emoji",
+			input:    "Hello 👋 World 🌍",
+			expected: "Hello 👋 World 🌍",
+		},
+		{
+			name:     "Empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "String with NULL byte",
+			input:    "Hello\x00World",
+			expected: "HelloWorld",
+		},
+		{
+			name:     "String with backslash replaced by space",
+			input:    "Hello\\World",
+			expected: "Hello World",
+		},
+		{
+			name:     "String with multiple backslashes",
+			input:    "C:\\Users\\Admin",
+			expected: "C: Users Admin",
+		},
+		{
+			name:     "Unicode escape pattern (PostgreSQL SQLSTATE 22P05)",
+			input:    "Text with \\u0000 escape",
+			expected: "Text with  u0000 escape",
+		},
+		{
+			name:     "Real-world case: message with backslashes causing PostgreSQL error",
+			input:    "Message with \\u1234 and \\uABCD patterns",
+			expected: "Message with  u1234 and  uABCD patterns",
+		},
+		{
+			name:     "Combined: NULL bytes, invalid UTF-8, and backslashes",
+			input:    "Hello\x00\\World\xFF\\Test",
+			expected: "Hello World Test",
+		},
+		{
+			name:     "String with invalid UTF-8 sequences",
+			input:    "Hello\xFFWorld",
+			expected: "HelloWorld",
+		},
+		{
+			name:     "Unicode replacement character (U+FFFD) passes through",
+			input:    "Hello\xEF\xBF\xBDWorld",
+			expected: "Hello\xEF\xBF\xBDWorld",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := SanitizeUTF8ForFTS(tt.input)
+			if result != tt.expected {
+				t.Errorf("Expected %q, got %q", tt.expected, result)
+			}
+
+			// Verify result contains no NULL bytes
+			if strings.ContainsRune(result, '\x00') {
+				t.Errorf("Result still contains NULL bytes: %q", result)
+			}
+
+			// Verify result contains no backslashes (FTS-specific)
 			if strings.ContainsRune(result, '\\') {
 				t.Errorf("Result still contains backslashes: %q", result)
 			}

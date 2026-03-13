@@ -31,9 +31,9 @@ func ExtractRecipients(header message.Header) []Recipient {
 
 					if _, exists := uniquePairs[uniqueKey]; !exists {
 						recipient := Recipient{
-							EmailAddress: addr.Address,
+							EmailAddress: SanitizeUTF8(addr.Address),
 							AddressType:  addressType,
-							Name:         addr.Name,
+							Name:         SanitizeUTF8(addr.Name),
 						}
 						recipients = append(recipients, recipient)
 						uniquePairs[uniqueKey] = struct{}{}

@@ -7,14 +7,41 @@ import (
 	"github.com/emersion/go-imap/v2"
 )
 
-// SanitizeUTF8 removes invalid UTF-8 sequences, NULL bytes, and backslashes from a string.
-// PostgreSQL's text type has several restrictions:
-//   - NULL bytes (0x00) are not allowed even though they are valid UTF-8
-//   - Backslashes can cause "unsupported Unicode escape sequence" errors (SQLSTATE 22P05)
-//     when PostgreSQL encounters patterns like \uXXXX in text processing
-//
+// SanitizeUTF8 removes invalid UTF-8 sequences and NULL bytes from a string.
+// PostgreSQL's text type does not allow NULL bytes (0x00) even though they are valid UTF-8.
 // This function ensures the string is safe to store in any PostgreSQL text column.
 func SanitizeUTF8(s string) string {
+	// Quick check: if string is valid UTF-8 and has no NULL bytes, return as-is
+	if utf8.ValidString(s) && !strings.ContainsRune(s, '\x00') {
+		return s
+	}
+
+	buf := make([]rune, 0, len(s))
+	for i, r := range s {
+		// Skip NULL bytes (0x00) - PostgreSQL text columns don't allow them
+		if r == '\x00' {
+			continue
+		}
+
+		// Skip invalid UTF-8 sequences
+		if r == utf8.RuneError {
+			_, size := utf8.DecodeRuneInString(s[i:])
+			if size == 1 {
+				continue // skip invalid byte
+			}
+		}
+
+		buf = append(buf, r)
+	}
+	return string(buf)
+}
+
+// SanitizeUTF8ForFTS removes invalid UTF-8 sequences, NULL bytes, and backslashes from a string.
+// This is specifically for text that will be passed to PostgreSQL's to_tsvector() function,
+// where backslash patterns like \uXXXX can cause "unsupported Unicode escape sequence"
+// errors (SQLSTATE 22P05). Regular text columns using parameterized queries are safe from
+// this issue and should use SanitizeUTF8 instead to preserve backslashes in stored content.
+func SanitizeUTF8ForFTS(s string) string {
 	// Quick check: if string is valid UTF-8 and has no problematic characters, return as-is
 	if utf8.ValidString(s) && !strings.ContainsRune(s, '\x00') && !strings.ContainsRune(s, '\\') {
 		return s
@@ -28,7 +55,7 @@ func SanitizeUTF8(s string) string {
 		}
 
 		// Replace backslashes with spaces to prevent PostgreSQL escape sequence errors
-		// Backslashes in user content are rarely meaningful and can cause issues
+		// in to_tsvector() which can interpret \uXXXX as Unicode escapes
 		if r == '\\' {
 			buf = append(buf, ' ')
 			continue

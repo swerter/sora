@@ -154,11 +154,15 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		metrics.DBQueriesTotal.WithLabelValues("message_insert", status, "write").Inc()
 	}()
 
+	// Sanitize user-controlled text fields that go into PostgreSQL text columns.
+	// S3Domain, S3Localpart, and ContentHash are system-generated and don't need sanitization.
 	saneMessageID := helpers.SanitizeUTF8(options.MessageID)
+	saneMailboxName := helpers.SanitizeUTF8(options.MailboxName)
+
 	if saneMessageID == "" {
 		logger.Info("Database: messageID is empty after sanitization, generating a new one without modifying the message")
 		// Generate a new message ID if not provided
-		saneMessageID = fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), options.MailboxName)
+		saneMessageID = fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), saneMailboxName)
 	}
 
 	bodyStructureData, err := helpers.SerializeBodyStructureGob(options.BodyStructure)
@@ -279,7 +283,18 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 	}
 	// err == pgx.ErrNoRows means no exact duplicate found, continue with insert
 
-	recipientsJSON, err := json.Marshal(options.Recipients)
+	// Sanitize recipients defensively before JSON marshaling.
+	// json.Marshal encodes NULL bytes as \u0000, which PostgreSQL JSONB rejects (SQLSTATE 22P05).
+	saneRecipients := make([]helpers.Recipient, len(options.Recipients))
+	for i, r := range options.Recipients {
+		saneRecipients[i] = helpers.Recipient{
+			Name:         helpers.SanitizeUTF8(r.Name),
+			EmailAddress: helpers.SanitizeUTF8(r.EmailAddress),
+			AddressType:  r.AddressType,
+		}
+	}
+
+	recipientsJSON, err := json.Marshal(saneRecipients)
 	if err != nil {
 		logger.Error("Database: failed to marshal recipients", "err", err)
 		return 0, 0, consts.ErrSerializationFailed
@@ -288,10 +303,11 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 	// Prepare denormalized sort fields for faster sorting.
 	var subjectSort, fromNameSort, fromEmailSort, toNameSort, toEmailSort, ccEmailSort string
 	// Use RFC 5256 subject normalization (strips Re:, Fwd:, etc. prefixes)
+	// SanitizeSubjectForSort calls SanitizeUTF8 internally.
 	subjectSort = helpers.SanitizeSubjectForSort(options.Subject)
 
 	var fromFound, toFound, ccFound bool
-	for _, r := range options.Recipients {
+	for _, r := range saneRecipients {
 		switch r.AddressType {
 		case "from":
 			if !fromFound {
@@ -345,18 +361,19 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 	// Use empty strings for FTS to avoid indexing overhead while still storing the full content.
 	const maxFTSBytes = 1024 * 1024 // 1 MB
 
-	// Note: sanePlaintextBody and saneRawHeaders are already sanitized via SanitizeUTF8
-	// (which handles NULL bytes, invalid UTF-8, and backslashes)
-	sanePlaintextBodyForFTS := sanePlaintextBody
-	saneRawHeadersForFTS := saneRawHeaders
+	// For FTS inputs, additionally strip backslashes to prevent PostgreSQL
+	// "unsupported Unicode escape sequence" errors (SQLSTATE 22P05) in to_tsvector().
+	// Regular text columns are safe with backslashes via parameterized queries.
+	sanePlaintextBodyForFTS := helpers.SanitizeUTF8ForFTS(sanePlaintextBody)
+	saneRawHeadersForFTS := helpers.SanitizeUTF8ForFTS(saneRawHeaders)
 
-	if len(sanePlaintextBody) > maxFTSBytes {
+	if len(sanePlaintextBodyForFTS) > maxFTSBytes {
 		logger.Info("Database: skipping FTS indexing for very large message body",
 			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(sanePlaintextBody))
 		sanePlaintextBodyForFTS = ""
 		metrics.LargeFTSSkipped.Inc()
 	}
-	if len(saneRawHeaders) > maxFTSBytes {
+	if len(saneRawHeadersForFTS) > maxFTSBytes {
 		logger.Info("Database: skipping FTS indexing for very large headers",
 			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(saneRawHeaders))
 		saneRawHeadersForFTS = ""
@@ -372,7 +389,7 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 	`, pgx.NamedArgs{
 		"account_id":      options.AccountID,
 		"mailbox_id":      options.MailboxID,
-		"mailbox_path":    options.MailboxName,
+		"mailbox_path":    saneMailboxName,
 		"s3_domain":       options.S3Domain,
 		"s3_localpart":    options.S3Localpart,
 		"uid":             uidToUse,
@@ -526,11 +543,15 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 }
 
 func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, options *InsertMessageOptions) (messageID int64, uid int64, err error) {
+	// Sanitize user-controlled text fields that go into PostgreSQL text columns.
+	// S3Domain, S3Localpart, and ContentHash are system-generated and don't need sanitization.
 	saneMessageID := helpers.SanitizeUTF8(options.MessageID)
+	saneMailboxName := helpers.SanitizeUTF8(options.MailboxName)
+
 	if saneMessageID == "" {
 		logger.Info("Database: messageID is empty after sanitization, generating a new one without modifying the message")
 		// Generate a new message ID if not provided
-		saneMessageID = fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), options.MailboxName)
+		saneMessageID = fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), saneMailboxName)
 	}
 
 	bodyStructureData, err := helpers.SerializeBodyStructureGob(options.BodyStructure)
@@ -629,7 +650,7 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 		uidToUse = highestUID
 	}
 
-	// Deduplication: Check if an EXACT duplicate exists
+	// Deduplication: Check if an EXACT duplicate exists (use sanitized message ID to match what's stored)
 	var existingUID int64
 	var existingContentHash string
 	err = tx.QueryRow(ctx, `
@@ -639,10 +660,10 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 		AND content_hash = $3
 		AND expunged_at IS NULL
 		LIMIT 1`,
-		options.MailboxID, options.MessageID, options.ContentHash).Scan(&existingUID, &existingContentHash)
+		options.MailboxID, saneMessageID, options.ContentHash).Scan(&existingUID, &existingContentHash)
 	if err == nil {
 		// True duplicate (same Message-ID + same content) - skip insert
-		logger.Info("Database: duplicate message detected, skipping insert", "message_id", options.MessageID, "content_hash", options.ContentHash, "mailbox_id", options.MailboxID, "existing_uid", existingUID)
+		logger.Info("Database: duplicate message detected, skipping insert", "message_id", saneMessageID, "content_hash", options.ContentHash, "mailbox_id", options.MailboxID, "existing_uid", existingUID)
 		// Return unique violation error so importer can count it as skipped
 		return 0, existingUID, consts.ErrDBUniqueViolation
 	} else if err != pgx.ErrNoRows {
@@ -652,7 +673,18 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 	}
 	// err == pgx.ErrNoRows means no exact duplicate found, continue with insert
 
-	recipientsJSON, err := json.Marshal(options.Recipients)
+	// Sanitize recipients defensively before JSON marshaling.
+	// json.Marshal encodes NULL bytes as \u0000, which PostgreSQL JSONB rejects (SQLSTATE 22P05).
+	saneRecipients := make([]helpers.Recipient, len(options.Recipients))
+	for i, r := range options.Recipients {
+		saneRecipients[i] = helpers.Recipient{
+			Name:         helpers.SanitizeUTF8(r.Name),
+			EmailAddress: helpers.SanitizeUTF8(r.EmailAddress),
+			AddressType:  r.AddressType,
+		}
+	}
+
+	recipientsJSON, err := json.Marshal(saneRecipients)
 	if err != nil {
 		logger.Error("Database: failed to marshal recipients", "err", err)
 		return 0, 0, consts.ErrSerializationFailed
@@ -661,10 +693,11 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 	// Prepare denormalized sort fields for faster sorting.
 	var subjectSort, fromNameSort, fromEmailSort, toNameSort, toEmailSort, ccEmailSort string
 	// Use RFC 5256 subject normalization (strips Re:, Fwd:, etc. prefixes)
+	// SanitizeSubjectForSort calls SanitizeUTF8 internally.
 	subjectSort = helpers.SanitizeSubjectForSort(options.Subject)
 
 	var fromFound, toFound, ccFound bool
-	for _, r := range options.Recipients {
+	for _, r := range saneRecipients {
 		switch r.AddressType {
 		case "from":
 			if !fromFound {
@@ -718,18 +751,19 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 	// Use empty strings for FTS to avoid indexing overhead while still storing the full content.
 	const maxFTSBytes = 1024 * 1024 // 1 MB
 
-	// Note: sanePlaintextBody and saneRawHeaders are already sanitized via SanitizeUTF8
-	// (which handles NULL bytes, invalid UTF-8, and backslashes)
-	sanePlaintextBodyForFTS := sanePlaintextBody
-	saneRawHeadersForFTS := saneRawHeaders
+	// For FTS inputs, additionally strip backslashes to prevent PostgreSQL
+	// "unsupported Unicode escape sequence" errors (SQLSTATE 22P05) in to_tsvector().
+	// Regular text columns are safe with backslashes via parameterized queries.
+	sanePlaintextBodyForFTS := helpers.SanitizeUTF8ForFTS(sanePlaintextBody)
+	saneRawHeadersForFTS := helpers.SanitizeUTF8ForFTS(saneRawHeaders)
 
-	if len(sanePlaintextBody) > maxFTSBytes {
+	if len(sanePlaintextBodyForFTS) > maxFTSBytes {
 		logger.Info("Database: skipping FTS indexing for very large message body",
 			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(sanePlaintextBody))
 		sanePlaintextBodyForFTS = ""
 		metrics.LargeFTSSkipped.Inc()
 	}
-	if len(saneRawHeaders) > maxFTSBytes {
+	if len(saneRawHeadersForFTS) > maxFTSBytes {
 		logger.Info("Database: skipping FTS indexing for very large headers",
 			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(saneRawHeaders))
 		saneRawHeadersForFTS = ""
@@ -745,7 +779,7 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 	`, pgx.NamedArgs{
 		"account_id":      options.AccountID,
 		"mailbox_id":      options.MailboxID,
-		"mailbox_path":    options.MailboxName,
+		"mailbox_path":    saneMailboxName,
 		"s3_domain":       options.S3Domain,
 		"s3_localpart":    options.S3Localpart,
 		"uid":             uidToUse,
