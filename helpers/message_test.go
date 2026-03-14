@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-message"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -205,6 +206,74 @@ func TestStripBase64DataURIs_VariousFormats(t *testing.T) {
 
 			assert.NotContains(t, result, base64Data, "Base64 data should be stripped")
 			assert.Contains(t, result, "[embedded-image]")
+		})
+	}
+}
+
+func TestExtractPlaintextBody_MalformedContentTransferEncoding(t *testing.T) {
+	// Test that malformed Content-Transfer-Encoding headers don't crash parsing.
+	// Real-world example: "Content-Transfer-Encoding: 7bit <center>" from buggy email clients.
+	tests := []struct {
+		name       string
+		rawMessage string
+		expectBody bool
+	}{
+		{
+			name: "multipart with malformed encoding in second part",
+			rawMessage: "From: sender@example.com\r\n" +
+				"To: receiver@example.com\r\n" +
+				"Subject: Test\r\n" +
+				"MIME-Version: 1.0\r\n" +
+				"Content-Type: multipart/alternative; boundary=\"boundary123\"\r\n" +
+				"\r\n" +
+				"--boundary123\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\n" +
+				"Content-Transfer-Encoding: 7bit\r\n" +
+				"\r\n" +
+				"First part is fine.\r\n" +
+				"--boundary123\r\n" +
+				"Content-Type: text/html; charset=utf-8\r\n" +
+				"Content-Transfer-Encoding: 7bit <center>\r\n" + // MALFORMED!
+				"\r\n" +
+				"<html><body>This part has malformed encoding</body></html>\r\n" +
+				"--boundary123--\r\n",
+			expectBody: true, // Should return the first (good) part
+		},
+		{
+			name: "single part with malformed encoding returns degraded entity",
+			rawMessage: "From: sender@example.com\r\n" +
+				"To: receiver@example.com\r\n" +
+				"Subject: Test\r\n" +
+				"MIME-Version: 1.0\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\n" +
+				"Content-Transfer-Encoding: 7bit <garbage>\r\n" + // MALFORMED!
+				"\r\n" +
+				"Body text here.\r\n",
+			expectBody: false, // message.Read returns degraded entity but body is not decodable
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Parse message using go-message (same as server.ParseMessage does).
+			// For unknown encodings, message.Read returns BOTH a degraded entity AND an error.
+			// IsUnknownEncoding(err) would be true — server.ParseMessage handles this.
+			messageContent, err := message.Read(strings.NewReader(tt.rawMessage))
+			if err != nil && !message.IsUnknownEncoding(err) {
+				t.Fatalf("message.Read() failed with unexpected error: %v", err)
+			}
+			if messageContent == nil {
+				t.Fatal("message.Read() returned nil entity")
+			}
+
+			// Extract plaintext body - should not crash even with malformed encoding
+			result, err := ExtractPlaintextBody(messageContent)
+			assert.NoError(t, err)
+
+			if tt.expectBody {
+				assert.NotNil(t, result)
+				assert.NotEmpty(t, *result)
+			}
 		})
 	}
 }

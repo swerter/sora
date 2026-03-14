@@ -39,7 +39,12 @@ func ExtractPlaintextBody(msg *message.Entity) (*string, error) {
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			return nil, fmt.Errorf("failed to get next mail part: %v", err)
+			// Once NextPart() fails, the multipart reader cannot yield more parts.
+			// Malformed MIME parts (e.g., "Content-Transfer-Encoding: 7bit <center>")
+			// cause encoding errors here. Rather than failing the entire extraction,
+			// we keep whatever plaintext/HTML we collected from earlier parts.
+			// This is acceptable because plaintext extraction is best-effort for FTS.
+			break
 		}
 
 		header, ok := part.Header.(*mail.InlineHeader)

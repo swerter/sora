@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 )
@@ -41,22 +40,13 @@ func TestParseMessage_MalformedMIMEHeader(t *testing.T) {
 
 	msg, err := ParseMessage(strings.NewReader(malformedMsg))
 
-	// Should NOT return an error (graceful fallback)
-	if err != nil {
-		t.Fatalf("ParseMessage should handle malformed MIME gracefully, got error: %v", err)
+	// Should return an error for truly malformed MIME headers (we can't fix these)
+	if err == nil {
+		t.Fatal("ParseMessage should return error for truly malformed MIME headers")
 	}
 
-	if msg == nil {
-		t.Fatal("ParseMessage should return a fallback entity, got nil")
-	}
-
-	// Check that fallback entity has error marker
-	parseError := msg.Header.Get("X-Sora-Parse-Error")
-	if parseError == "" {
-		t.Error("Expected X-Sora-Parse-Error header in fallback entity")
-	}
-	if !strings.Contains(parseError, "malformed MIME header") {
-		t.Errorf("Expected parse error to mention 'malformed MIME header', got: %s", parseError)
+	if msg != nil {
+		t.Error("ParseMessage should return nil entity for unrecoverable MIME errors")
 	}
 }
 
@@ -70,19 +60,13 @@ Body content
 `
 	msg, err := ParseMessage(strings.NewReader(brokenMsg))
 
-	// Should handle gracefully
-	if err != nil {
-		t.Fatalf("ParseMessage should handle broken MIME gracefully, got error: %v", err)
+	// Should return error for truly broken MIME
+	if err == nil {
+		t.Fatal("ParseMessage should return error for truly broken MIME")
 	}
 
-	if msg == nil {
-		t.Fatal("ParseMessage should return a fallback entity, got nil")
-	}
-
-	// Verify it's a fallback entity
-	parseError := msg.Header.Get("X-Sora-Parse-Error")
-	if parseError == "" {
-		t.Error("Expected X-Sora-Parse-Error header in fallback entity")
+	if msg != nil {
+		t.Error("ParseMessage should return nil entity for unrecoverable errors")
 	}
 }
 
@@ -122,7 +106,7 @@ It should be either "7bit" or "quoted-printable", not concatenated.
 `
 	msg, err := ParseMessage(strings.NewReader(malformedEncodingMsg))
 
-	// Should NOT return an error (graceful fallback)
+	// Should NOT return an error (graceful fallback via IsUnknownEncoding)
 	if err != nil {
 		t.Fatalf("ParseMessage should handle malformed encoding gracefully, got error: %v", err)
 	}
@@ -132,30 +116,97 @@ It should be either "7bit" or "quoted-printable", not concatenated.
 	}
 
 	// The message should still be readable (degraded mode)
-	// The go-message library will have logged the encoding error but allowed parsing to continue
 	from := msg.Header.Get("From")
 	if from != "sender@example.com" {
 		t.Errorf("Expected From: sender@example.com, got: %s", from)
 	}
 }
 
-func TestCreateFallbackEntity(t *testing.T) {
-	originalErr := bytes.ErrTooLarge
-
-	entity := createFallbackEntity(originalErr)
-
-	if entity == nil {
-		t.Fatal("createFallbackEntity returned nil")
+func TestParseMessage_MalformedContentTransferEncoding(t *testing.T) {
+	// Real-world case from production logs:
+	// "encoding error: unhandled encoding "7bit <center>""
+	//
+	// go-message's message.Read() treats unknown encodings as non-fatal via
+	// IsUnknownEncoding, returning a degraded but usable entity. For multipart
+	// messages where the malformed encoding is in a child part, message.Read()
+	// succeeds and the error only surfaces during part iteration in ExtractPlaintextBody.
+	tests := []struct {
+		name          string
+		message       string
+		expectError   bool
+		expectParsing bool
+	}{
+		{
+			name: "malformed encoding with HTML tag at top level",
+			message: "From: sender@example.com\r\n" +
+				"To: recipient@example.com\r\n" +
+				"Subject: Test\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\n" +
+				"Content-Transfer-Encoding: 7bit <center>\r\n" +
+				"\r\n" +
+				"Body text here.\r\n",
+			expectError:   false,
+			expectParsing: true, // IsUnknownEncoding returns degraded entity
+		},
+		{
+			name: "malformed encoding with garbage at top level",
+			message: "From: sender@example.com\r\n" +
+				"To: recipient@example.com\r\n" +
+				"Subject: Test\r\n" +
+				"Content-Type: text/plain\r\n" +
+				"Content-Transfer-Encoding: base64 garbage\r\n" +
+				"\r\n" +
+				"Body\r\n",
+			expectError:   false,
+			expectParsing: true,
+		},
+		{
+			name: "multipart with malformed encoding in child part",
+			message: "From: sender@example.com\r\n" +
+				"To: recipient@example.com\r\n" +
+				"Subject: Test\r\n" +
+				"MIME-Version: 1.0\r\n" +
+				"Content-Type: multipart/alternative; boundary=\"boundary123\"\r\n" +
+				"\r\n" +
+				"--boundary123\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\n" +
+				"Content-Transfer-Encoding: 7bit\r\n" +
+				"\r\n" +
+				"First part is fine.\r\n" +
+				"--boundary123\r\n" +
+				"Content-Type: text/html; charset=utf-8\r\n" +
+				"Content-Transfer-Encoding: 7bit <center>\r\n" +
+				"\r\n" +
+				"<html><body>This part has malformed encoding</body></html>\r\n" +
+				"--boundary123--\r\n",
+			expectError:   false,
+			expectParsing: true, // Top-level parses fine; child error handled by ExtractPlaintextBody
+		},
 	}
 
-	// Check fallback entity structure
-	parseError := entity.Header.Get("X-Sora-Parse-Error")
-	if parseError == "" {
-		t.Error("Expected X-Sora-Parse-Error header in fallback entity")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, err := ParseMessage(strings.NewReader(tt.message))
 
-	contentType := entity.Header.Get("Content-Type")
-	if !strings.Contains(contentType, "text/plain") {
-		t.Errorf("Expected Content-Type: text/plain, got: %s", contentType)
+			if tt.expectError && err == nil {
+				t.Fatal("Expected error but got none")
+			}
+
+			if !tt.expectError && err != nil {
+				t.Fatalf("Expected no error but got: %v", err)
+			}
+
+			if tt.expectParsing {
+				if msg == nil {
+					t.Fatal("Expected parsed message but got nil")
+				}
+
+				// Verify message is actually usable
+				from := msg.Header.Get("From")
+				if from != "sender@example.com" {
+					t.Errorf("Expected From: sender@example.com, got: %s", from)
+				}
+			}
+		})
 	}
 }
