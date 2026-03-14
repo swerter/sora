@@ -1264,8 +1264,21 @@ func (s *Session) startProxy() {
 	go func() {
 		defer wg.Done()
 		// If this copy returns, it means the client has closed the connection or there was an error.
-		// We must close the backend connection to unblock the other copy operation.
-		defer s.backendConn.Close()
+		// We use half-close (CloseWrite) to signal EOF to the backend while allowing the backend
+		// to finish sending its response. This prevents "broken pipe" errors on LOGOUT.
+		// The backend-to-client goroutine will fully close the connection when it's done reading.
+		defer func() {
+			// Try to half-close the connection (shutdown writes, keep reads open)
+			// This works for both *net.TCPConn and *tls.Conn (Go 1.23+)
+			if closeWriter, ok := s.backendConn.(interface{ CloseWrite() error }); ok {
+				if err := closeWriter.CloseWrite(); err != nil {
+					s.DebugLog("Failed to half-close backend connection", "error", err)
+				}
+			} else {
+				// Fallback for connections that don't support half-close
+				s.backendConn.Close()
+			}
+		}()
 		bytesIn, err := server.CopyWithDeadline(s.ctx, s.backendConn, s.clientConn, "client-to-backend")
 		metrics.BytesThroughput.WithLabelValues("managesieve_proxy", "in").Add(float64(bytesIn))
 		if err != nil && !isClosingError(err) {
@@ -1280,7 +1293,9 @@ func (s *Session) startProxy() {
 	go func() {
 		defer wg.Done()
 		// If this copy returns, it means the backend has closed the connection or there was an error.
-		// We must close the client connection to unblock the other copy operation.
+		// We must close both the backend and client connections to unblock the other copy operation.
+		// The backend connection is fully closed here (after reading all data from it).
+		defer s.backendConn.Close() // Full close after reading all data
 		defer func() {
 			s.mu.Lock()
 			if !s.gracefulShutdown {

@@ -1349,8 +1349,21 @@ func (s *Session) startProxy() {
 		defer wg.Done()
 		defer logger.Debug("Client-to-backend copy goroutine exiting", "proxy", s.server.name, "username", s.username)
 		// If this copy returns, it means the client has closed the connection or there was an error.
-		// We must close the backend connection to unblock the other copy operation.
-		defer s.backendConn.Close()
+		// We use half-close (CloseWrite) to signal EOF to the backend while allowing the backend
+		// to finish sending its response. This prevents "broken pipe" errors on LOGOUT.
+		// The backend-to-client goroutine will fully close the connection when it's done reading.
+		defer func() {
+			// Try to half-close the connection (shutdown writes, keep reads open)
+			// This works for both *net.TCPConn and *tls.Conn (Go 1.23+)
+			if closeWriter, ok := s.backendConn.(interface{ CloseWrite() error }); ok {
+				if err := closeWriter.CloseWrite(); err != nil {
+					logger.Debug("Failed to half-close backend connection", "proxy", s.server.name, "username", s.username, "error", err)
+				}
+			} else {
+				// Fallback for connections that don't support half-close
+				s.backendConn.Close()
+			}
+		}()
 		bytesIn, err := server.CopyWithDeadline(s.ctx, s.backendConn, s.clientConn, "client-to-backend")
 		logger.Debug("Client-to-backend copy finished", "proxy", s.server.name, "username", s.username, "bytes", bytesIn, "error", err)
 		metrics.BytesThroughput.WithLabelValues("imap_proxy", "in").Add(float64(bytesIn))
@@ -1366,9 +1379,11 @@ func (s *Session) startProxy() {
 		defer wg.Done()
 		defer logger.Debug("Backend-to-client copy goroutine exiting", "proxy", s.server.name, "username", s.username)
 		// If this copy returns, it means the backend has closed the connection or there was an error.
-		// We must close the client connection to unblock the other copy operation —
+		// We must close both the backend and client connections to unblock the other copy operation.
+		// The backend connection is fully closed here (after reading all data from it).
 		// UNLESS a graceful shutdown is in progress, in which case sendGracefulShutdownBye
 		// needs clientConn to remain open so it can write the BYE message first.
+		defer s.backendConn.Close() // Full close after reading all data
 		defer func() {
 			s.mu.Lock()
 			if !s.gracefulShutdown {
