@@ -78,6 +78,9 @@ type Server struct {
 	// Active session tracking for graceful shutdown
 	activeSessionsMu sync.RWMutex
 	activeSessions   map[*Session]struct{}
+
+	// Startup throttle to prevent thundering herd on restart
+	startupThrottleUntil time.Time
 }
 
 // maskingWriter wraps an io.Writer to mask sensitive information in IMAP commands
@@ -511,6 +514,11 @@ func (s *Server) Start() error {
 		s.limiter.StartCleanup(s.ctx)
 	}
 
+	// Startup throttle: spread reconnection load after proxy restart
+	// to prevent thundering herd on the database connection pool
+	s.startupThrottleUntil = time.Now().Add(30 * time.Second)
+	logger.Info("IMAP Proxy: Startup throttle active for 30s (5ms delay between accepts)", "proxy", s.name)
+
 	// Start session monitoring routine
 	go s.monitorActiveSessions()
 
@@ -520,6 +528,12 @@ func (s *Server) Start() error {
 // acceptConnections accepts incoming connections.
 func (s *Server) acceptConnections() error {
 	for {
+		// Startup throttle: spread reconnection load after proxy restart
+		// to prevent thundering herd on the database connection pool
+		if time.Now().Before(s.startupThrottleUntil) {
+			time.Sleep(5 * time.Millisecond)
+		}
+
 		conn, err := s.listener.Accept()
 		if err != nil {
 			select {

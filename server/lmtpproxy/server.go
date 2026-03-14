@@ -71,6 +71,9 @@ type Server struct {
 
 	// PROXY protocol support for incoming connections
 	proxyReader *server.ProxyProtocolReader
+
+	// Startup throttle to prevent thundering herd on restart
+	startupThrottleUntil time.Time
 }
 
 // ServerOptions holds options for creating a new LMTP proxy server.
@@ -419,6 +422,11 @@ func (s *Server) Start() error {
 		s.limiter.StartCleanup(s.ctx)
 	}
 
+	// Startup throttle: spread reconnection load after proxy restart
+	// to prevent thundering herd on the database connection pool
+	s.startupThrottleUntil = time.Now().Add(30 * time.Second)
+	logger.Info("LMTP Proxy: Startup throttle active for 30s (5ms delay between accepts)", "proxy", s.name)
+
 	// Start session monitoring routine
 	go s.monitorActiveSessions()
 
@@ -438,6 +446,12 @@ func (s *Server) isFromTrustedNetwork(ip net.IP) bool {
 // acceptConnections accepts incoming connections.
 func (s *Server) acceptConnections() error {
 	for {
+		// Startup throttle: spread reconnection load after proxy restart
+		// to prevent thundering herd on the database connection pool
+		if time.Now().Before(s.startupThrottleUntil) {
+			time.Sleep(5 * time.Millisecond)
+		}
+
 		conn, err := s.listener.Accept()
 		if err != nil {
 			select {

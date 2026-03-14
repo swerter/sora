@@ -76,6 +76,9 @@ type POP3ProxyServer struct {
 
 	// PROXY protocol support for incoming connections
 	proxyReader *server.ProxyProtocolReader
+
+	// Startup throttle to prevent thundering herd on restart
+	startupThrottleUntil time.Time
 }
 
 // maskingWriter wraps an io.Writer to mask sensitive information in POP3 commands
@@ -460,6 +463,11 @@ func (s *POP3ProxyServer) Start() error {
 		listener.Close()
 	}()
 
+	// Startup throttle: spread reconnection load after proxy restart
+	// to prevent thundering herd on the database connection pool
+	s.startupThrottleUntil = time.Now().Add(30 * time.Second)
+	logger.Info("POP3 Proxy: Startup throttle active for 30s (5ms delay between accepts)", "proxy", s.name)
+
 	// Start session monitoring routine
 	go s.monitorActiveSessions()
 
@@ -468,6 +476,12 @@ func (s *POP3ProxyServer) Start() error {
 
 func (s *POP3ProxyServer) acceptConnections(listener net.Listener) error {
 	for {
+		// Startup throttle: spread reconnection load after proxy restart
+		// to prevent thundering herd on the database connection pool
+		if time.Now().Before(s.startupThrottleUntil) {
+			time.Sleep(5 * time.Millisecond)
+		}
+
 		conn, err := listener.Accept()
 		if err != nil {
 			// If context is cancelled, listener.Close() was called, so this is a graceful shutdown.
