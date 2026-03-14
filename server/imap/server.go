@@ -289,6 +289,7 @@ type IMAPServer struct {
 	warmupQueue         chan warmupJob // Bounded job queue for async warmups
 	warmupSemaphore     chan struct{}  // Semaphore for sync warmups
 	warmupWg            sync.WaitGroup // Tracks active warmup workers for graceful shutdown
+	warmupStopOnce      sync.Once      // Ensures warmup channel is closed only once
 	lastWarmupTimes     sync.Map       // map[int64]time.Time - tracks last warmup time per user
 
 	// Client capability filtering
@@ -1340,19 +1341,21 @@ func (s *IMAPServer) startWarmupWorkers() {
 // Closes the queue channel (no more jobs accepted) and waits for in-flight jobs to finish.
 func (s *IMAPServer) stopWarmupWorkers() {
 	if s.warmupQueue != nil {
-		close(s.warmupQueue)
-		// Wait for workers to finish current jobs with timeout
-		done := make(chan struct{})
-		go func() {
-			s.warmupWg.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-			logger.Debug("IMAP: All warmup workers stopped gracefully", "name", s.name)
-		case <-time.After(10 * time.Second):
-			logger.Debug("IMAP: Warmup worker drain timeout", "name", s.name)
-		}
+		s.warmupStopOnce.Do(func() {
+			close(s.warmupQueue)
+			// Wait for workers to finish current jobs with timeout
+			done := make(chan struct{})
+			go func() {
+				s.warmupWg.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+				logger.Debug("IMAP: All warmup workers stopped gracefully", "name", s.name)
+			case <-time.After(10 * time.Second):
+				logger.Debug("IMAP: Warmup worker drain timeout", "name", s.name)
+			}
+		})
 	}
 }
 
