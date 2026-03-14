@@ -140,20 +140,40 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 
 	messageContent, err := server.ParseMessage(bytes.NewReader(fullMessageBytes))
 	if err != nil {
-		return nil, s.internalError("failed to parse message: %v", err)
+		// ParseMessage can fail for severely malformed MIME (e.g., missing header colons).
+		// IMAP APPEND must still accept the message — the raw bytes are stored in S3 as-is.
+		// We continue with degraded metadata (empty subject, no FTS, etc.).
+		s.DebugLog("failed to parse message, continuing with degraded metadata", "error", err)
 	}
 
 	contentHash := helpers.HashContent(fullMessageBytes)
 
 	// Parse message headers (this does not consume the body)
-	mailHeader := mail.Header{Header: messageContent.Header}
-	subject, _ := mailHeader.Subject()
-	messageID, _ := mailHeader.MessageID()
-	sentDate, _ := mailHeader.Date()
-	inReplyTo, _ := mailHeader.MsgIDList("In-Reply-To")
+	var subject, messageID string
+	var sentDate time.Time
+	var inReplyTo []string
+	var actualPlaintextBody string
+	var recipients []helpers.Recipient
 
-	if len(inReplyTo) == 0 {
-		inReplyTo = nil
+	if messageContent != nil {
+		mailHeader := mail.Header{Header: messageContent.Header}
+		subject, _ = mailHeader.Subject()
+		messageID, _ = mailHeader.MessageID()
+		sentDate, _ = mailHeader.Date()
+		inReplyTo, _ = mailHeader.MsgIDList("In-Reply-To")
+
+		if len(inReplyTo) == 0 {
+			inReplyTo = nil
+		}
+
+		extractedPlaintext, extractErr := helpers.ExtractPlaintextBody(messageContent)
+		if extractErr != nil {
+			s.DebugLog("failed to extract plaintext body, using empty string", "error", extractErr)
+		} else if extractedPlaintext != nil {
+			actualPlaintextBody = *extractedPlaintext
+		}
+
+		recipients = helpers.ExtractRecipients(messageContent.Header)
 	}
 
 	if sentDate.IsZero() {
@@ -166,18 +186,6 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 
 	// Extract body structure with panic recovery for malformed messages
 	bodyStructure := extractBodyStructureSafe(buf.Bytes())
-
-	extractedPlaintext, err := helpers.ExtractPlaintextBody(messageContent)
-	var actualPlaintextBody string
-	if err != nil {
-		s.DebugLog("failed to extract plaintext body, using empty string", "error", err)
-		// Continue with the append operation even if plaintext body extraction fails,
-		// actualPlaintextBody is already initialized to an empty string.
-	} else if extractedPlaintext != nil {
-		actualPlaintextBody = *extractedPlaintext
-	}
-
-	recipients := helpers.ExtractRecipients(messageContent.Header)
 
 	// Store message locally for background upload to S3
 	// Check if file already exists to prevent race condition:
