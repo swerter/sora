@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -39,13 +40,16 @@ func TestInsertMessage_LargeFTSSkip(t *testing.T) {
 	}
 	var bs imap.BodyStructure = bodyStructure
 
+	// Use unique content hash per run to avoid ON CONFLICT DO NOTHING hiding stale data
+	contentHash := fmt.Sprintf("large-fts-hash-%d", time.Now().UnixNano())
+
 	options := &InsertMessageOptions{
 		AccountID:     accountID,
 		MailboxID:     mailboxID,
 		MailboxName:   "INBOX",
 		S3Domain:      "example.com",
 		S3Localpart:   "test/large-fts",
-		ContentHash:   "large-fts-hash",
+		ContentHash:   contentHash,
 		MessageID:     "<large-fts@example.com>",
 		Flags:         []imap.Flag{},
 		InternalDate:  now,
@@ -60,7 +64,7 @@ func TestInsertMessage_LargeFTSSkip(t *testing.T) {
 
 	upload := PendingUpload{
 		AccountID:   accountID,
-		ContentHash: "large-fts-hash",
+		ContentHash: contentHash,
 		InstanceID:  "test-instance",
 		Size:        int64(len(largeBody)),
 		Attempts:    0,
@@ -84,12 +88,12 @@ func TestInsertMessage_LargeFTSSkip(t *testing.T) {
 
 	// Verify that the tsvector was created (even if empty)
 	// by checking that message_contents row exists
-	var contentHash string
+	var storedHash string
 	err = db.GetReadPool().QueryRow(ctx,
 		"SELECT content_hash FROM message_contents WHERE content_hash = $1",
-		"large-fts-hash").Scan(&contentHash)
+		contentHash).Scan(&storedHash)
 	assert.NoError(t, err)
-	assert.Equal(t, "large-fts-hash", contentHash)
+	assert.Equal(t, contentHash, storedHash)
 
 	t.Logf("Successfully tested large FTS skip with messageID: %d, UID: %d", messageID, uid)
 }
@@ -122,13 +126,16 @@ func TestInsertMessage_LargeBodyStorageSkip(t *testing.T) {
 	}
 	var bs imap.BodyStructure = bodyStructure
 
+	// Use unique content hash per run to avoid ON CONFLICT DO NOTHING hiding stale data
+	contentHash := fmt.Sprintf("large-storage-hash-%d", time.Now().UnixNano())
+
 	options := &InsertMessageOptions{
 		AccountID:     accountID,
 		MailboxID:     mailboxID,
 		MailboxName:   "INBOX",
 		S3Domain:      "example.com",
 		S3Localpart:   "test/large-storage",
-		ContentHash:   "large-storage-hash",
+		ContentHash:   contentHash,
 		MessageID:     "<large-storage@example.com>",
 		Flags:         []imap.Flag{},
 		InternalDate:  now,
@@ -143,7 +150,7 @@ func TestInsertMessage_LargeBodyStorageSkip(t *testing.T) {
 
 	upload := PendingUpload{
 		AccountID:   accountID,
-		ContentHash: "large-storage-hash",
+		ContentHash: contentHash,
 		InstanceID:  "test-instance",
 		Size:        int64(len(largeBody)),
 		Attempts:    0,
@@ -169,7 +176,7 @@ func TestInsertMessage_LargeBodyStorageSkip(t *testing.T) {
 	var textBody *string
 	err = db.GetReadPool().QueryRow(ctx,
 		"SELECT text_body FROM message_contents WHERE content_hash = $1",
-		"large-storage-hash").Scan(&textBody)
+		contentHash).Scan(&textBody)
 	assert.NoError(t, err)
 	assert.Nil(t, textBody, "text_body should be NULL for large messages")
 
@@ -204,13 +211,16 @@ func TestInsertMessage_NormalSizeStored(t *testing.T) {
 	}
 	var bs imap.BodyStructure = bodyStructure
 
+	// Use unique content hash per run to avoid ON CONFLICT DO NOTHING hiding stale data
+	contentHash := fmt.Sprintf("normal-size-hash-%d", time.Now().UnixNano())
+
 	options := &InsertMessageOptions{
 		AccountID:     accountID,
 		MailboxID:     mailboxID,
 		MailboxName:   "INBOX",
 		S3Domain:      "example.com",
 		S3Localpart:   "test/normal-size",
-		ContentHash:   "normal-size-hash",
+		ContentHash:   contentHash,
 		MessageID:     "<normal@example.com>",
 		Flags:         []imap.Flag{},
 		InternalDate:  now,
@@ -225,7 +235,7 @@ func TestInsertMessage_NormalSizeStored(t *testing.T) {
 
 	upload := PendingUpload{
 		AccountID:   accountID,
-		ContentHash: "normal-size-hash",
+		ContentHash: contentHash,
 		InstanceID:  "test-instance",
 		Size:        int64(len(normalBody)),
 		Attempts:    0,
@@ -251,10 +261,12 @@ func TestInsertMessage_NormalSizeStored(t *testing.T) {
 	var textBody *string
 	err = db.GetReadPool().QueryRow(ctx,
 		"SELECT text_body FROM message_contents WHERE content_hash = $1",
-		"normal-size-hash").Scan(&textBody)
+		contentHash).Scan(&textBody)
 	assert.NoError(t, err)
 	assert.NotNil(t, textBody, "text_body should NOT be NULL for normal-sized messages")
-	assert.Equal(t, normalBody, *textBody)
+	if textBody != nil {
+		assert.Equal(t, normalBody, *textBody)
+	}
 
 	t.Logf("Successfully tested normal size storage with messageID: %d, UID: %d", messageID, uid)
 }
@@ -289,13 +301,16 @@ func TestInsertMessage_LargeHeaders(t *testing.T) {
 	}
 	var bs imap.BodyStructure = bodyStructure
 
+	// Use unique content hash per run to avoid ON CONFLICT DO NOTHING hiding stale data
+	contentHash := fmt.Sprintf("large-headers-hash-%d", time.Now().UnixNano())
+
 	options := &InsertMessageOptions{
 		AccountID:     accountID,
 		MailboxID:     mailboxID,
 		MailboxName:   "INBOX",
 		S3Domain:      "example.com",
 		S3Localpart:   "test/large-headers",
-		ContentHash:   "large-headers-hash",
+		ContentHash:   contentHash,
 		MessageID:     "<large-headers@example.com>",
 		Flags:         []imap.Flag{},
 		InternalDate:  now,
@@ -310,7 +325,7 @@ func TestInsertMessage_LargeHeaders(t *testing.T) {
 
 	upload := PendingUpload{
 		AccountID:   accountID,
-		ContentHash: "large-headers-hash",
+		ContentHash: contentHash,
 		InstanceID:  "test-instance",
 		Size:        int64(len(normalBody)),
 		Attempts:    0,
@@ -336,7 +351,7 @@ func TestInsertMessage_LargeHeaders(t *testing.T) {
 	var headers string
 	err = db.GetReadPool().QueryRow(ctx,
 		"SELECT headers FROM message_contents WHERE content_hash = $1",
-		"large-headers-hash").Scan(&headers)
+		contentHash).Scan(&headers)
 	assert.NoError(t, err)
 	assert.Equal(t, "", headers, "headers should be empty string for large headers")
 
