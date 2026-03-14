@@ -1293,9 +1293,10 @@ func (s *Session) startProxy() {
 	go func() {
 		defer wg.Done()
 		// If this copy returns, it means the backend has closed the connection or there was an error.
-		// We must close both the backend and client connections to unblock the other copy operation.
-		// The backend connection is fully closed here (after reading all data from it).
-		defer s.backendConn.Close() // Full close after reading all data
+		// We close the client connection to unblock the client-to-backend copy operation.
+		// The backend connection is NOT closed here — it is closed after wg.Wait() to avoid
+		// racing with the client-to-backend goroutine's CloseWrite (which would cause "broken pipe"
+		// on the storage backend). The full backendConn.Close() happens after both goroutines exit.
 		defer func() {
 			s.mu.Lock()
 			if !s.gracefulShutdown {
@@ -1341,6 +1342,11 @@ func (s *Session) startProxy() {
 
 	s.DebugLog("Waiting for copy goroutines to finish")
 	wg.Wait() // Wait for both copy operations to finish
+	// Full close of backend connection after both goroutines have exited.
+	// This ensures the client-to-backend goroutine's CloseWrite() has time to signal
+	// EOF to the backend before the connection is fully torn down, preventing
+	// "broken pipe" errors on the storage backend.
+	s.backendConn.Close()
 	s.DebugLog("Copy goroutines finished - startProxy() returning")
 }
 

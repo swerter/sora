@@ -1097,9 +1097,10 @@ func (s *POP3ProxySession) startProxying() {
 	go func() {
 		defer wg.Done()
 		// If this copy returns, it means the backend has closed the connection or there was an error.
-		// We must close both the backend and client connections to unblock the other copy operation.
-		// The backend connection is fully closed here (after reading all data from it).
-		defer s.backendConn.Close() // Full close after reading all data
+		// We close the client connection to unblock the client-to-backend copy operation.
+		// The backend connection is NOT closed here — it is closed after wg.Wait() (via the
+		// parent-level defer) to avoid racing with the client-to-backend goroutine's CloseWrite
+		// (which would cause "broken pipe" on the storage backend).
 		defer func() {
 			s.mutex.Lock()
 			if !s.gracefulShutdown {
