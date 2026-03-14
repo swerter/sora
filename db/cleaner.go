@@ -478,31 +478,91 @@ func (d *Database) PruneOldMessageVectorsBatched(ctx context.Context, retention 
 
 // GetUnusedContentHashes finds content_hash values in message_contents that are no longer referenced
 // by any message row at all. These are candidates for global cleanup.
+//
+// Uses a bounded scan-window approach: each batch scans a fixed number of
+// message_contents rows (via PK index) and filters for orphans within that window.
+// This ensures predictable, bounded query time regardless of orphan density.
+// If orphans are sparse, a batch may return zero results and the cursor advances.
 func (d *Database) GetUnusedContentHashes(ctx context.Context, limit int) ([]string, error) {
-	rows, err := d.GetReadPool().Query(ctx, `
-		SELECT mc.content_hash
-		FROM message_contents mc
-		WHERE NOT EXISTS (
-			SELECT 1
-			FROM messages m
-			WHERE m.content_hash = mc.content_hash
-		)
-		LIMIT $1;
-	`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query for unused content hashes: %w", err)
-	}
-	defer rows.Close()
+	// scanWindowSize: how many message_contents rows to examine per batch.
+	// Each row requires one index probe into messages via
+	// idx_messages_content_hash_account_id, so 5000 rows ≈ 5000 index lookups
+	// — fast and predictable, typically <1s per batch.
+	const scanWindowSize = 5000
+	const maxBatches = 200                  // Upper bound: scan up to 1M rows total
+	const maxRunDuration = 30 * time.Second // Wall-clock cap
 
-	var result []string
-	for rows.Next() {
-		var contentHash string
-		if err := rows.Scan(&contentHash); err != nil {
-			return nil, fmt.Errorf("failed to scan unused content hash: %w", err)
+	var allHashes []string
+	var lastHash string
+	runDeadline := time.Now().Add(maxRunDuration)
+
+	for batch := 0; batch < maxBatches && len(allHashes) < limit; batch++ {
+		// Respect the per-run time cap
+		if time.Now().After(runDeadline) {
+			logger.Info("GetUnusedContentHashes: reached time limit, returning partial results",
+				"found", len(allHashes), "requested", limit, "batches", batch)
+			break
 		}
-		result = append(result, contentHash)
+
+		// Check if context is cancelled
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		// Single query that returns both the orphan hashes and the window boundary.
+		// The scan_window CTE scans exactly scanWindowSize rows from the PK index,
+		// bounding the work. The outer query filters for orphans and also returns
+		// the window's max hash so we can advance the cursor, even when zero orphans
+		// are found.
+		query := `
+			WITH scan_window AS (
+				SELECT mc.content_hash
+				FROM message_contents mc
+				WHERE mc.content_hash > $1
+				ORDER BY mc.content_hash
+				LIMIT $2
+			)
+			SELECT
+				COALESCE((SELECT MAX(content_hash) FROM scan_window), '') AS window_end,
+				ARRAY(
+					SELECT sw.content_hash
+					FROM scan_window sw
+					WHERE NOT EXISTS (
+						SELECT 1
+						FROM messages m
+						WHERE m.content_hash = sw.content_hash
+					)
+				) AS orphan_hashes
+		`
+
+		var windowEnd string
+		var batchHashes []string
+		err := d.GetReadPool().QueryRow(ctx, query, lastHash, scanWindowSize).Scan(&windowEnd, &batchHashes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query unused content hashes: %w", err)
+		}
+
+		// Empty window_end means no more rows in message_contents
+		if windowEnd == "" {
+			break
+		}
+
+		lastHash = windowEnd
+
+		if len(batchHashes) > 0 {
+			// Only take as many as we still need
+			remaining := limit - len(allHashes)
+			if len(batchHashes) > remaining {
+				batchHashes = batchHashes[:remaining]
+			}
+			allHashes = append(allHashes, batchHashes...)
+		}
+
+		// Short sleep between batches to reduce DB pressure
+		time.Sleep(10 * time.Millisecond)
 	}
-	return result, rows.Err()
+
+	return allHashes, nil
 }
 
 // CleanupSoftDeletedAccounts permanently deletes accounts that have been soft-deleted
