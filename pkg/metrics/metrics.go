@@ -465,3 +465,14 @@ var (
 
 	// Note: Old auth cache metrics (CacheSize, CacheHitRatio) removed - replaced by LookupCacheEntriesTotal and LookupCacheHitRate
 )
+
+// Cache warmup metrics
+var (
+	WarmupOperationsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "sora_warmup_operations_total",
+			Help: "Total number of cache warmup operations by state (enqueued, dropped, started, completed, cancelled, error)",
+		},
+		[]string{"server_name", "state"},
+	)
+)

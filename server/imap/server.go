@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +38,13 @@ import (
 )
 
 const DefaultAppendLimit = 25 * 1024 * 1024 // 25MB
+
+// warmupJob represents a cache warmup request to be processed by the worker pool
+type warmupJob struct {
+	accountID    int64
+	mailboxNames []string
+	messageCount int
+}
 
 // getProxyProtocolTrustedProxies returns proxy_protocol_trusted_proxies if set, otherwise falls back to trusted_networks
 func getProxyProtocolTrustedProxies(proxyProtocolTrusted, trustedNetworks []string) []string {
@@ -270,13 +279,17 @@ type IMAPServer struct {
 	proxyReader *serverPkg.ProxyProtocolReader
 
 	// Cache warmup configuration
-	enableWarmup       bool
-	warmupMessageCount int
-	warmupMailboxes    []string
-	warmupAsync        bool
-	warmupTimeout      time.Duration
-	warmupInterval     time.Duration // Minimum time between warmups for same user
-	lastWarmupTimes    sync.Map      // map[int64]time.Time - tracks last warmup time per user
+	enableWarmup        bool
+	warmupMessageCount  int
+	warmupMailboxes     []string
+	warmupAsync         bool
+	warmupTimeout       time.Duration
+	warmupInterval      time.Duration  // Minimum time between warmups for same user
+	warmupMaxConcurrent int            // Number of warmup workers (default: 10)
+	warmupQueue         chan warmupJob // Bounded job queue for async warmups
+	warmupSemaphore     chan struct{}  // Semaphore for sync warmups
+	warmupWg            sync.WaitGroup // Tracks active warmup workers for graceful shutdown
+	lastWarmupTimes     sync.Map       // map[int64]time.Time - tracks last warmup time per user
 
 	// Client capability filtering
 	capFilters []ClientCapabilityFilter
@@ -463,6 +476,18 @@ func New(appCtx context.Context, name, hostname, imapAddr string, s3 *storage.S3
 		}
 	}
 
+	// Configure warmup worker pool to prevent thundering herd on restart.
+	// Instead of spawning unbounded goroutines per warmup, we use a fixed pool of workers
+	// consuming from a bounded queue. This limits both concurrency (workers) and queue depth.
+	const warmupMaxConcurrent = 10 // Fixed: 10 warmup workers (implementation detail, not configurable)
+	// Queue depth = 5x workers: allows reasonable buffering without unbounded growth.
+	// Excess warmups are dropped (user retries on next login since lastWarmupTimes won't be stamped).
+	warmupQueueSize := warmupMaxConcurrent * 5
+	warmupQueue := make(chan warmupJob, warmupQueueSize)
+	// Semaphore for sync warmups (rare, but needs concurrency limiting too)
+	warmupSemaphore := make(chan struct{}, warmupMaxConcurrent)
+	logger.Info("IMAP: warmup worker pool configured", "name", name, "workers", warmupMaxConcurrent, "queue_size", warmupQueueSize)
+
 	s := &IMAPServer{
 		hostname:                     hostname,
 		name:                         name,
@@ -492,6 +517,9 @@ func New(appCtx context.Context, name, hostname, imapAddr string, s3 *storage.S3
 		warmupAsync:                  options.WarmupAsync,
 		warmupTimeout:                warmupTimeout,
 		warmupInterval:               warmupInterval,
+		warmupMaxConcurrent:          warmupMaxConcurrent,
+		warmupQueue:                  warmupQueue,
+		warmupSemaphore:              warmupSemaphore,
 		caps: imap.CapSet{
 			imap.CapIMAP4rev1:     struct{}{},
 			imap.CapLiteralPlus:   struct{}{},
@@ -701,6 +729,15 @@ func New(appCtx context.Context, name, hostname, imapAddr string, s3 *storage.S3
 		// Connection tracking disabled (unlimited connections per user)
 		s.connTracker = nil
 		logger.Debug("IMAP: Local connection tracking disabled (not configured)", "name", name)
+	}
+
+	// Start warmup worker pool (fixed goroutines consuming from bounded queue)
+	// Workers exit when warmupQueue is closed during shutdown
+	if s.enableWarmup {
+		// Load persisted warmup state from previous run to avoid thundering herd
+		// on restart. Users whose caches are still warm on disk won't be re-warmed.
+		s.loadWarmupState()
+		s.startWarmupWorkers()
 	}
 
 	return s, nil
@@ -989,6 +1026,15 @@ func (s *IMAPServer) Close() {
 		s.connTracker.Stop()
 	}
 
+	// Persist warmup state before stopping workers so it survives restart.
+	// This prevents thundering herd when thousands of users reconnect.
+	if s.enableWarmup {
+		s.persistWarmupState()
+	}
+
+	// Stop warmup workers before closing server (drains in-flight warmups)
+	s.stopWarmupWorkers()
+
 	if s.server != nil {
 		// Step 1: Send graceful BYE messages to all active sessions
 		s.sendGracefulShutdownBye()
@@ -1151,131 +1197,343 @@ func (c *proxyProtocolConn) Unwrap() net.Conn {
 	return c.Conn
 }
 
-// WarmupCache pre-fetches recent messages for a user to improve performance when they reconnect
-// This method fetches message content from S3 and stores it in the local cache
-// It only runs if enough time has passed since the last warmup for this user (controlled by warmupInterval)
+// warmupStateFile is the filename for persisting warmup timestamps across restarts.
+// Stored in the cache directory alongside the cache index database.
+const warmupStateFile = ".sora_warmup_state"
+
+// persistWarmupState saves lastWarmupTimes to disk so that after restart,
+// users whose caches are still warm don't trigger unnecessary warmup storms.
+// Format: one line per entry, "accountID unixTimestamp\n"
+// Best-effort: errors are logged but don't affect shutdown.
+func (s *IMAPServer) persistWarmupState() {
+	if s.cache == nil {
+		return
+	}
+
+	path := s.cache.GetBasePath() + "/" + warmupStateFile
+
+	f, err := os.CreateTemp(s.cache.GetBasePath(), ".warmup_state_*.tmp")
+	if err != nil {
+		logger.Warn("IMAP: Failed to create warmup state temp file", "name", s.name, "error", err)
+		return
+	}
+	tmpPath := f.Name()
+
+	count := 0
+	now := time.Now()
+	s.lastWarmupTimes.Range(func(key, value any) bool {
+		accountID := key.(int64)
+		ts := value.(time.Time)
+		// Only persist entries that are still within the warmup interval
+		// (no point preserving expired entries)
+		if now.Sub(ts) < s.warmupInterval {
+			fmt.Fprintf(f, "%d %d\n", accountID, ts.Unix())
+			count++
+		}
+		return true
+	})
+
+	if err := f.Close(); err != nil {
+		logger.Warn("IMAP: Failed to close warmup state temp file", "name", s.name, "error", err)
+		os.Remove(tmpPath)
+		return
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		logger.Warn("IMAP: Failed to rename warmup state file", "name", s.name, "error", err)
+		os.Remove(tmpPath)
+		return
+	}
+
+	logger.Info("IMAP: Persisted warmup state", "name", s.name, "entries", count, "path", path)
+}
+
+// loadWarmupState restores lastWarmupTimes from disk after restart.
+// This prevents thundering herd warmups when thousands of users reconnect
+// after a server restart — their caches are likely still warm on disk.
+//
+// Fully defensive: never crashes, always removes the file (even on corruption),
+// and uses recover() to catch unexpected panics.
+func (s *IMAPServer) loadWarmupState() {
+	// Recover from any unexpected panic (e.g., nil pointer, type assertion)
+	// so a corrupt state file can never crash the server.
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Warn("IMAP: Panic recovered in loadWarmupState", "name", s.name, "panic", r)
+		}
+	}()
+
+	if s.cache == nil {
+		return
+	}
+
+	path := s.cache.GetBasePath() + "/" + warmupStateFile
+
+	f, err := os.Open(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Warn("IMAP: Failed to open warmup state file - removing", "name", s.name, "error", err)
+			os.Remove(path)
+		}
+		return // No state file — fresh start
+	}
+
+	// Always remove the file when we're done, regardless of success or failure.
+	// This ensures a corrupt file doesn't persist and cause problems on every restart.
+	defer func() {
+		f.Close()
+		os.Remove(path)
+	}()
+
+	now := time.Now()
+	count := 0
+	expired := 0
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Fields(line)
+		if len(parts) != 2 {
+			continue // Skip malformed lines silently
+		}
+		accountID, err1 := strconv.ParseInt(parts[0], 10, 64)
+		unixTS, err2 := strconv.ParseInt(parts[1], 10, 64)
+		if err1 != nil || err2 != nil {
+			continue // Skip unparseable lines silently
+		}
+		ts := time.Unix(unixTS, 0)
+		// Only load entries that haven't expired yet
+		if now.Sub(ts) < s.warmupInterval {
+			s.lastWarmupTimes.Store(accountID, ts)
+			count++
+		} else {
+			expired++
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		// Scanner error means I/O corruption — log it but we've already loaded
+		// whatever we could. The defer will clean up the file.
+		logger.Warn("IMAP: Error reading warmup state file (corrupt?) - removed", "name", s.name, "error", err)
+	}
+
+	logger.Info("IMAP: Loaded warmup state from disk", "name", s.name, "loaded", count, "expired", expired)
+}
+
+// startWarmupWorkers launches the fixed pool of warmup worker goroutines.
+// Each worker consumes from the bounded warmupQueue channel and processes jobs sequentially.
+// Workers exit when the channel is closed (during shutdown).
+func (s *IMAPServer) startWarmupWorkers() {
+	for i := 0; i < s.warmupMaxConcurrent; i++ {
+		s.warmupWg.Add(1)
+		go func(workerID int) {
+			defer s.warmupWg.Done()
+			logger.Debug("IMAP: Warmup worker started", "name", s.name, "worker_id", workerID)
+			for job := range s.warmupQueue {
+				s.executeWarmup(job)
+			}
+			logger.Debug("IMAP: Warmup worker stopped", "name", s.name, "worker_id", workerID)
+		}(i)
+	}
+}
+
+// stopWarmupWorkers gracefully shuts down the warmup worker pool.
+// Closes the queue channel (no more jobs accepted) and waits for in-flight jobs to finish.
+func (s *IMAPServer) stopWarmupWorkers() {
+	if s.warmupQueue != nil {
+		close(s.warmupQueue)
+		// Wait for workers to finish current jobs with timeout
+		done := make(chan struct{})
+		go func() {
+			s.warmupWg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			logger.Debug("IMAP: All warmup workers stopped gracefully", "name", s.name)
+		case <-time.After(10 * time.Second):
+			logger.Debug("IMAP: Warmup worker drain timeout", "name", s.name)
+		}
+	}
+}
+
+// WarmupCache pre-fetches recent messages for a user to improve performance when they reconnect.
+// This method fetches message content from S3 and stores it in the local cache.
+//
+// For async mode (normal): enqueues a job to the bounded worker pool queue.
+// If the queue is full, the warmup is skipped and lastWarmupTimes is NOT stamped,
+// so the user will get a warmup on their next login.
+//
+// For sync mode (rare): executes directly with semaphore-based concurrency limiting.
 func (s *IMAPServer) WarmupCache(ctx context.Context, AccountID int64, mailboxNames []string, messageCount int, async bool) error {
 	if messageCount <= 0 || len(mailboxNames) == 0 || s.cache == nil {
 		return nil
 	}
 
 	// Check if enough time has passed since last warmup for this user
-	now := time.Now()
 	if lastWarmupRaw, ok := s.lastWarmupTimes.Load(AccountID); ok {
 		lastWarmup := lastWarmupRaw.(time.Time)
-		timeSinceLastWarmup := now.Sub(lastWarmup)
+		timeSinceLastWarmup := time.Since(lastWarmup)
 		if timeSinceLastWarmup < s.warmupInterval {
 			logger.Debug("IMAP: Skipping cache warmup - too soon since last warmup", "name", s.name, "account_id", AccountID, "time_since_last", timeSinceLastWarmup.Round(time.Second), "min_interval", s.warmupInterval)
 			return nil
 		}
 	}
 
-	// Update last warmup time immediately to prevent concurrent warmups
-	s.lastWarmupTimes.Store(AccountID, now)
-
-	logger.Debug("IMAP: Starting cache warmup", "name", s.name, "account_id", AccountID, "message_count", messageCount, "mailboxes", mailboxNames, "async", async, "timeout", s.warmupTimeout, "interval", s.warmupInterval)
-
-	warmupFunc := func() {
-		// Add timeout to prevent runaway warmup operations
-		warmupCtx, cancel := context.WithTimeout(ctx, s.warmupTimeout)
-		defer cancel()
-		// Get recent message content hashes from database through cache
-		messageHashes, err := s.cache.GetRecentMessagesForWarmup(warmupCtx, AccountID, mailboxNames, messageCount)
-		if err != nil {
-			logger.Debug("IMAP: Failed to get recent messages for warmup", "name", s.name, "error", err)
-			return
-		}
-
-		totalHashes := 0
-		for mailbox, hashes := range messageHashes {
-			totalHashes += len(hashes)
-			logger.Debug("IMAP: Warmup found messages in mailbox", "name", s.name, "count", len(hashes), "mailbox", mailbox)
-		}
-
-		if totalHashes == 0 {
-			logger.Debug("IMAP: No messages found for warmup", "name", s.name)
-			return
-		}
-
-		// Get user's primary email for S3 key construction
-		address, err := s.rdb.GetPrimaryEmailForAccountWithRetry(warmupCtx, AccountID)
-		if err != nil {
-			logger.Debug("IMAP: Warmup - failed to get primary address", "name", s.name, "account_id", AccountID, "error", err)
-			return
-		}
-
-		warmedCount := 0
-		skippedCount := 0
-
-		// Pre-fetch each message content
-		for _, hashes := range messageHashes {
-			for _, contentHash := range hashes {
-				// Check for context cancellation
-				select {
-				case <-warmupCtx.Done():
-					logger.Debug("IMAP: Warmup cancelled", "name", s.name, "account_id", AccountID, "error", warmupCtx.Err())
-					return
-				default:
-					// Continue processing
-				}
-
-				// Check if already in cache
-				exists, err := s.cache.Exists(contentHash)
-				if err != nil {
-					logger.Debug("IMAP: Warmup - error checking existence", "name", s.name, "hash", contentHash, "error", err)
-					continue
-				}
-
-				if exists {
-					skippedCount++
-					continue // Already cached
-				}
-
-				// Build S3 key and fetch from S3 (best-effort, no retries during warmup)
-				s3Key := helpers.NewS3Key(address.Domain(), address.LocalPart(), contentHash)
-
-				// Single attempt - warmup is best-effort
-				reader, fetchErr := s.s3.GetWithRetry(warmupCtx, s3Key)
-				if fetchErr != nil {
-					logger.Debug("IMAP: Warmup - skipping, failed to fetch from S3", "name", s.name, "hash", contentHash, "error", fetchErr)
-					skippedCount++
-					continue
-				}
-
-				data, err := io.ReadAll(reader)
-				reader.Close()
-				if err != nil {
-					logger.Debug("IMAP: Warmup - skipping, failed to read from S3", "name", s.name, "hash", contentHash, "error", err)
-					skippedCount++
-					continue
-				}
-
-				// Store in cache
-				err = s.cache.Put(contentHash, data)
-				if err != nil {
-					if errors.Is(err, cache.ErrObjectTooLarge) {
-						logger.Debug("IMAP: Warmup - skipping, object too large for cache", "name", s.name, "hash", contentHash, "size", len(data))
-						skippedCount++
-					} else {
-						logger.Debug("IMAP: Warmup - failed to cache content", "name", s.name, "hash", contentHash, "error", err)
-					}
-					continue
-				}
-
-				warmedCount++
-			}
-		}
-
-		logger.Debug("IMAP: Warmup completed", "name", s.name, "account_id", AccountID, "cached", warmedCount, "skipped", skippedCount)
+	job := warmupJob{
+		accountID:    AccountID,
+		mailboxNames: mailboxNames,
+		messageCount: messageCount,
 	}
 
 	if async {
-		go warmupFunc()
+		// Non-blocking enqueue to the bounded worker pool queue.
+		// If queue is full, we skip warmup but do NOT stamp lastWarmupTimes,
+		// so the user will get a warmup attempt on their next login.
+		select {
+		case s.warmupQueue <- job:
+			// Successfully enqueued - worker will stamp lastWarmupTimes on execution
+			metrics.WarmupOperationsTotal.WithLabelValues(s.name, "enqueued").Inc()
+			logger.Debug("IMAP: Warmup enqueued", "name", s.name, "account_id", AccountID, "queue_len", len(s.warmupQueue), "queue_cap", cap(s.warmupQueue))
+		default:
+			// Queue full - drop this warmup. User will retry on next login.
+			metrics.WarmupOperationsTotal.WithLabelValues(s.name, "dropped").Inc()
+			logger.Debug("IMAP: Warmup dropped - queue full", "name", s.name, "account_id", AccountID, "queue_len", len(s.warmupQueue), "queue_cap", cap(s.warmupQueue))
+		}
 	} else {
-		warmupFunc()
+		// Sync mode: execute directly with semaphore to limit concurrency.
+		// This is rare (warmup_async=false) but still needs protection.
+		select {
+		case s.warmupSemaphore <- struct{}{}:
+			defer func() { <-s.warmupSemaphore }()
+			s.executeWarmup(job)
+		case <-ctx.Done():
+			logger.Debug("IMAP: Sync warmup cancelled while waiting for semaphore", "name", s.name, "account_id", AccountID)
+		}
 	}
 
 	return nil
+}
+
+// executeWarmup performs the actual cache warmup work for a single user.
+// Called by worker goroutines (async) or directly (sync).
+// Stamps lastWarmupTimes only on successful execution start (after dedup check passes again).
+func (s *IMAPServer) executeWarmup(job warmupJob) {
+	// Re-check interval dedup - another worker may have already warmed this user
+	// while the job was queued. This is cheap and prevents redundant work.
+	if lastWarmupRaw, ok := s.lastWarmupTimes.Load(job.accountID); ok {
+		lastWarmup := lastWarmupRaw.(time.Time)
+		if time.Since(lastWarmup) < s.warmupInterval {
+			logger.Debug("IMAP: Warmup skipped - already warmed while queued", "name", s.name, "account_id", job.accountID)
+			return
+		}
+	}
+
+	// Stamp NOW - we're about to do the work. This prevents duplicate work for this user.
+	s.lastWarmupTimes.Store(job.accountID, time.Now())
+	metrics.WarmupOperationsTotal.WithLabelValues(s.name, "started").Inc()
+
+	// Defensive nil check - cache may not be initialized in edge cases or tests
+	if s.cache == nil {
+		return
+	}
+
+	// Add timeout to prevent runaway warmup operations
+	warmupCtx, cancel := context.WithTimeout(s.appCtx, s.warmupTimeout)
+	defer cancel()
+
+	logger.Debug("IMAP: Starting cache warmup", "name", s.name, "account_id", job.accountID, "message_count", job.messageCount, "mailboxes", job.mailboxNames)
+
+	// Get recent message content hashes from database through cache
+	messageHashes, err := s.cache.GetRecentMessagesForWarmup(warmupCtx, job.accountID, job.mailboxNames, job.messageCount)
+	if err != nil {
+		logger.Debug("IMAP: Failed to get recent messages for warmup", "name", s.name, "error", err)
+		metrics.WarmupOperationsTotal.WithLabelValues(s.name, "error").Inc()
+		return
+	}
+
+	totalHashes := 0
+	for mailbox, hashes := range messageHashes {
+		totalHashes += len(hashes)
+		logger.Debug("IMAP: Warmup found messages in mailbox", "name", s.name, "count", len(hashes), "mailbox", mailbox)
+	}
+
+	if totalHashes == 0 {
+		logger.Debug("IMAP: No messages found for warmup", "name", s.name)
+		metrics.WarmupOperationsTotal.WithLabelValues(s.name, "completed").Inc()
+		return
+	}
+
+	// Get user's primary email for S3 key construction
+	address, err := s.rdb.GetPrimaryEmailForAccountWithRetry(warmupCtx, job.accountID)
+	if err != nil {
+		logger.Debug("IMAP: Warmup - failed to get primary address", "name", s.name, "account_id", job.accountID, "error", err)
+		metrics.WarmupOperationsTotal.WithLabelValues(s.name, "error").Inc()
+		return
+	}
+
+	warmedCount := 0
+	skippedCount := 0
+
+	// Pre-fetch each message content
+	for _, hashes := range messageHashes {
+		for _, contentHash := range hashes {
+			// Check for context cancellation
+			select {
+			case <-warmupCtx.Done():
+				logger.Debug("IMAP: Warmup cancelled", "name", s.name, "account_id", job.accountID, "error", warmupCtx.Err())
+				metrics.WarmupOperationsTotal.WithLabelValues(s.name, "cancelled").Inc()
+				return
+			default:
+			}
+
+			// Check if already in cache
+			exists, err := s.cache.Exists(contentHash)
+			if err != nil {
+				logger.Debug("IMAP: Warmup - error checking existence", "name", s.name, "hash", contentHash, "error", err)
+				continue
+			}
+
+			if exists {
+				skippedCount++
+				continue // Already cached
+			}
+
+			// Build S3 key and fetch from S3 (best-effort)
+			s3Key := helpers.NewS3Key(address.Domain(), address.LocalPart(), contentHash)
+
+			reader, fetchErr := s.s3.GetWithRetry(warmupCtx, s3Key)
+			if fetchErr != nil {
+				logger.Debug("IMAP: Warmup - skipping, failed to fetch from S3", "name", s.name, "hash", contentHash, "error", fetchErr)
+				skippedCount++
+				continue
+			}
+
+			data, err := io.ReadAll(reader)
+			reader.Close()
+			if err != nil {
+				logger.Debug("IMAP: Warmup - skipping, failed to read from S3", "name", s.name, "hash", contentHash, "error", err)
+				skippedCount++
+				continue
+			}
+
+			// Store in cache
+			err = s.cache.Put(contentHash, data)
+			if err != nil {
+				if errors.Is(err, cache.ErrObjectTooLarge) {
+					logger.Debug("IMAP: Warmup - skipping, object too large for cache", "name", s.name, "hash", contentHash, "size", len(data))
+					skippedCount++
+				} else {
+					logger.Debug("IMAP: Warmup - failed to cache content", "name", s.name, "hash", contentHash, "error", err)
+				}
+				continue
+			}
+
+			warmedCount++
+		}
+	}
+
+	metrics.WarmupOperationsTotal.WithLabelValues(s.name, "completed").Inc()
+	logger.Debug("IMAP: Warmup completed", "name", s.name, "account_id", job.accountID, "cached", warmedCount, "skipped", skippedCount)
 }
 
 // filterCapabilitiesForClient applies client-specific capability filtering and returns disabled capabilities

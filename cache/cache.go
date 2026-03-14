@@ -889,6 +889,11 @@ func (c *Cache) RemoveStaleDBEntries(ctx context.Context) error {
 }
 
 // Get path for a given content hash, by splitting the hash into 3 parts
+// GetBasePath returns the base path of the cache directory
+func (c *Cache) GetBasePath() string {
+	return c.basePath
+}
+
 func (c *Cache) GetPathForContentHash(contentHash string) string {
 	// Require a minimum length for the hash to be splittable as intended.
 	if len(contentHash) < 4 { // Adjusted minimum length
