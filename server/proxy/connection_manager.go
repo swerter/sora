@@ -1317,43 +1317,26 @@ func UpdateAffinityAfterConnection(params RouteParams, connectedBackend string, 
 	currentBackend, hasAffinity := affinityMgr.GetBackend(params.Username, params.Protocol)
 
 	if !hasAffinity {
-		// No affinity exists yet
+		// Always set affinity after a successful connection.
+		// Even when the connected backend matches the consistent hash backend,
+		// the affinity entry is needed for cross-protocol cache locality:
+		// other protocol proxies (LMTP, POP3, etc.) discover this user's backend
+		// via GetBackendAcrossProtocols and route to the same machine.
+		affinityMgr.SetBackend(params.Username, connectedBackend, params.Protocol)
 		if connectedBackend != consistentHashBackend {
-			// User connected to different backend than consistent hash suggests
-			// This means failover occurred - set affinity to track this
-			affinityMgr.SetBackend(params.Username, connectedBackend, params.Protocol)
 			logger.Info("Set failover affinity", "proxy", params.ProxyName, "user", params.Username,
 				"backend", connectedBackend, "consistent_hash", consistentHashBackend)
 		} else {
-			// User on consistent hash backend - no affinity needed (deterministic)
-			logger.Debug("Connection manager: User on consistent hash backend - no affinity needed", "proxy", params.ProxyName, "user", params.Username, "backend", connectedBackend)
+			logger.Debug("Set affinity for cross-protocol discovery", "proxy", params.ProxyName, "user", params.Username, "backend", connectedBackend)
 		}
 	} else if currentBackend != connectedBackend {
-		// Affinity exists but we connected to a different backend
+		// Affinity exists but we connected to a different backend — update it
+		affinityMgr.UpdateBackend(params.Username, currentBackend, connectedBackend, params.Protocol)
 		if wasAffinityRoute {
-			// We tried to use affinity but ended up on different backend (another failover)
-			affinityMgr.UpdateBackend(params.Username, currentBackend, connectedBackend, params.Protocol)
 			logger.Info("Updated affinity after failover", "proxy", params.ProxyName, "user", params.Username, "old", currentBackend, "new", connectedBackend)
 		} else {
-			// We used consistent hash but affinity exists pointing elsewhere
-			// Check if we're back on consistent hash backend - if so, clear affinity
-			if connectedBackend == consistentHashBackend {
-				// User is back on consistent hash backend, clear affinity
-				affinityMgr.DeleteBackend(params.Username, params.Protocol)
-				logger.Info("Cleared affinity - reconnected to consistent hash backend", "proxy", params.ProxyName, "user", params.Username, "backend", connectedBackend)
-			} else {
-				// Connected to different backend via consistent hash, keep existing affinity
-				// This can happen if consistent hash changed (backend added/removed)
-				logger.Info("Affinity exists - keeping affinity", "proxy", params.ProxyName, "user", params.Username, "affinity", currentBackend, "connected", connectedBackend)
-			}
+			logger.Info("Updated affinity to match connected backend", "proxy", params.ProxyName, "user", params.Username, "old", currentBackend, "new", connectedBackend)
 		}
-	} else {
-		// Connected backend matches affinity - check if we can clear affinity
-		if connectedBackend == consistentHashBackend {
-			// User is back on consistent hash backend, clear affinity
-			affinityMgr.DeleteBackend(params.Username, params.Protocol)
-			logger.Info("Cleared affinity - back on consistent hash backend", "proxy", params.ProxyName, "user", params.Username, "backend", connectedBackend)
-		}
-		// Otherwise keep affinity (still in failover state)
 	}
+	// else: connected backend matches existing affinity — nothing to do
 }

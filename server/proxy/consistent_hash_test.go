@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"net"
 	"testing"
 )
 
@@ -160,6 +161,60 @@ func TestConsistentHash_Distribution(t *testing.T) {
 				backend, count, idealCount, tolerance)
 		}
 	}
+}
+
+// TestConsistentHash_CrossProtocolAgreement verifies that IMAP (:143), POP3 (:110),
+// LMTP (:24) and ManageSieve (:4190) hash rings all map the same user to the same
+// backend machine, even though the port numbers differ.
+// This is critical for cache locality after restart (no affinity state).
+func TestConsistentHash_CrossProtocolAgreement(t *testing.T) {
+	// Simulate 4 protocol proxies with the same backend hostnames but different ports
+	imapHash := NewConsistentHash(150)
+	pop3Hash := NewConsistentHash(150)
+	lmtpHash := NewConsistentHash(150)
+	sieveHash := NewConsistentHash(150)
+
+	hosts := []string{"backend1.example.com", "backend2.example.com", "backend3.example.com"}
+
+	for _, host := range hosts {
+		imapHash.AddBackend(host + ":143")
+		pop3Hash.AddBackend(host + ":110")
+		lmtpHash.AddBackend(host + ":24")
+		sieveHash.AddBackend(host + ":4190")
+	}
+
+	testUsers := []string{
+		"user1@example.com",
+		"admin@test.com",
+		"support@company.com",
+		"me@dejanstrbac.com",
+		"newsletter@example.org",
+	}
+
+	for _, user := range testUsers {
+		imapBackend := imapHash.GetBackend(user)
+		pop3Backend := pop3Hash.GetBackend(user)
+		lmtpBackend := lmtpHash.GetBackend(user)
+		sieveBackend := sieveHash.GetBackend(user)
+
+		// Extract hostnames for comparison
+		imapHost, _, _ := extractHost(imapBackend)
+		pop3Host, _, _ := extractHost(pop3Backend)
+		lmtpHost, _, _ := extractHost(lmtpBackend)
+		sieveHost, _, _ := extractHost(sieveBackend)
+
+		if imapHost != pop3Host || imapHost != lmtpHost || imapHost != sieveHost {
+			t.Errorf("Cross-protocol disagreement for %s: IMAP=%s, POP3=%s, LMTP=%s, Sieve=%s",
+				user, imapBackend, pop3Backend, lmtpBackend, sieveBackend)
+		} else {
+			t.Logf("✓ %s → %s (all protocols agree)", user, imapHost)
+		}
+	}
+}
+
+// extractHost splits a host:port address using net.SplitHostPort
+func extractHost(addr string) (string, string, error) {
+	return net.SplitHostPort(addr)
 }
 
 func TestConsistentHash_RemoveBackend(t *testing.T) {

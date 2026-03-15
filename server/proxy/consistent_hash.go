@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"net"
 	"sort"
 	"sync"
 )
@@ -140,10 +141,20 @@ func (ch *ConsistentHash) GetAllBackends() []string {
 	return backends
 }
 
-// hash generates a hash for a backend and virtual node index
+// hash generates a hash for a backend and virtual node index.
+// Uses only the hostname (without port) so all protocol proxies (IMAP :143, POP3 :110,
+// LMTP :24, etc.) produce identical ring positions for the same backend machines.
+// This ensures cross-protocol cache locality: the same user maps to the same machine
+// regardless of which protocol proxy handles the connection.
 func (ch *ConsistentHash) hash(backend string, vnodeIndex int) uint64 {
+	// Extract hostname only — ignore port for consistent cross-protocol hashing
+	hashKey := backend
+	if host, _, err := net.SplitHostPort(backend); err == nil {
+		hashKey = host
+	}
+
 	h := sha256.New()
-	h.Write([]byte(backend))
+	h.Write([]byte(hashKey))
 	// Add virtual node index to distribute virtual nodes around ring
 	h.Write([]byte{byte(vnodeIndex >> 24), byte(vnodeIndex >> 16), byte(vnodeIndex >> 8), byte(vnodeIndex)})
 	sum := h.Sum(nil)

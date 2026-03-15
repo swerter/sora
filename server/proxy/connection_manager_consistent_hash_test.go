@@ -253,7 +253,8 @@ func TestUpdateAffinityAfterConnection_ConsistentHashScenarios(t *testing.T) {
 	username := "test@example.com"
 	consistentHashBackend := cm.GetBackendByConsistentHash(username)
 
-	// Scenario 1: User connects to consistent hash backend → no affinity set
+	// Scenario 1: User connects to consistent hash backend → affinity is set
+	// (needed for cross-protocol discovery by other protocol proxies)
 	t.Run("NoAffinityOnConsistentHashBackend", func(t *testing.T) {
 		mockAffinity.backends = make(map[string]string) // Clear
 
@@ -265,12 +266,15 @@ func TestUpdateAffinityAfterConnection_ConsistentHashScenarios(t *testing.T) {
 			ProxyName:      "Test Proxy",
 		}, consistentHashBackend, false)
 
-		// Should NOT set affinity
-		_, hasAffinity := mockAffinity.GetBackend(username, "imap")
-		if hasAffinity {
-			t.Error("Should not set affinity when user on consistent hash backend")
+		// Should set affinity for cross-protocol discovery
+		backend, hasAffinity := mockAffinity.GetBackend(username, "imap")
+		if !hasAffinity {
+			t.Error("Should set affinity for cross-protocol discovery")
 		}
-		t.Log("✓ No affinity set for consistent hash placement")
+		if backend != consistentHashBackend {
+			t.Errorf("Affinity should point to %s, got %s", consistentHashBackend, backend)
+		}
+		t.Log("✓ Affinity set for cross-protocol discovery")
 	})
 
 	// Scenario 2: User connects to different backend (failover) → set affinity
@@ -301,7 +305,8 @@ func TestUpdateAffinityAfterConnection_ConsistentHashScenarios(t *testing.T) {
 		t.Logf("✓ Affinity set for failover: %s", failoverBackend)
 	})
 
-	// Scenario 3: User with affinity reconnects to consistent hash backend → clear affinity
+	// Scenario 3: User with affinity reconnects to consistent hash backend → affinity updated
+	// (affinity is kept for cross-protocol discovery, just updated to new backend)
 	t.Run("ClearAffinityOnRecovery", func(t *testing.T) {
 		// Set affinity to failover backend
 		failoverBackend := "backend2:143"
@@ -319,12 +324,15 @@ func TestUpdateAffinityAfterConnection_ConsistentHashScenarios(t *testing.T) {
 			ProxyName:      "Test Proxy",
 		}, consistentHashBackend, false)
 
-		// Should clear affinity
-		_, hasAffinity := mockAffinity.GetBackend(username, "imap")
-		if hasAffinity {
-			t.Error("Should clear affinity when user back on consistent hash backend")
+		// Affinity should be updated to consistent hash backend (for cross-protocol discovery)
+		backend, hasAffinity := mockAffinity.GetBackend(username, "imap")
+		if !hasAffinity {
+			t.Error("Affinity should still exist (needed for cross-protocol discovery)")
 		}
-		t.Log("✓ Affinity cleared on recovery to consistent hash backend")
+		if backend != consistentHashBackend {
+			t.Errorf("Affinity should be updated to %s, got %s", consistentHashBackend, backend)
+		}
+		t.Log("✓ Affinity updated to consistent hash backend on recovery")
 	})
 
 	// Scenario 4: User with affinity has another failover → update affinity
