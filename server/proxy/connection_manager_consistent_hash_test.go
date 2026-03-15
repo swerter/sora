@@ -467,6 +467,25 @@ func (m *MockAffinityManager) GetBackend(username, protocol string) (string, boo
 	return backend, exists
 }
 
+func (m *MockAffinityManager) GetBackendAcrossProtocols(username, protocol string) (backend string, foundProtocol string, found bool) {
+	// Same protocol first
+	key := username + ":" + protocol
+	if b, exists := m.backends[key]; exists {
+		return b, protocol, true
+	}
+	// Cross-protocol fallback
+	for _, proto := range []string{"imap", "pop3", "lmtp", "managesieve"} {
+		if proto == protocol {
+			continue
+		}
+		key := username + ":" + proto
+		if b, exists := m.backends[key]; exists {
+			return b, proto, true
+		}
+	}
+	return "", "", false
+}
+
 func (m *MockAffinityManager) SetBackend(username, backend, protocol string) {
 	key := username + ":" + protocol
 	m.backends[key] = backend

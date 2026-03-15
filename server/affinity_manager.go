@@ -133,6 +133,44 @@ func (am *AffinityManager) GetBackend(username, protocol string) (string, bool) 
 	return info.Backend, true
 }
 
+// GetBackendAcrossProtocols returns the backend affinity for a user from any protocol
+// This enables cache locality by routing all protocols (IMAP, POP3, LMTP) to the same backend
+// Priority: same protocol > other protocols > none
+func (am *AffinityManager) GetBackendAcrossProtocols(username, protocol string) (backend string, foundProtocol string, found bool) {
+	if am == nil || !am.enabled {
+		return "", "", false
+	}
+
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+
+	now := time.Now()
+
+	// First, check if there's affinity for this exact protocol
+	key := fmt.Sprintf("%s:%s", username, protocol)
+	if info, exists := am.affinityMap[key]; exists && now.Before(info.ExpiresAt) {
+		return info.Backend, protocol, true
+	}
+
+	// Second, check if there's affinity for any other protocol
+	// This ensures all protocols go to the same backend for cache locality
+	// Check in priority order: IMAP > POP3 > LMTP > ManageSieve
+	protocols := []string{"imap", "pop3", "lmtp", "managesieve"}
+	for _, proto := range protocols {
+		if proto == protocol {
+			continue // Already checked above
+		}
+		key := fmt.Sprintf("%s:%s", username, proto)
+		if info, exists := am.affinityMap[key]; exists && now.Before(info.ExpiresAt) {
+			logger.Debug("Affinity: Found cross-protocol affinity for cache locality",
+				"user", username, "requested_protocol", protocol, "found_protocol", proto, "backend", info.Backend)
+			return info.Backend, proto, true
+		}
+	}
+
+	return "", "", false
+}
+
 // SetBackend assigns a user to a backend and broadcasts to cluster
 func (am *AffinityManager) SetBackend(username, backend, protocol string) {
 	if am == nil || !am.enabled {

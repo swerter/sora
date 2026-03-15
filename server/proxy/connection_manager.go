@@ -17,6 +17,7 @@ import (
 // AffinityManager defines the interface for cluster-wide affinity management
 type AffinityManager interface {
 	GetBackend(username, protocol string) (string, bool)
+	GetBackendAcrossProtocols(username, protocol string) (backend string, foundProtocol string, found bool)
 	SetBackend(username, backend, protocol string)
 	UpdateBackend(username, oldBackend, newBackend, protocol string)
 	DeleteBackend(username, protocol string)
@@ -141,6 +142,22 @@ func (cm *ConnectionManager) SetAffinityManager(am AffinityManager) {
 // GetAffinityManager returns the affinity manager (may be nil)
 func (cm *ConnectionManager) GetAffinityManager() AffinityManager {
 	return cm.affinityManager
+}
+
+// FindPoolBackendByHost returns the pool backend address matching the given hostname.
+// This enables cross-protocol affinity: when IMAP affinity points to "backend1:143",
+// the POP3 proxy can resolve it to "backend1:110" from its own pool.
+// Returns the full host:port address from the pool and true if found, or empty and false otherwise.
+func (cm *ConnectionManager) FindPoolBackendByHost(host string) (string, bool) {
+	cm.healthMu.RLock()
+	defer cm.healthMu.RUnlock()
+	for _, addr := range cm.remoteAddrs {
+		h, _, err := net.SplitHostPort(addr)
+		if err == nil && h == host {
+			return addr, true
+		}
+	}
+	return "", false
 }
 
 // GetBackendByConsistentHash returns a backend for a username using consistent hashing
@@ -1194,17 +1211,45 @@ func DetermineRoute(params RouteParams) (RouteResult, error) {
 		if !skipAffinity {
 			affinityMgr := params.ConnManager.GetAffinityManager()
 			if affinityMgr != nil && params.Protocol != "" {
-				// Use gossip-based cluster affinity
-				if lastAddr, found := affinityMgr.GetBackend(params.Username, params.Protocol); found {
-					// Check if backend is healthy
-					if params.ConnManager.IsBackendHealthy(lastAddr) {
-						result.PreferredAddr = lastAddr
-						result.RoutingMethod = "affinity"
-						logger.Info("Using cluster affinity", "proxy", params.ProxyName, "user", params.Username, "backend", result.PreferredAddr)
-					} else {
-						logger.Info("Cluster affinity backend unhealthy - deleting affinity", "proxy", params.ProxyName, "backend", lastAddr, "user", params.Username)
-						// Delete unhealthy affinity
-						affinityMgr.DeleteBackend(params.Username, params.Protocol)
+				// First, check for affinity across all protocols (for cache locality)
+				// This ensures IMAP, POP3, LMTP all route to the same backend
+				if lastAddr, foundProtocol, found := affinityMgr.GetBackendAcrossProtocols(params.Username, params.Protocol); found {
+					targetAddr := lastAddr
+
+					// Cross-protocol: the affinity address may be from a different protocol's port space
+					// (e.g., IMAP affinity "backend1:143" but POP3 pool has "backend1:110").
+					// Resolve the hostname to this proxy's pool address.
+					if foundProtocol != params.Protocol {
+						host, _, err := net.SplitHostPort(lastAddr)
+						if err == nil {
+							if localAddr, ok := params.ConnManager.FindPoolBackendByHost(host); ok {
+								targetAddr = localAddr
+							} else {
+								// Backend host not in our pool — skip cross-protocol affinity
+								logger.Debug("Cross-protocol affinity host not in pool, skipping",
+									"proxy", params.ProxyName, "user", params.Username,
+									"affinity_addr", lastAddr, "from_protocol", foundProtocol)
+								targetAddr = "" // Signal to skip
+							}
+						}
+					}
+
+					if targetAddr != "" {
+						// Check if backend is healthy
+						if params.ConnManager.IsBackendHealthy(targetAddr) {
+							result.PreferredAddr = targetAddr
+							if foundProtocol == params.Protocol {
+								result.RoutingMethod = "affinity"
+								logger.Info("Using cluster affinity", "proxy", params.ProxyName, "user", params.Username, "backend", result.PreferredAddr)
+							} else {
+								result.RoutingMethod = "affinity_cross_protocol"
+								logger.Info("Using cross-protocol affinity for cache locality", "proxy", params.ProxyName, "user", params.Username, "backend", result.PreferredAddr, "from_protocol", foundProtocol, "to_protocol", params.Protocol)
+							}
+						} else {
+							logger.Info("Cluster affinity backend unhealthy - deleting affinity", "proxy", params.ProxyName, "backend", lastAddr, "user", params.Username, "protocol", foundProtocol)
+							// Delete unhealthy affinity (for the protocol it was found in)
+							affinityMgr.DeleteBackend(params.Username, foundProtocol)
+						}
 					}
 				}
 			}
