@@ -1211,47 +1211,7 @@ func DetermineRoute(params RouteParams) (RouteResult, error) {
 		if !skipAffinity {
 			affinityMgr := params.ConnManager.GetAffinityManager()
 			if affinityMgr != nil && params.Protocol != "" {
-				// First, check for affinity across all protocols (for cache locality)
-				// This ensures IMAP, POP3, LMTP all route to the same backend
-				if lastAddr, foundProtocol, found := affinityMgr.GetBackendAcrossProtocols(params.Username, params.Protocol); found {
-					targetAddr := lastAddr
-
-					// Cross-protocol: the affinity address may be from a different protocol's port space
-					// (e.g., IMAP affinity "backend1:143" but POP3 pool has "backend1:110").
-					// Resolve the hostname to this proxy's pool address.
-					if foundProtocol != params.Protocol {
-						host, _, err := net.SplitHostPort(lastAddr)
-						if err == nil {
-							if localAddr, ok := params.ConnManager.FindPoolBackendByHost(host); ok {
-								targetAddr = localAddr
-							} else {
-								// Backend host not in our pool — skip cross-protocol affinity
-								logger.Debug("Cross-protocol affinity host not in pool, skipping",
-									"proxy", params.ProxyName, "user", params.Username,
-									"affinity_addr", lastAddr, "from_protocol", foundProtocol)
-								targetAddr = "" // Signal to skip
-							}
-						}
-					}
-
-					if targetAddr != "" {
-						// Check if backend is healthy
-						if params.ConnManager.IsBackendHealthy(targetAddr) {
-							result.PreferredAddr = targetAddr
-							if foundProtocol == params.Protocol {
-								result.RoutingMethod = "affinity"
-								logger.Info("Using cluster affinity", "proxy", params.ProxyName, "user", params.Username, "backend", result.PreferredAddr)
-							} else {
-								result.RoutingMethod = "affinity_cross_protocol"
-								logger.Info("Using cross-protocol affinity for cache locality", "proxy", params.ProxyName, "user", params.Username, "backend", result.PreferredAddr, "from_protocol", foundProtocol, "to_protocol", params.Protocol)
-							}
-						} else {
-							logger.Info("Cluster affinity backend unhealthy - deleting affinity", "proxy", params.ProxyName, "backend", lastAddr, "user", params.Username, "protocol", foundProtocol)
-							// Delete unhealthy affinity (for the protocol it was found in)
-							affinityMgr.DeleteBackend(params.Username, foundProtocol)
-						}
-					}
-				}
+				result.PreferredAddr, result.RoutingMethod = resolveAffinityRoute(params, affinityMgr, &result)
 			}
 		}
 	}
@@ -1270,6 +1230,64 @@ func DetermineRoute(params RouteParams) (RouteResult, error) {
 	}
 
 	return result, nil
+}
+
+// resolveAffinityRoute attempts to find a healthy backend via affinity, including cross-protocol.
+// If same-protocol affinity is stale (unhealthy), it deletes it and retries once to check
+// cross-protocol affinities from other protocols that may have already failed over.
+func resolveAffinityRoute(params RouteParams, affinityMgr AffinityManager, result *RouteResult) (preferredAddr, routingMethod string) {
+	// Try affinity lookup (may retry once after deleting stale same-protocol affinity)
+	for attempt := 0; attempt < 2; attempt++ {
+		lastAddr, foundProtocol, found := affinityMgr.GetBackendAcrossProtocols(params.Username, params.Protocol)
+		if !found {
+			return "", ""
+		}
+
+		targetAddr := lastAddr
+
+		// Cross-protocol: resolve hostname to this proxy's pool address
+		if foundProtocol != params.Protocol {
+			host, _, err := net.SplitHostPort(lastAddr)
+			if err == nil {
+				if localAddr, ok := params.ConnManager.FindPoolBackendByHost(host); ok {
+					targetAddr = localAddr
+				} else {
+					// Backend host not in our pool — skip this affinity entry
+					logger.Debug("Cross-protocol affinity host not in pool, skipping",
+						"proxy", params.ProxyName, "user", params.Username,
+						"affinity_addr", lastAddr, "from_protocol", foundProtocol)
+					return "", ""
+				}
+			}
+		}
+
+		// Check if resolved backend is healthy
+		if params.ConnManager.IsBackendHealthy(targetAddr) {
+			if foundProtocol == params.Protocol {
+				logger.Info("Using cluster affinity", "proxy", params.ProxyName, "user", params.Username, "backend", targetAddr)
+				return targetAddr, "affinity"
+			}
+			logger.Info("Using cross-protocol affinity for cache locality", "proxy", params.ProxyName, "user", params.Username, "backend", targetAddr, "from_protocol", foundProtocol, "to_protocol", params.Protocol)
+			return targetAddr, "affinity_cross_protocol"
+		}
+
+		// Backend is unhealthy — delete the stale affinity
+		logger.Info("Cluster affinity backend unhealthy - deleting affinity", "proxy", params.ProxyName, "backend", lastAddr, "user", params.Username, "protocol", foundProtocol)
+		affinityMgr.DeleteBackend(params.Username, foundProtocol)
+
+		// If we just deleted same-protocol affinity, retry to check cross-protocol
+		// This enables: LMTP stale → delete → retry → find IMAP's updated affinity
+		if foundProtocol == params.Protocol {
+			logger.Debug("Retrying affinity lookup after deleting stale same-protocol affinity",
+				"proxy", params.ProxyName, "user", params.Username, "protocol", params.Protocol)
+			continue
+		}
+
+		// Deleted a cross-protocol affinity — don't retry (avoid cascading deletions)
+		break
+	}
+
+	return "", ""
 }
 
 // UpdateAffinityAfterConnection updates affinity after a successful connection

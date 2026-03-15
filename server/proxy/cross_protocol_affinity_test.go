@@ -255,3 +255,83 @@ func TestCrossProtocolAffinityUnhealthyBackendFailover(t *testing.T) {
 
 	t.Logf("✅ Cross-protocol affinity correctly failed over when resolved backend is unhealthy")
 }
+
+// TestCrossProtocolAffinityRetryAfterStaleDelete verifies that when a same-protocol
+// affinity is stale (points to unhealthy backend), the routing retries cross-protocol
+// lookup to benefit from another protocol's updated affinity.
+//
+// Scenario: LMTP and IMAP both had affinity to backend1. Backend1 goes down.
+// IMAP fails over and updates its affinity to backend2. Next LMTP connection should:
+// 1. Find LMTP affinity → backend1 (unhealthy) → delete it
+// 2. Retry cross-protocol → find IMAP affinity → backend2 → use it!
+func TestCrossProtocolAffinityRetryAfterStaleDelete(t *testing.T) {
+	cluster1, err := createTestCluster("cross-proto-retry-1", 26950, []string{})
+	if err != nil {
+		t.Fatalf("Failed to create cluster: %v", err)
+	}
+	defer cluster1.Shutdown()
+
+	affinity := server.NewAffinityManager(cluster1, true, 24*time.Hour, 1*time.Hour)
+	defer affinity.Stop()
+
+	// Both LMTP and IMAP originally had affinity to backend1
+	affinity.SetBackend("user@example.com", "backend1:24", "lmtp")
+	affinity.SetBackend("user@example.com", "backend1:143", "imap")
+
+	// Backend1 goes down. IMAP proxy detects this and fails over to backend2
+	affinity.UpdateBackend("user@example.com", "backend1:143", "backend2:143", "imap")
+
+	// Verify: IMAP now points to backend2, LMTP still points to stale backend1
+	imapBackend, _ := affinity.GetBackend("user@example.com", "imap")
+	lmtpBackend, _ := affinity.GetBackend("user@example.com", "lmtp")
+	t.Logf("Before LMTP connection: IMAP → %s, LMTP → %s", imapBackend, lmtpBackend)
+
+	// Create LMTP proxy's connection manager
+	lmtpBackends := []string{"backend1:24", "backend2:24"}
+	lmtpConnMgr, err := NewConnectionManager(lmtpBackends, 24, false, false, false, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to create connection manager: %v", err)
+	}
+	lmtpConnMgr.SetAffinityManager(affinity)
+
+	// Mark backend1:24 as unhealthy (backend1 is down)
+	for i := 0; i < 3; i++ {
+		lmtpConnMgr.RecordConnectionFailure("backend1:24")
+	}
+
+	// DetermineRoute for LMTP
+	result, err := DetermineRoute(RouteParams{
+		Ctx:            context.Background(),
+		Username:       "user@example.com",
+		Protocol:       "lmtp",
+		ConnManager:    lmtpConnMgr,
+		EnableAffinity: true,
+		ProxyName:      "LMTP Proxy",
+	})
+	if err != nil {
+		t.Fatalf("DetermineRoute failed: %v", err)
+	}
+
+	// LMTP should use cross-protocol affinity from IMAP (backend2) after deleting stale LMTP affinity
+	if result.PreferredAddr != "backend2:24" {
+		t.Errorf("Expected LMTP to route to backend2:24 (from IMAP's cross-protocol affinity), got: %s (method: %s)",
+			result.PreferredAddr, result.RoutingMethod)
+	}
+	if result.RoutingMethod != "affinity_cross_protocol" {
+		t.Errorf("Expected routing method 'affinity_cross_protocol', got: %s", result.RoutingMethod)
+	}
+
+	// LMTP's stale affinity should be deleted
+	_, lmtpFound := affinity.GetBackend("user@example.com", "lmtp")
+	if lmtpFound {
+		t.Error("Stale LMTP affinity should have been deleted")
+	}
+
+	// IMAP affinity should still point to backend2
+	imapAfter, imapFound := affinity.GetBackend("user@example.com", "imap")
+	if !imapFound || imapAfter != "backend2:143" {
+		t.Errorf("IMAP affinity should still point to backend2:143, got: found=%v addr=%s", imapFound, imapAfter)
+	}
+
+	t.Logf("✅ After stale LMTP affinity deleted, cross-protocol retry found IMAP's updated affinity → backend2:24")
+}

@@ -139,7 +139,9 @@ func TestBitwiseToFlags(t *testing.T) {
 		{
 			name:     "all flags",
 			bitwise:  FlagSeen | FlagAnswered | FlagFlagged | FlagDeleted | FlagDraft | FlagRecent,
-			expected: []imap.Flag{imap.FlagSeen, imap.FlagAnswered, imap.FlagFlagged, imap.FlagDeleted, imap.FlagDraft, imap.Flag("\\Recent")},
+			expected: []imap.Flag{imap.FlagSeen, imap.FlagAnswered, imap.FlagFlagged, imap.FlagDeleted, imap.FlagDraft},
+			// Note: \Recent is intentionally excluded even though FlagRecent bit is set
+			// because \Recent is a session flag and must not be served from stored data
 		},
 		{
 			name:     "no flags",
