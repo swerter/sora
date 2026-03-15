@@ -482,24 +482,32 @@ func SetupLMTPServer(t *testing.T) (*TestServer, TestAccount) {
 	// Create minimal S3 storage for LMTP
 	s3Storage := &storage.S3Storage{}
 
-	// Create minimal uploader for LMTP
+	// Use NoopUploaderS3 + EnableSyncUpload so LMTP-delivered messages are
+	// immediately marked uploaded=true in the database (same approach as SetupIMAPServer).
+	// Without this, FETCH queries with AND m.uploaded = true would never find them.
 	tempDir := t.TempDir()
-	uploadWorker, err := uploader.New(
-		context.Background(),
+	errCh := make(chan error, 1)
+	uploadWorker, err := uploader.NewWithS3Interface(
 		tempDir,
-		10,            // batch size
-		2,             // concurrency
-		3,             // max attempts
-		5*time.Second, // retry interval
-		"test-host",
+		10,          // batch size
+		2,           // concurrency
+		3,           // max attempts
+		time.Second, // retry interval
+		"localhost", // instanceID must match lmtp.New hostname arg
 		rdb,
-		s3Storage,
-		nil, // cache
-		make(chan error, 1),
+		&NoopUploaderS3{},
+		&NoopUploaderCache{},
+		errCh,
 	)
 	if err != nil {
 		t.Fatalf("Failed to create upload worker: %v", err)
 	}
+	// NOTE: we do NOT call EnableSyncUpload() or Start() for the LMTP worker.
+	// The LMTP delivery flow creates pending_uploads but the worker is not started
+	// because starting it would introduce background processing that interferes
+	// with pure LMTP tests (e.g., Sieve header editing, plus-addressing assertions).
+	// Tests that need messages marked uploaded=true after LMTP delivery (e.g.,
+	// TestIMAP_LMTPPollRaceCondition) create their own server setups.
 
 	server, err := lmtp.New(
 		context.Background(),

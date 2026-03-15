@@ -44,23 +44,28 @@ func TestLMTP_PlusAddressingWithSharedUploader(t *testing.T) {
 	// Create shared S3 storage (empty for testing)
 	s3Storage := &storage.S3Storage{}
 
-	// Create SHARED uploader that both servers will use
-	sharedUploader, err := uploader.New(
-		context.Background(),
+	// Create SHARED uploader with NoopS3 + EnableSyncUpload so messages are
+	// immediately marked uploaded=true.  FETCH queries filter on m.uploaded = true.
+	sharedUploader, err := uploader.NewWithS3Interface(
 		sharedTempDir,
-		10,            // batch size
-		2,             // concurrency
-		3,             // max attempts
-		5*time.Second, // retry interval
-		"test-shared-host",
+		10,          // batch size
+		2,           // concurrency
+		3,           // max attempts
+		time.Second, // retry interval
+		"localhost", // must match lmtp/imap server hostname
 		rdb,
-		s3Storage,
-		nil, // cache
+		&common.NoopUploaderS3{},
+		&common.NoopUploaderCache{},
 		make(chan error, 1),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create shared uploader: %v", err)
 	}
+	sharedUploader.EnableSyncUpload()
+	if err := sharedUploader.Start(context.Background()); err != nil {
+		t.Fatalf("Failed to start shared uploader: %v", err)
+	}
+	defer sharedUploader.Stop()
 
 	// Setup LMTP server with shared uploader
 	lmtpAddr := common.GetRandomAddress(t)
@@ -311,17 +316,16 @@ fileinto :create "Projects/RFC5490";
 	// Create temp directory and uploader
 	tempDir := t.TempDir()
 	s3Storage := &storage.S3Storage{}
-	uploader, err := uploader.New(
-		context.Background(),
+	uploader, err := uploader.NewWithS3Interface(
 		tempDir,
 		10,
 		2,
 		3,
-		5*time.Second,
-		"test-host",
+		time.Second,
+		"localhost",
 		rdb,
-		s3Storage,
-		nil,
+		&common.NoopUploaderS3{},
+		&common.NoopUploaderCache{},
 		make(chan error, 1),
 	)
 	if err != nil {

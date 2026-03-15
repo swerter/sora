@@ -23,9 +23,10 @@ const (
 	ActionVacation Action = "vacation"
 )
 
-// DefaultSieveExtensions is an alias for the authoritative list of supported Sieve extensions.
+// DefaultSieveExtensions is the safe subset of SIEVE extensions enabled by default.
+// Excludes security-sensitive extensions like editheader.
 // The canonical list is maintained in server/managesieve/capabilities.go
-var DefaultSieveExtensions = managesieve.SupportedExtensions
+var DefaultSieveExtensions = managesieve.DefaultEnabledExtensions
 
 // HeaderEdit represents a header modification from editheader extension
 type HeaderEdit struct {

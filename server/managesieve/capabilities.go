@@ -36,9 +36,38 @@ var SupportedExtensions = []string{
 	"regex",      // draft-murchison-sieve-regex - Regular expression match type
 	"date",       // RFC 5260 - Date and index extensions - date test
 	"index",      // RFC 5260 - Date and index extensions - header indexing
-	"editheader", // RFC 5293 - Editheader extension - add/delete headers
 	"mailbox",    // RFC 5490 - Mailbox existence test
 	"subaddress", // RFC 5233 - Subaddress extension (user+detail@domain)
+
+	// Security-sensitive extensions (available but not enabled by default)
+	"editheader", // RFC 5293 - Editheader extension - add/delete headers
+}
+
+// DefaultEnabledExtensions is the safe subset of extensions enabled by default.
+// Excludes security-sensitive extensions like editheader.
+var DefaultEnabledExtensions = []string{
+	// Core extensions from RFC 5228
+	"fileinto",
+	"envelope",
+	"encoded-character",
+
+	// Comparators
+	"comparator-i;octet",
+	"comparator-i;ascii-casemap",
+	"comparator-i;ascii-numeric",
+	"comparator-i;unicode-casemap",
+
+	// Common extensions
+	"imap4flags",
+	"variables",
+	"relational",
+	"vacation",
+	"copy",
+	"regex",
+	"date",
+	"index",
+	"mailbox",
+	"subaddress",
 }
 
 // ValidateExtensions checks if the provided extensions are supported by go-sieve.

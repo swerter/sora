@@ -85,7 +85,7 @@ keep;
 		t.Fatalf("Failed to create uploader: %v", err)
 	}
 
-	// Setup LMTP server
+	// Setup LMTP server with editheader extension explicitly enabled
 	lmtpAddr := common.GetRandomAddress(t)
 	lmtpSrv, err := lmtpserver.New(
 		context.Background(),
@@ -95,7 +95,10 @@ keep;
 		s3Storage,
 		rdb,
 		uploaderInstance,
-		lmtpserver.LMTPServerOptions{},
+		lmtpserver.LMTPServerOptions{
+			// Explicitly enable editheader for this test, plus extensions used by default.sieve
+			SieveExtensions: []string{"fileinto", "envelope", "mailbox", "subaddress", "variables", "editheader"},
+		},
 	)
 	if err != nil {
 		t.Fatalf("Failed to create LMTP server: %v", err)
