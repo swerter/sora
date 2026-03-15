@@ -502,12 +502,13 @@ func SetupLMTPServer(t *testing.T) (*TestServer, TestAccount) {
 	if err != nil {
 		t.Fatalf("Failed to create upload worker: %v", err)
 	}
-	// NOTE: we do NOT call EnableSyncUpload() or Start() for the LMTP worker.
-	// The LMTP delivery flow creates pending_uploads but the worker is not started
-	// because starting it would introduce background processing that interferes
-	// with pure LMTP tests (e.g., Sieve header editing, plus-addressing assertions).
-	// Tests that need messages marked uploaded=true after LMTP delivery (e.g.,
-	// TestIMAP_LMTPPollRaceCondition) create their own server setups.
+	// Start the upload worker but do NOT enable sync mode.  Background processing
+	// with NoopS3 completes quickly and doesn't interfere with LMTP delivery flow.
+	// Tests that need to FETCH after LMTP delivery can call server.WaitForUploads(t)
+	// to ensure uploads are processed before querying.
+	if err := uploadWorker.Start(context.Background()); err != nil {
+		t.Fatalf("Failed to start LMTP upload worker: %v", err)
+	}
 
 	server, err := lmtp.New(
 		context.Background(),
@@ -546,10 +547,11 @@ func SetupLMTPServer(t *testing.T) (*TestServer, TestAccount) {
 	}
 
 	return &TestServer{
-		Address:     address,
-		Server:      server,
-		cleanup:     cleanup,
-		ResilientDB: rdb,
+		Address:      address,
+		Server:       server,
+		cleanup:      cleanup,
+		ResilientDB:  rdb,
+		uploadWorker: uploadWorker,
 	}, account
 }
 

@@ -154,6 +154,10 @@ func TestIMAP_LMTPPollRaceCondition(t *testing.T) {
 	// Wait a bit for all deliveries to settle
 	time.Sleep(200 * time.Millisecond)
 
+	// Ensure all LMTP-delivered messages are marked uploaded=true before FETCH.
+	// FETCH queries filter on m.uploaded = true for multi-node correctness.
+	lmtpServer.WaitForUploads(t)
+
 	// Final poll to ensure all messages are visible
 	if err := client.Noop().Wait(); err != nil {
 		t.Fatalf("Final NOOP failed: %v", err)

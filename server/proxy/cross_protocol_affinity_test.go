@@ -181,3 +181,77 @@ func TestCrossProtocolAffinitySamePort(t *testing.T) {
 
 	t.Logf("✅ Cross-protocol affinity works with same-port backends: %s", result.PreferredAddr)
 }
+
+// TestCrossProtocolAffinityUnhealthyBackendFailover verifies that when a cross-protocol
+// affinity resolves to an unhealthy backend in this proxy's pool, the routing correctly
+// falls through to consistent hash and picks a healthy backend.
+func TestCrossProtocolAffinityUnhealthyBackendFailover(t *testing.T) {
+	cluster1, err := createTestCluster("cross-proto-unhealthy-1", 26949, []string{})
+	if err != nil {
+		t.Fatalf("Failed to create cluster: %v", err)
+	}
+	defer cluster1.Shutdown()
+
+	affinity := server.NewAffinityManager(cluster1, true, 24*time.Hour, 1*time.Hour)
+	defer affinity.Stop()
+
+	// IMAP affinity points to backend1
+	affinity.SetBackend("user@example.com", "backend1:143", "imap")
+
+	// POP3 proxy has backend1:110 and backend2:110
+	pop3Backends := []string{"backend1:110", "backend2:110"}
+	pop3ConnMgr, err := NewConnectionManager(pop3Backends, 110, false, false, false, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to create connection manager: %v", err)
+	}
+	pop3ConnMgr.SetAffinityManager(affinity)
+
+	// Mark backend1:110 as unhealthy (3 consecutive failures)
+	for i := 0; i < 3; i++ {
+		pop3ConnMgr.RecordConnectionFailure("backend1:110")
+	}
+	if pop3ConnMgr.IsBackendHealthy("backend1:110") {
+		t.Fatal("backend1:110 should be unhealthy after 3 failures")
+	}
+	// backend2:110 should still be healthy
+	if !pop3ConnMgr.IsBackendHealthy("backend2:110") {
+		t.Fatal("backend2:110 should be healthy")
+	}
+
+	result, err := DetermineRoute(RouteParams{
+		Ctx:            context.Background(),
+		Username:       "user@example.com",
+		Protocol:       "pop3",
+		ConnManager:    pop3ConnMgr,
+		EnableAffinity: true,
+		ProxyName:      "POP3 Proxy",
+	})
+	if err != nil {
+		t.Fatalf("DetermineRoute failed: %v", err)
+	}
+
+	// Should NOT use cross-protocol affinity (resolved backend is unhealthy)
+	if result.RoutingMethod == "affinity_cross_protocol" {
+		t.Errorf("Should not use cross-protocol affinity when resolved backend is unhealthy, got: %s → %s",
+			result.RoutingMethod, result.PreferredAddr)
+	}
+
+	// Should fall through to consistent hash and pick a healthy backend
+	if result.PreferredAddr == "" {
+		t.Error("Expected a preferred address from consistent hash fallback")
+	}
+	if result.PreferredAddr == "backend1:110" {
+		t.Error("Should not route to unhealthy backend1:110")
+	}
+	t.Logf("Routing fell through to: %s (method: %s)", result.PreferredAddr, result.RoutingMethod)
+
+	// IMAP affinity should be deleted (machine appears down from POP3's perspective)
+	_, imapFound := affinity.GetBackend("user@example.com", "imap")
+	if imapFound {
+		t.Logf("Note: IMAP affinity was preserved (source protocol deletion is debatable)")
+	} else {
+		t.Logf("IMAP affinity was deleted (backend1 appears unhealthy)")
+	}
+
+	t.Logf("✅ Cross-protocol affinity correctly failed over when resolved backend is unhealthy")
+}

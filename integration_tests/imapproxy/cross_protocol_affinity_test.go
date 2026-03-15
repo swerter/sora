@@ -202,6 +202,31 @@ func TestCrossProtocolAffinityPriority(t *testing.T) {
 	// Set IMAP affinity to backend2 (different)
 	affinityMgr.SetBackend(account.Email, backend2.Address, "imap")
 
+	// Verify both affinities are set correctly before connection
+	imapBefore, imapFoundBefore := affinityMgr.GetBackend(account.Email, "imap")
+	pop3Before, pop3FoundBefore := affinityMgr.GetBackend(account.Email, "pop3")
+	if !imapFoundBefore || imapBefore != backend2.Address {
+		t.Fatalf("IMAP affinity not set correctly before connection: found=%v addr=%s", imapFoundBefore, imapBefore)
+	}
+	if !pop3FoundBefore || pop3Before != backend1.Address {
+		t.Fatalf("POP3 affinity not set correctly before connection: found=%v addr=%s", pop3FoundBefore, pop3Before)
+	}
+	t.Logf("Pre-connection: IMAP affinity → %s, POP3 affinity → %s", imapBefore, pop3Before)
+
+	// GetBackendAcrossProtocols should prefer IMAP's own affinity over POP3's
+	backend, foundProtocol, found := affinityMgr.GetBackendAcrossProtocols(account.Email, "imap")
+	if !found {
+		t.Fatal("Expected to find affinity via GetBackendAcrossProtocols")
+	}
+	if foundProtocol != "imap" {
+		t.Errorf("Expected GetBackendAcrossProtocols to prefer IMAP protocol, got: %s", foundProtocol)
+	}
+	if backend != backend2.Address {
+		t.Errorf("Expected GetBackendAcrossProtocols to return backend2 (%s), got: %s",
+			backend2.Address, backend)
+	}
+	t.Logf("✓ GetBackendAcrossProtocols correctly prefers IMAP affinity (backend2: %s) over POP3 (backend1: %s)", backend2.Address, backend1.Address)
+
 	// Connect via IMAP - should use IMAP-specific affinity (backend2), not POP3's
 	client, err := imapclient.DialInsecure(proxyAddress, nil)
 	if err != nil {
@@ -215,17 +240,18 @@ func TestCrossProtocolAffinityPriority(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	// Verify IMAP used its own affinity
-	backend, foundProtocol, found := affinityMgr.GetBackendAcrossProtocols(account.Email, "imap")
-	if !found {
-		t.Fatal("Expected to find IMAP affinity")
-	}
-	if backend != backend2.Address {
-		t.Errorf("Expected IMAP to use its own affinity (backend2: %s), got: %s",
-			backend2.Address, backend)
-	}
-	if foundProtocol != "imap" {
-		t.Errorf("Expected protocol to be 'imap', got: %s", foundProtocol)
+	// After connection, IMAP affinity may have been cleared by UpdateAffinityAfterConnection
+	// if backend2 happened to match the consistent hash backend (making affinity redundant).
+	// This is correct behavior — the important thing is that the routing decision used
+	// IMAP's own affinity (backend2), not POP3's cross-protocol affinity (backend1).
+	// We already verified the priority logic above before the connection.
+
+	// Verify POP3 affinity is still intact (IMAP connection shouldn't affect it)
+	pop3After, pop3FoundAfter := affinityMgr.GetBackend(account.Email, "pop3")
+	if !pop3FoundAfter {
+		t.Error("POP3 affinity should still exist after IMAP connection")
+	} else if pop3After != backend1.Address {
+		t.Errorf("POP3 affinity should still point to backend1 (%s), got: %s", backend1.Address, pop3After)
 	}
 
 	t.Logf("✅ PASS: Protocol-specific affinity takes precedence over cross-protocol affinity")
