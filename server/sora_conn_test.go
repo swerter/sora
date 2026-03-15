@@ -243,27 +243,29 @@ func TestSoraConnActivityTracking(t *testing.T) {
 	initialActivity := soraConn.lastActivity
 	soraConn.mu.RUnlock()
 
-	// Wait a bit
-	time.Sleep(50 * time.Millisecond)
+	// Sleep to ensure a measurable time gap between initial timestamp and the write
+	time.Sleep(10 * time.Millisecond)
 
-	// Perform a write and read to ensure activity is tracked
-	go func() {
-		soraConn.Write([]byte("test"))
-	}()
+	// Write synchronously (TCP won't block for small payloads)
+	_, err = soraConn.Write([]byte("test"))
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
 
+	// Drain the client side
 	buf := make([]byte, 100)
 	_, err = clientConn.Read(buf)
 	if err != nil {
 		t.Fatalf("Client read failed: %v", err)
 	}
 
-	// Check that activity was updated
+	// Check that activity was updated after the write
 	soraConn.mu.RLock()
 	newActivity := soraConn.lastActivity
 	soraConn.mu.RUnlock()
 
 	if !newActivity.After(initialActivity) {
-		t.Error("Activity timestamp was not updated after write")
+		t.Errorf("Activity timestamp was not updated after write: initial=%v new=%v", initialActivity, newActivity)
 	}
 
 	t.Log("✓ Activity tracking works correctly")
