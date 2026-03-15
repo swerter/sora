@@ -75,6 +75,32 @@ type UploadWorker struct {
 	wg                 sync.WaitGroup
 	mu                 sync.Mutex
 	running            bool
+	// syncUpload enables synchronous upload mode for tests.  When true,
+	// NotifyUploadQueued processes the queue in the caller's goroutine
+	// instead of waking the background worker.  See EnableSyncUpload.
+	syncUpload syncBool
+}
+
+// syncBool is a goroutine-safe boolean flag backed by a sync.Mutex.
+// We avoid sync/atomic.Bool to prevent a formatter-induced import cycle:
+// the goimports tool would silently drop "sync/atomic" if the build tag
+// evaluation order is not what we expect.  A mutex-based flag is simpler
+// and correct for this low-frequency use case.
+type syncBool struct {
+	mu  sync.Mutex
+	val bool
+}
+
+func (b *syncBool) Store(v bool) {
+	b.mu.Lock()
+	b.val = v
+	b.mu.Unlock()
+}
+
+func (b *syncBool) Load() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.val
 }
 
 func New(ctx context.Context, path string, batchSize int, concurrency int, maxAttempts int, retryInterval time.Duration, instanceID string, rdb *resilient.ResilientDatabase, s3 *storage.S3Storage, cache *cache.Cache, errCh chan<- error) (*UploadWorker, error) {
@@ -85,13 +111,34 @@ func New(ctx context.Context, path string, batchSize int, concurrency int, maxAt
 	}
 	// Wrap S3 storage with resilient patterns including circuit breakers
 	resilientS3 := resilient.NewResilientS3Storage(s3)
+	// Convert typed-nil *cache.Cache to a proper nil UploaderCache interface.
+	// Without this, w.cache != nil is true for a (*cache.Cache)(nil) value,
+	// causing a panic when MoveIn is called on the nil receiver.
+	var uploaderCache UploaderCache
+	if cache != nil {
+		uploaderCache = cache
+	}
+	return newWithS3Interface(path, batchSize, concurrency, maxAttempts, retryInterval, instanceID, rdb, resilientS3, uploaderCache, errCh)
+}
 
+// NewWithS3Interface creates an UploadWorker with custom UploaderS3 and UploaderCache
+// implementations.  This is intended for test environments where a no-op S3 and/or
+// a no-op cache are needed.  The caller is responsible for any wrapping it requires.
+func NewWithS3Interface(path string, batchSize int, concurrency int, maxAttempts int, retryInterval time.Duration, instanceID string, rdb *resilient.ResilientDatabase, s3 UploaderS3, uploaderCache UploaderCache, errCh chan<- error) (*UploadWorker, error) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create local path %s: %w", path, err)
+		}
+	}
+	return newWithS3Interface(path, batchSize, concurrency, maxAttempts, retryInterval, instanceID, rdb, s3, uploaderCache, errCh)
+}
+
+func newWithS3Interface(path string, batchSize int, concurrency int, maxAttempts int, retryInterval time.Duration, instanceID string, rdb *resilient.ResilientDatabase, s3 UploaderS3, uploaderCache UploaderCache, errCh chan<- error) (*UploadWorker, error) {
 	notifyCh := make(chan struct{}, 1)
-
 	return &UploadWorker{
 		rdb:           rdb,
-		s3:            resilientS3,
-		cache:         cache,
+		s3:            s3,
+		cache:         uploaderCache,
 		errCh:         errCh,
 		path:          path,
 		batchSize:     batchSize,
@@ -200,12 +247,38 @@ func (w *UploadWorker) SetCleanupGracePeriod(d time.Duration) {
 	w.cleanupGracePeriod = d
 }
 
+// EnableSyncUpload puts the worker into synchronous-upload mode.
+// In this mode NotifyUploadQueued processes the pending-upload queue in the
+// caller's goroutine before returning, so that by the time the caller
+// (e.g. the IMAP APPEND handler) hands back the response, messages are
+// already marked uploaded=true in the database.
+//
+// This is intended for test environments that use a no-op or instant S3
+// implementation.  It must not be used in production.
+func (w *UploadWorker) EnableSyncUpload() {
+	w.syncUpload.Store(true)
+}
+
 func (w *UploadWorker) NotifyUploadQueued() {
+	if w.syncUpload.Load() {
+		// Synchronous mode (tests): process the queue inline so the caller
+		// can safely FETCH the message immediately after APPEND.
+		_ = w.processQueue(context.Background())
+		return
+	}
 	select {
 	case w.notifyCh <- struct{}{}:
 	default:
 		// Don't block if notifyCh already has a signal
 	}
+}
+
+// DrainSync synchronously processes all currently pending uploads in the caller's
+// goroutine and blocks until they are done.  It is intended for use in tests that
+// need uploads to complete (and messages to be marked uploaded=true in the DB)
+// before issuing a FETCH command.  It must not be called in production code paths.
+func (w *UploadWorker) DrainSync(ctx context.Context) error {
+	return w.processQueue(ctx)
 }
 
 func (w *UploadWorker) processQueue(ctx context.Context) error {
@@ -436,15 +509,22 @@ func (w *UploadWorker) processSingleUpload(ctx context.Context, upload db.Pendin
 		return
 	}
 
-	// Move the uploaded file to the global cache. If the move fails (e.g., file
-	// already in cache from another user's upload), delete the local file.
-	if err := w.cache.MoveIn(filePath, upload.ContentHash); err != nil {
-		logger.Error("Uploader: Failed to move uploaded hash to cache - deleting local file", "hash", upload.ContentHash, "error", err)
+	// Move the uploaded file to the global cache (if a cache is configured).
+	// If the move fails, or no cache is present, delete the local file.
+	if w.cache != nil {
+		if err := w.cache.MoveIn(filePath, upload.ContentHash); err != nil {
+			logger.Error("Uploader: Failed to move uploaded hash to cache - deleting local file", "hash", upload.ContentHash, "error", err)
+			if removeErr := w.RemoveLocalFile(filePath); removeErr != nil {
+				// Log is inside RemoveLocalFile
+			}
+		} else {
+			logger.Info("Uploader: Moved hash to cache after upload", "hash", upload.ContentHash)
+		}
+	} else {
+		// No cache configured — remove the local file after successful DB update.
 		if removeErr := w.RemoveLocalFile(filePath); removeErr != nil {
 			// Log is inside RemoveLocalFile
 		}
-	} else {
-		logger.Info("Uploader: Moved hash to cache after upload", "hash", upload.ContentHash)
 	}
 
 	// Track successful upload

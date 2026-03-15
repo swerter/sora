@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -26,11 +27,57 @@ import (
 	"github.com/migadu/sora/storage"
 )
 
+// NoopUploaderS3 is a no-op S3 implementation used in integration tests.
+// PutWithRetry always succeeds (returns nil), allowing the upload worker to
+// immediately mark messages as uploaded=true in the database.  This is
+// required because all FETCH query paths now filter to m.uploaded = true for
+// multi-node correctness — without a working upload path, freshly-APPENDed
+// messages would never appear in FETCH responses.
+type NoopUploaderS3 struct{}
+
+func (n *NoopUploaderS3) PutWithRetry(_ context.Context, _ string, r io.Reader, _ int64) error {
+	// Drain the reader so the caller does not block on a full pipe.
+	_, _ = io.Copy(io.Discard, r)
+	return nil
+}
+
+func (n *NoopUploaderS3) ExistsWithRetry(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+
+// NoopUploaderCache is a no-op cache used in integration tests.
+// MoveIn deliberately does nothing, which leaves the local file on disk.
+// This is required so that after the no-op S3 upload the IMAP server can
+// still serve the message body via the local-disk fallback in getMessageBody.
+type NoopUploaderCache struct{}
+
+func (c *NoopUploaderCache) MoveIn(_, _ string) error { return nil }
+
 type TestServer struct {
-	Address     string
-	Server      any
-	cleanup     func()
-	ResilientDB *resilient.ResilientDatabase
+	Address      string
+	Server       any
+	cleanup      func()
+	ResilientDB  *resilient.ResilientDatabase
+	uploadWorker *uploader.UploadWorker // exposed for WaitForUploads
+}
+
+// WaitForUploads blocks until all pending uploads for this test server have
+// been processed and messages are marked uploaded=true in the database.
+// Call this between an APPEND and a subsequent FETCH in tests to ensure the
+// FETCH query (which filters on m.uploaded = true) can see the new message.
+func (ts *TestServer) WaitForUploads(t interface {
+	Helper()
+	Fatalf(string, ...any)
+}) {
+	t.Helper()
+	if ts.uploadWorker == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ts.uploadWorker.DrainSync(ctx); err != nil {
+		t.Fatalf("WaitForUploads: DrainSync failed: %v", err)
+	}
 }
 
 type TestAccount struct {
@@ -194,22 +241,40 @@ func SetupIMAPServer(t *testing.T) (*TestServer, TestAccount) {
 	// Create error channel for uploader
 	errCh := make(chan error, 1)
 
-	// Create UploadWorker for testing
-	uploadWorker, err := uploader.New(
-		context.Background(),
-		tempDir,              // path
-		10,                   // batchSize
-		1,                    // concurrency
-		3,                    // maxAttempts
-		time.Second,          // retryInterval
-		"test-instance",      // instanceID
-		rdb,                  // database
-		&storage.S3Storage{}, // S3 storage
-		nil,                  // cache (can be nil)
+	// Use NewWithS3Interface + NoopUploaderS3 so the upload worker can complete
+	// uploads immediately (no real S3 needed).  This is required because all FETCH
+	// query paths filter on m.uploaded = true; without a working upload path,
+	// freshly-APPENDed messages would be invisible to FETCH.
+	//
+	// IMPORTANT: instanceID must match the IMAP server's hostname ("localhost")
+	// because pending_uploads.instance_id is set to the server's hostname, and
+	// AcquireAndLeasePendingUploads queries WHERE instance_id = $1.
+	uploadWorker, err := uploader.NewWithS3Interface(
+		tempDir,     // path
+		10,          // batchSize
+		1,           // concurrency
+		3,           // maxAttempts
+		time.Second, // retryInterval
+		"localhost", // instanceID — must match imap.New hostname arg
+		rdb,         // database
+		&NoopUploaderS3{},
+		&NoopUploaderCache{}, // keeps local file on disk so getMessageBody can fall back to disk when S3 unavailable
 		errCh,                // error channel
 	)
 	if err != nil {
 		t.Fatalf("Failed to create upload worker: %v", err)
+	}
+
+	// Enable synchronous-upload mode: NotifyUploadQueued will process the
+	// pending-upload queue in the caller's goroutine before returning.
+	// This guarantees that messages are marked uploaded=true in the database
+	// before the APPEND response is delivered to the client, allowing tests to
+	// FETCH immediately after APPEND without a race condition.
+	uploadWorker.EnableSyncUpload()
+
+	// Start the upload worker so it processes queued uploads.
+	if err := uploadWorker.Start(context.Background()); err != nil {
+		t.Fatalf("Failed to start upload worker: %v", err)
 	}
 
 	// Create test config with shared mailboxes enabled
@@ -230,8 +295,8 @@ func SetupIMAPServer(t *testing.T) (*TestServer, TestAccount) {
 		address,
 		&storage.S3Storage{},
 		rdb,
-		uploadWorker, // properly initialized UploadWorker
-		nil,          // cache.Cache
+		uploadWorker,
+		nil, // cache.Cache
 		imap.IMAPServerOptions{
 			InsecureAuth: true, // Allow PLAIN auth (no TLS in tests)
 			Config:       testConfig,
@@ -253,6 +318,7 @@ func SetupIMAPServer(t *testing.T) (*TestServer, TestAccount) {
 
 	cleanup := func() {
 		server.Close()
+		uploadWorker.Stop()
 		select {
 		case err := <-errChan:
 			if err != nil {
@@ -266,10 +332,11 @@ func SetupIMAPServer(t *testing.T) (*TestServer, TestAccount) {
 	}
 
 	return &TestServer{
-		Address:     address,
-		Server:      server,
-		cleanup:     cleanup,
-		ResilientDB: rdb,
+		Address:      address,
+		Server:       server,
+		cleanup:      cleanup,
+		ResilientDB:  rdb,
+		uploadWorker: uploadWorker,
 	}, account
 }
 

@@ -216,12 +216,28 @@ func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 func (s *IMAPSession) writeMessageFetchData(w *imapserver.FetchWriter, msg *db.Message, options *imap.FetchOptions, selectedMailboxID int64, sessionTracker *imapserver.SessionTracker) error {
 	s.DebugLog("fetching message", "uid", msg.UID, "seq", msg.Seq)
 
-	// Use the sequence number directly from the database.
-	// The message_sequences table is maintained by triggers and reflects the current state.
-	// We don't use EncodeSeqNum here because:
-	// 1. The database immediately renumbers sequences when messages are expunged (via triggers)
-	// 2. EncodeSeqNum is designed for in-memory servers that track deltas from an initial state
-	// 3. Using EncodeSeqNum on database sequence numbers causes off-by-one errors
+	// ARCHITECTURE DECISION: Use database sequence numbers directly, not sessionTracker.EncodeSeqNum().
+	//
+	// The message_sequences table is the source of truth for sequence numbers.  Database
+	// triggers renumber sequences atomically when messages are expunged, so the sequence
+	// numbers in FETCH responses always reflect the canonical mailbox state.
+	//
+	// Why NOT EncodeSeqNum:
+	//   1. EncodeSeqNum is designed for in-memory servers that track deltas from a snapshot.
+	//      Our server uses PostgreSQL as the authority — applying EncodeSeqNum on top of
+	//      database-renumbered sequences causes off-by-one errors.
+	//   2. The go-imap MailboxTracker/SessionTracker pair translates from an initial snapshot
+	//      through in-flight expunges.  Our database triggers perform this renumbering
+	//      directly, making the tracker layer redundant for sequence number translation.
+	//
+	// Trade-off: if a concurrent EXPUNGE renumbers sequences between the DB query and the
+	// response write, the seqnums in THIS response may not match the client's pre-expunge
+	// view.  The Poll mechanism detects desyncs and forces a reconnection (BYE) in extreme
+	// cases.  In practice this race is rare because expunge notifications are delivered to
+	// clients before subsequent FETCH responses via the go-imap write goroutine's poll cycle.
+	//
+	// This design is validated by TestIMAP_SequenceNumberConsistency_* in
+	// integration_tests/imap/sequence_number_consistency_test.go.
 	seqNum := msg.Seq
 
 	if seqNum == 0 {
@@ -588,18 +604,18 @@ func (s *IMAPSession) handleBodySections(w *imapserver.FetchResponseWriter, body
 
 func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 	if msg.IsUploaded {
-		// Try cache first
-		data, err := s.server.cache.Get(msg.ContentHash)
-		if err == nil && data != nil {
-			s.DebugLog("cache hit", "uid", msg.UID)
-			// Track memory usage for cached data
-			if s.memTracker != nil {
-				if allocErr := s.memTracker.Allocate(int64(len(data))); allocErr != nil {
-					metrics.SessionMemoryLimitExceeded.WithLabelValues("imap", s.server.name, s.server.hostname).Inc()
-					return nil, fmt.Errorf("session memory limit exceeded: %v", allocErr)
+		// Try cache first (nil-safe: cache is optional and not configured in tests).
+		if s.server.cache != nil {
+			if cacheData, cacheErr := s.server.cache.Get(msg.ContentHash); cacheErr == nil && cacheData != nil {
+				s.DebugLog("cache hit", "uid", msg.UID)
+				if s.memTracker != nil {
+					if allocErr := s.memTracker.Allocate(int64(len(cacheData))); allocErr != nil {
+						metrics.SessionMemoryLimitExceeded.WithLabelValues("imap", s.server.name, s.server.hostname).Inc()
+						return nil, fmt.Errorf("session memory limit exceeded: %v", allocErr)
+					}
 				}
+				return cacheData, nil
 			}
-			return data, nil
 		}
 
 		// Fallback to S3
@@ -611,13 +627,35 @@ func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 		}
 		s3Key := helpers.NewS3Key(msg.S3Domain, msg.S3Localpart, msg.ContentHash)
 
-		reader, err := s.server.s3.GetWithRetry(s.server.appCtx, s3Key)
-		if err != nil {
-			s.DebugLog("S3 GetWithRetry failed", "uid", msg.UID, "s3_key", s3Key, "error", err)
-			return nil, fmt.Errorf("failed to retrieve message UID %d from S3: %v", msg.UID, err)
+		// s3GetWithRetryPanic wraps GetWithRetry so that a nil-client panic
+		// (e.g. in test environments using &storage.S3Storage{}) is converted
+		// to an error rather than propagating and killing the connection goroutine.
+		var reader io.ReadCloser
+		var s3GetErr error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s3GetErr = fmt.Errorf("S3 get panicked: %v", r)
+				}
+			}()
+			reader, s3GetErr = s.server.s3.GetWithRetry(s.server.appCtx, s3Key)
+		}()
+		if s3GetErr != nil {
+			s.DebugLog("S3 GetWithRetry failed", "uid", msg.UID, "s3_key", s3Key, "error", s3GetErr)
+			// S3 is unavailable — fall back to the local disk file if the uploader
+			// still has it.  This covers test environments (where S3 is a no-op stub)
+			// and transient S3 outages where the upload worker has not yet run.
+			if s.server.uploader != nil {
+				filePath := s.server.uploader.FilePath(msg.ContentHash, msg.AccountID)
+				if diskData, diskErr := os.ReadFile(filePath); diskErr == nil {
+					s.DebugLog("S3 unavailable, served from local disk", "uid", msg.UID)
+					return diskData, nil
+				}
+			}
+			return nil, fmt.Errorf("failed to retrieve message UID %d from S3: %v", msg.UID, s3GetErr)
 		}
 		defer reader.Close()
-		data, err = io.ReadAll(reader)
+		data, err := io.ReadAll(reader)
 		if err != nil {
 			s.DebugLog("failed to read S3 response", "uid", msg.UID, "error", err)
 			return nil, err
@@ -626,7 +664,6 @@ func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 		// Validate we got data
 		if len(data) == 0 {
 			s.WarnLog("S3 returned empty data", "uid", msg.UID, "s3_key", s3Key, "expected_size", msg.Size)
-			// Return error instead of empty data to make the problem visible
 			return nil, fmt.Errorf("S3 returned empty data for message UID %d (expected %d bytes)", msg.UID, msg.Size)
 		}
 
@@ -640,7 +677,10 @@ func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 			}
 		}
 
-		_ = s.server.cache.Put(msg.ContentHash, data)
+		// Store in cache if available (nil-safe).
+		if s.server.cache != nil {
+			_ = s.server.cache.Put(msg.ContentHash, data)
+		}
 		return data, nil
 	}
 

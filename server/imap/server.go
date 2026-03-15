@@ -291,6 +291,7 @@ type IMAPServer struct {
 	warmupWg            sync.WaitGroup // Tracks active warmup workers for graceful shutdown
 	warmupStopOnce      sync.Once      // Ensures warmup channel is closed only once
 	lastWarmupTimes     sync.Map       // map[int64]time.Time - tracks last warmup time per user
+	mailboxRecentUIDs   sync.Map       // map[int64]imap.UID - tracks the highest UID at last read-write SELECT per mailbox (server-wide, not per-session). Used to compute NumRecent across sessions per RFC 3501 §2.3.2. In-memory only: resets on restart.
 
 	// Client capability filtering
 	capFilters []ClientCapabilityFilter

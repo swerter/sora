@@ -176,12 +176,20 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		recipients = helpers.ExtractRecipients(messageContent.Header)
 	}
 
+	// RFC 3501 §6.3.11: when the APPEND command supplies an explicit date-time,
+	// that value MUST be used as INTERNALDATE regardless of the message's own
+	// Date: header.  The Date: header value is kept separately as SentDate.
+	internalDate := options.Time // APPEND command date-time (may be zero)
+	if internalDate.IsZero() {
+		internalDate = sentDate // fall back to message's Date: header
+	}
+	if internalDate.IsZero() {
+		internalDate = time.Now() // last-resort: current time
+	}
+	// sentDate is kept as-is (from the message's Date: header) for SentDate.
+	// If the message had no Date: header at all, align SentDate with internalDate.
 	if sentDate.IsZero() {
-		if !options.Time.IsZero() {
-			sentDate = options.Time
-		} else {
-			sentDate = time.Now()
-		}
+		sentDate = internalDate
 	}
 
 	// Extract body structure with panic recovery for malformed messages
@@ -221,10 +229,11 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	// This prevents protocol errors like "Keyword used without being in FLAGS: NIL"
 	sanitizedFlags := helpers.SanitizeFlags(options.Flags)
 
-	// Add \Recent flag to newly appended messages
-	appendFlags := make([]imap.Flag, len(sanitizedFlags))
-	copy(appendFlags, sanitizedFlags)
-	appendFlags = append(appendFlags, imap.Flag("\\Recent"))
+	// RFC 3501 §2.3.2: \Recent is a session flag — it must NOT be stored
+	// permanently.  It is tracked per-session via lastHighestUID / NumRecent in
+	// SELECT.  Storing it in the database bitfield causes every future FETCH
+	// FLAGS response to show \Recent, which is a protocol violation.
+	appendFlags := sanitizedFlags
 
 	_, messageUID, err := s.server.rdb.InsertMessageWithRetry(s.ctx,
 		&db.InsertMessageOptions{
@@ -236,7 +245,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 			ContentHash:        contentHash,
 			MessageID:          messageID,
 			Flags:              appendFlags,
-			InternalDate:       sentDate, // Best we can is set to message's sent date
+			InternalDate:       internalDate, // RFC 3501 §6.3.11: APPEND date-time takes precedence
 			Size:               size,
 			Subject:            subject,
 			PlaintextBody:      actualPlaintextBody,
@@ -294,6 +303,13 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		}, nil
 	}
 
+	// Notify the uploader BEFORE acquiring the session write lock.
+	// NotifyUploadQueued can block in synchronous-upload test mode (EnableSyncUpload),
+	// and the poll goroutine must be able to acquire the write lock during that time.
+	// If we notified inside the lock, the poll goroutine would time out waiting,
+	// return a server-bug error, and the go-imap library would close the connection.
+	s.server.uploader.NotifyUploadQueued()
+
 	// Update the session's message count and notify the tracker if needed
 	acquired, release := s.mutexHelper.AcquireWriteLockWithTimeout()
 	if !acquired {
@@ -333,8 +349,6 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	// go-imap write goroutine polls after each command response).
 
 	metrics.MessageThroughput.WithLabelValues("imap", "appended", "success").Inc()
-
-	s.server.uploader.NotifyUploadQueued()
 
 	// Track domain and user command activity - APPEND is storage intensive!
 	if s.IMAPUser != nil {

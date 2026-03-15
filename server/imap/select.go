@@ -125,9 +125,30 @@ func (s *IMAPSession) Select(mboxName string, options *imap.SelectOptions) (*ima
 			numRecent = count
 		}
 	} else {
-		// Different mailbox than the last one selected, or this is the first select in the session.
-		// All messages are considered recent.
-		numRecent = uint32(currentSummary.NumMessages)
+		// Different mailbox or first select in this session.
+		// RFC 3501 §2.3.2: \Recent messages are those that arrived since the last
+		// time any read-write session selected this mailbox.
+		//
+		// We use a server-wide map (mailboxRecentUIDs) that records the highest UID
+		// at the time of the last read-write SELECT by ANY session on this server.
+		// This is an improvement over the previous per-session-only approach (which
+		// reported ALL messages as recent for any new session) and is correct for
+		// single-node deployments.  The state is in-memory and resets on restart;
+		// true cross-node \Recent tracking would require a persistent store.
+		if lastSeenRaw, ok := s.server.mailboxRecentUIDs.Load(mailbox.ID); ok {
+			lastSeenUID := lastSeenRaw.(imap.UID)
+			count, dbErr := s.server.rdb.CountMessagesGreaterThanUIDWithRetry(readCtx, mailbox.ID, lastSeenUID)
+			if dbErr != nil {
+				s.DebugLog("error counting recent messages from server-wide UID, defaulting to total", "uid", lastSeenUID, "mailbox_id", mailbox.ID, "error", dbErr)
+				numRecent = uint32(currentSummary.NumMessages)
+			} else {
+				numRecent = count
+			}
+		} else {
+			// No previous read-write SELECT on any session for this mailbox (since
+			// server start).  All messages are considered recent.
+			numRecent = uint32(currentSummary.NumMessages)
+		}
 	}
 
 	// Acquire the lock once after all DB operations to update session state
@@ -156,6 +177,14 @@ func (s *IMAPSession) Select(mboxName string, options *imap.SelectOptions) (*ima
 	} else {
 		// This case implies the mailbox is empty or UIDs start at 1 and UIDNext is 1.
 		s.lastHighestUID = 0
+	}
+
+	// Update the server-wide recent-UID tracker for this mailbox.
+	// Only update on read-write SELECT — EXAMINE (read-only) must not clear \Recent
+	// for subsequent sessions (RFC 3501 §6.3.2).
+	isReadOnly := options != nil && options.ReadOnly
+	if !isReadOnly && s.lastHighestUID > 0 {
+		s.server.mailboxRecentUIDs.Store(mailbox.ID, s.lastHighestUID)
 	}
 
 	s.currentNumMessages.Store(uint32(currentSummary.NumMessages))

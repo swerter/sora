@@ -84,7 +84,9 @@ func (db *Database) CopyMessages(ctx context.Context, tx pgx.Tx, uids *[]imap.UI
 		return nil, fmt.Errorf("failed to get destination mailbox name: %w", err)
 	}
 
-	// Batch insert the copied messages
+	// Batch insert the copied messages.
+	// RFC 3501 §2.3.2: \Recent is a session flag and must NOT be stored
+	// persistently.  Preserve only the source message's existing flags.
 	_, err = tx.Exec(ctx, `
 		INSERT INTO messages (
 			account_id, content_hash, uploaded, message_id, in_reply_to, 
@@ -95,7 +97,7 @@ func (db *Database) CopyMessages(ctx context.Context, tx pgx.Tx, uids *[]imap.UI
 		)
 		SELECT 
 			m.account_id, m.content_hash, m.uploaded, m.message_id, m.in_reply_to,
-			m.subject, m.sent_date, m.internal_date, m.flags | $5, m.custom_flags, m.size,
+			m.subject, m.sent_date, m.internal_date, m.flags, m.custom_flags, m.size,
 			m.body_structure, m.recipients_json, m.s3_domain, m.s3_localpart,
 			m.subject_sort, m.from_name_sort, m.from_email_sort, m.to_name_sort, m.to_email_sort, m.cc_email_sort,
 			$1 AS mailbox_id,
@@ -105,7 +107,7 @@ func (db *Database) CopyMessages(ctx context.Context, tx pgx.Tx, uids *[]imap.UI
 			d.new_uid
 		FROM messages m
 		JOIN unnest($3::bigint[], $4::bigint[]) AS d(message_id, new_uid) ON m.id = d.message_id
-	`, destMailboxID, destMailboxName, messageIDs, newUIDs, FlagRecent)
+	`, destMailboxID, destMailboxName, messageIDs, newUIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to batch copy messages: %w", err)
 	}

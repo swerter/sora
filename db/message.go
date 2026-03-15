@@ -111,9 +111,10 @@ func BitwiseToFlags(bitwiseFlags int) []imap.Flag {
 	if bitwiseFlags&FlagDraft != 0 {
 		flags = append(flags, imap.FlagDraft)
 	}
-	if bitwiseFlags&FlagRecent != 0 {
-		flags = append(flags, imap.Flag("\\Recent"))
-	}
+	// \Recent is a session flag (RFC 3501 §2.3.2) and must NOT be served from
+	// stored data.  Existing messages may still have the FlagRecent bit (32) set
+	// from before the fix that stopped writing it.  We intentionally skip it
+	// here so FETCH FLAGS never returns a stale \Recent from the database.
 
 	return flags
 }
@@ -142,7 +143,10 @@ func (db *Database) getMessagesByUIDSet(ctx context.Context, mailboxID int64, ui
 	var messages []Message
 
 	for _, uidRange := range uidSet {
-		// Base query is the same for all cases
+		// Filter to uploaded messages only.  A message that is not yet uploaded to S3
+		// has its body on local disk only — on any other node its body is inaccessible
+		// and FETCH would return a misleading empty literal.  Only serving uploaded
+		// messages ensures consistent, correct behaviour across all nodes.
 		baseQuery := `
 			SELECT
 				m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
@@ -150,7 +154,7 @@ func (db *Database) getMessagesByUIDSet(ctx context.Context, mailboxID int64, ui
 				m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
 			FROM messages m
 			JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
-			WHERE m.mailbox_id = $1 AND m.uid >= $2
+			WHERE m.mailbox_id = $1 AND m.uid >= $2 AND m.uploaded = true
 		`
 
 		var rows pgx.Rows
@@ -195,6 +199,7 @@ func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, se
 	for _, seqRange := range seqSet {
 		stopSeq := seqRange.Stop
 
+		// Filter to uploaded messages only (see getMessagesByUIDSet for the rationale).
 		query := `			
 			SELECT 
 				m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
@@ -204,6 +209,7 @@ func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, se
 			JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
 			WHERE m.mailbox_id = $1
 			  AND ms.seqnum >= $2 AND ms.seqnum <= $3
+			  AND m.uploaded = true
 			ORDER BY ms.seqnum
 		`
 
@@ -224,6 +230,9 @@ func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, se
 }
 
 func (db *Database) fetchAllActiveMessagesRaw(ctx context.Context, mailboxID int64) ([]Message, error) {
+	// Filter to uploaded messages only (same as getMessagesBySeqSet / getMessagesByUIDSet).
+	// This path handles the rare edge-case SeqSet "1:*" where the wildcard was not
+	// resolved (session count == 0).  See getMessagesByUIDSet for the full rationale.
 	query := `
 		SELECT 
 			m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
