@@ -105,6 +105,8 @@ func TestDeduplication(t *testing.T) {
 		}
 
 		// Verify only 1 message exists
+		// Mark all messages as uploaded for test visibility (FETCH queries filter on uploaded=true)
+		rdb.GetDatabase().GetWritePool().Exec(ctx, "UPDATE messages SET uploaded = true WHERE mailbox_id = $1", mailboxID)
 		messages, err := rdb.GetMessagesByNumSetWithRetry(ctx, mailboxID, imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}})
 		if err != nil {
 			t.Fatalf("Failed to fetch messages: %v", err)
@@ -202,6 +204,8 @@ func TestDeduplication(t *testing.T) {
 		}
 
 		// Verify only 1 message exists
+		// Mark all messages as uploaded for test visibility (FETCH queries filter on uploaded=true)
+		rdb.GetDatabase().GetWritePool().Exec(ctx, "UPDATE messages SET uploaded = true WHERE mailbox_id = $1", mailboxID)
 		messages, err := rdb.GetMessagesByNumSetWithRetry(ctx, mailboxID, imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}})
 		if err != nil {
 			t.Fatalf("Failed to fetch messages: %v", err)
@@ -294,10 +298,12 @@ func TestDeduplication(t *testing.T) {
 		}
 
 		// Verify both mailboxes have 1 message each
+		rdb.GetDatabase().GetWritePool().Exec(ctx, "UPDATE messages SET uploaded = true WHERE mailbox_id = $1", mailbox1.ID)
 		messages1, err := rdb.GetMessagesByNumSetWithRetry(ctx, mailbox1.ID, imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}})
 		if err != nil {
 			t.Fatalf("Failed to fetch messages from mailbox1: %v", err)
 		}
+		rdb.GetDatabase().GetWritePool().Exec(ctx, "UPDATE messages SET uploaded = true WHERE mailbox_id = $1", mailbox2.ID)
 		messages2, err := rdb.GetMessagesByNumSetWithRetry(ctx, mailbox2.ID, imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}})
 		if err != nil {
 			t.Fatalf("Failed to fetch messages from mailbox2: %v", err)
@@ -398,6 +404,8 @@ func TestDeduplication(t *testing.T) {
 		}
 
 		// Verify only 1 message exists
+		// Mark all messages as uploaded for test visibility (FETCH queries filter on uploaded=true)
+		rdb.GetDatabase().GetWritePool().Exec(ctx, "UPDATE messages SET uploaded = true WHERE mailbox_id = $1", mailboxID)
 		messages, err := rdb.GetMessagesByNumSetWithRetry(ctx, mailboxID, imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}})
 		if err != nil {
 			t.Fatalf("Failed to fetch messages: %v", err)

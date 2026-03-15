@@ -57,17 +57,16 @@ fileinto "Test"
 	s3Storage := &storage.S3Storage{}
 
 	// Create shared uploader
-	sharedUploader, err := uploader.New(
-		context.Background(),
+	sharedUploader, err := uploader.NewWithS3Interface(
 		sharedTempDir,
 		10,
 		2,
 		3,
-		5*time.Second,
-		"test-shared-host",
+		time.Second,
+		"localhost",
 		rdb,
-		s3Storage,
-		nil,
+		&common.NoopUploaderS3{},
+		&common.NoopUploaderCache{},
 		make(chan error, 1),
 	)
 	if err != nil {

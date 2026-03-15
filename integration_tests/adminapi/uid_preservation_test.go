@@ -86,6 +86,7 @@ func TestUIDPreservation(t *testing.T) {
 
 		// Verify all messages were inserted correctly
 		uidSet := imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}}
+		rdb.GetDatabase().GetWritePool().Exec(ctx, "UPDATE messages SET uploaded = true WHERE mailbox_id = $1", inbox.ID)
 		messages, err := rdb.GetMessagesByNumSetWithRetry(ctx, inbox.ID, uidSet)
 		if err != nil {
 			t.Fatalf("Failed to fetch messages: %v", err)
@@ -157,6 +158,7 @@ func TestUIDPreservation(t *testing.T) {
 
 		// Verify all messages exist with correct UIDs
 		uidSet := imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}}
+		rdb.GetDatabase().GetWritePool().Exec(ctx, "UPDATE messages SET uploaded = true WHERE mailbox_id = $1", mailboxID)
 		messages, err := rdb.GetMessagesByNumSetWithRetry(ctx, mailboxID, uidSet)
 		if err != nil {
 			t.Fatalf("Failed to fetch messages: %v", err)
@@ -358,6 +360,7 @@ func TestUIDPreservation(t *testing.T) {
 
 		// Verify only 2 messages exist (no duplicates)
 		uidSet := imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}}
+		rdb.GetDatabase().GetWritePool().Exec(ctx, "UPDATE messages SET uploaded = true WHERE mailbox_id = $1", mailboxID)
 		messages, err := rdb.GetMessagesByNumSetWithRetry(ctx, mailboxID, uidSet)
 		if err != nil {
 			t.Fatalf("Failed to fetch messages: %v", err)
@@ -566,6 +569,7 @@ func TestUIDPreservation(t *testing.T) {
 
 		// Verify first batch imported successfully
 		uidSet := imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}}
+		rdb.GetDatabase().GetWritePool().Exec(ctx, "UPDATE messages SET uploaded = true WHERE mailbox_id = $1", mailboxID)
 		messages, err := rdb.GetMessagesByNumSetWithRetry(ctx, mailboxID, uidSet)
 		if err != nil {
 			t.Fatalf("Failed to fetch messages: %v", err)
@@ -637,6 +641,7 @@ func TestUIDPreservation(t *testing.T) {
 		}
 
 		// Verify we now have 4 messages total
+		rdb.GetDatabase().GetWritePool().Exec(ctx, "UPDATE messages SET uploaded = true WHERE mailbox_id = $1", mailboxID)
 		allMessages, err := rdb.GetMessagesByNumSetWithRetry(ctx, mailboxID, imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}})
 		if err != nil {
 			t.Fatalf("Failed to fetch messages: %v", err)
