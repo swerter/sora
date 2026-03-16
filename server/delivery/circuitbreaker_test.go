@@ -372,7 +372,7 @@ func TestCircuitBreaker_PermanentErrorsDoNotTrigger(t *testing.T) {
 
 	t.Run("SMTP 5xx permanent errors should not open circuit", func(t *testing.T) {
 		// Simulate what happens when wc.Close() returns SMTP error 554
-		// This tests the actual error chain: RelayError -> fmt.Errorf -> SMTPError
+		// This tests the actual error chain: RelayError -> SMTPError
 		cbConfig := CircuitBreakerConfig{
 			Threshold:   2, // Would open after 2 failures
 			Timeout:     100 * time.Millisecond,
@@ -399,7 +399,7 @@ func TestCircuitBreaker_PermanentErrorsDoNotTrigger(t *testing.T) {
 		// Mock the sendToSMTPRelay to return a permanent error (like 554)
 		// We can't actually mock it easily, but we can verify the error classification
 		testErr := &RelayError{
-			Err:       fmt.Errorf("failed to close data writer: SMTP error 554: no forwarding permitted"),
+			Err:       fmt.Errorf("SMTP error 554: no forwarding permitted"),
 			Permanent: true,
 		}
 

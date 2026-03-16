@@ -166,27 +166,27 @@ func (r *SMTPRelayHandler) sendToSMTPRelay(from string, to string, messageBytes 
 
 	if relayErr = c.Mail(from, nil); relayErr != nil {
 		// Classify SMTP error (5xx = permanent, 4xx = temporary)
-		return &RelayError{Err: fmt.Errorf("failed to set sender: %w", relayErr), Permanent: IsPermanentError(relayErr)}
+		return &RelayError{Err: relayErr, Permanent: IsPermanentError(relayErr)}
 	}
 	if relayErr = c.Rcpt(to, nil); relayErr != nil {
 		// Classify SMTP error (5xx = permanent, 4xx = temporary)
-		return &RelayError{Err: fmt.Errorf("failed to set recipient: %w", relayErr), Permanent: IsPermanentError(relayErr)}
+		return &RelayError{Err: relayErr, Permanent: IsPermanentError(relayErr)}
 	}
 
 	wc, relayErr := c.Data()
 	if relayErr != nil {
 		// Classify SMTP error (5xx = permanent, 4xx = temporary)
-		return &RelayError{Err: fmt.Errorf("failed to start data: %w", relayErr), Permanent: IsPermanentError(relayErr)}
+		return &RelayError{Err: relayErr, Permanent: IsPermanentError(relayErr)}
 	}
 	if _, relayErr = wc.Write(messageBytes); relayErr != nil {
 		// Attempt to close the data writer even if write fails, to send the final dot.
 		_ = wc.Close()
 		// Write errors are typically I/O errors (temporary)
-		return &RelayError{Err: fmt.Errorf("failed to write message: %w", relayErr), Permanent: false}
+		return &RelayError{Err: relayErr, Permanent: false}
 	}
 	if relayErr = wc.Close(); relayErr != nil {
 		// Classify SMTP error (5xx = permanent, 4xx = temporary)
-		return &RelayError{Err: fmt.Errorf("failed to close data writer: %w", relayErr), Permanent: IsPermanentError(relayErr)}
+		return &RelayError{Err: relayErr, Permanent: IsPermanentError(relayErr)}
 	}
 
 	if relayErr = c.Quit(); relayErr != nil {
