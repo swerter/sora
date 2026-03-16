@@ -620,14 +620,9 @@ func (d *Database) GetMailboxSummary(ctx context.Context, mailboxID int64) (*Mai
 		metrics.DBQueriesTotal.WithLabelValues("mailbox_summary", status, "read").Inc()
 	}()
 
-	tx, err := d.GetReadPoolWithContext(ctx).BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
 	// This query is highly optimized to use the mailbox_stats cache table.
 	// It avoids expensive COUNT/SUM operations on the large messages table.
+	// No transaction needed - two simple SELECTs don't require transactional isolation.
 	const summaryQuery = `
 		SELECT
 			mb.highest_uid + 1,
@@ -639,7 +634,7 @@ func (d *Database) GetMailboxSummary(ctx context.Context, mailboxID int64) (*Mai
 		LEFT JOIN mailbox_stats ms ON mb.id = ms.mailbox_id
 		WHERE mb.id = $1
 	`
-	row := tx.QueryRow(ctx, summaryQuery, mailboxID)
+	row := d.GetReadPoolWithContext(ctx).QueryRow(ctx, summaryQuery, mailboxID)
 
 	var s MailboxSummary
 	err = row.Scan(&s.UIDNext, &s.NumMessages, &s.TotalSize, &s.HighestModSeq, &s.UnseenCount)
@@ -651,11 +646,11 @@ func (d *Database) GetMailboxSummary(ctx context.Context, mailboxID int64) (*Mai
 		return nil, fmt.Errorf("failed to get mailbox summary stats: %w", err)
 	}
 
-	// If we have unseen messages, find the first unseen sequence number in the same transaction
+	// If we have unseen messages, find the first unseen sequence number
 	if s.UnseenCount > 0 {
 		// With the message_sequences cache, we can directly look up the sequence number
 		// of the first unseen message in a single, efficient query.
-		err = tx.QueryRow(ctx, `
+		err = d.GetReadPoolWithContext(ctx).QueryRow(ctx, `
 			SELECT ms.seqnum FROM messages m
 			JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
 			WHERE m.mailbox_id = $1 AND (m.flags & $2) = 0
@@ -669,10 +664,6 @@ func (d *Database) GetMailboxSummary(ctx context.Context, mailboxID int64) (*Mai
 	} else {
 		// No unseen messages
 		s.FirstUnseenSeqNum = 0
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("failed to commit GetMailboxSummary transaction: %w", err)
 	}
 
 	return &s, nil
@@ -694,12 +685,7 @@ func (d *Database) GetMailboxSummariesBatch(ctx context.Context, mailboxIDs []in
 		metrics.DBQueriesTotal.WithLabelValues("mailbox_summary_batch", status, "read").Inc()
 	}()
 
-	tx, err := d.GetReadPoolWithContext(ctx).BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
+	// No transaction needed - single SELECT doesn't require transactional isolation
 	const batchQuery = `
 		SELECT
 			mb.id,
@@ -712,7 +698,7 @@ func (d *Database) GetMailboxSummariesBatch(ctx context.Context, mailboxIDs []in
 		LEFT JOIN mailbox_stats ms ON mb.id = ms.mailbox_id
 		WHERE mb.id = ANY($1)
 	`
-	rows, err := tx.Query(ctx, batchQuery, mailboxIDs)
+	rows, err := d.GetReadPoolWithContext(ctx).Query(ctx, batchQuery, mailboxIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query batch mailbox summaries: %w", err)
 	}
@@ -729,10 +715,6 @@ func (d *Database) GetMailboxSummariesBatch(ctx context.Context, mailboxIDs []in
 	}
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating batch mailbox summaries: %w", err)
-	}
-
-	if err = tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("failed to commit GetMailboxSummariesBatch transaction: %w", err)
 	}
 
 	return result, nil
