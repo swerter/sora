@@ -187,6 +187,15 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 	// Ensure default mailboxes (INBOX/Drafts/Sent/Spam/Trash) exist. Use the resilient method.
 	err = s.backend.rdb.CreateDefaultMailboxesWithRetry(s.ctx, AccountID)
 	if err != nil {
+		// Check if error is due to context cancellation (server shutdown)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			s.InfoLog("mailbox creation cancelled due to server shutdown")
+			return &smtp.SMTPError{
+				Code:         421,
+				EnhancedCode: smtp.EnhancedCode{4, 2, 1},
+				Message:      "service shutting down",
+			}
+		}
 		return s.InternalError("failed to create default mailboxes: %v", err)
 	}
 
@@ -194,6 +203,15 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 	// User.Address should always be the primary address (not the recipient with +alias)
 	primaryAddr, err := s.backend.rdb.GetPrimaryEmailForAccountWithRetry(readCtx, AccountID)
 	if err != nil {
+		// Check if error is due to context cancellation (server shutdown)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			s.InfoLog("primary email fetch cancelled due to server shutdown")
+			return &smtp.SMTPError{
+				Code:         421,
+				EnhancedCode: smtp.EnhancedCode{4, 2, 1},
+				Message:      "service shutting down",
+			}
+		}
 		s.WarnLog("failed to get primary email", "account_id", AccountID, "error", err)
 		return &smtp.SMTPError{
 			Code:         451,
@@ -693,6 +711,24 @@ func (s *LMTPSession) Data(r io.Reader) error {
 			// Fall through to success path below (don't return error)
 			// This ensures the message is accepted by LMTP even if it's a duplicate
 		} else {
+			// Check if error is due to context cancellation (server shutdown)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				s.InfoLog("message save cancelled due to server shutdown")
+				// During shutdown, DO NOT delete the file. Even though we wrote it, there's a race
+				// window where another concurrent delivery might have seen the file exists and
+				// decided not to write it (but might still be trying to create a DB record).
+				// The file will be cleaned up by the uploader's cleanupOrphanedFiles job.
+				if filePath != nil {
+					s.DebugLog("keeping file for cleanup job due to shutdown", "content_hash", contentHash)
+				}
+				metrics.MessageThroughput.WithLabelValues("lmtp", "delivered", "shutdown").Inc()
+				return &smtp.SMTPError{
+					Code:         421,
+					EnhancedCode: smtp.EnhancedCode{4, 2, 1},
+					Message:      "service shutting down",
+				}
+			}
+
 			// Cleanup local file on real failure
 			if filePath != nil {
 				_ = os.Remove(*filePath)
