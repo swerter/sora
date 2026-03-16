@@ -291,7 +291,18 @@ func (s *LMTPSession) Data(r io.Reader) error {
 
 	_, err := io.Copy(&buf, reader)
 	if err != nil {
-		return s.InternalError("failed to read message: %v", err)
+		// Read errors during DATA command:
+		// - unexpected EOF: client disconnected, incomplete transmission, or malformed message stream
+		// - context canceled: timeout or shutdown
+		// - connection reset: network interruption
+		// Note: If connection is truly closed, this error response won't reach the client,
+		// but the SMTP library handles failed writes gracefully and we need proper cleanup.
+		s.WarnLog("error reading message data", "error", err, "bytes_read", buf.Len())
+		return &smtp.SMTPError{
+			Code:         421,
+			EnhancedCode: smtp.EnhancedCode{4, 4, 2},
+			Message:      "Error reading message data",
+		}
 	}
 
 	// Check if message exceeds configured limit
@@ -351,16 +362,17 @@ func (s *LMTPSession) Data(r io.Reader) error {
 	bodyStructureVal := imapserver.ExtractBodyStructure(bytes.NewReader(buf.Bytes()))
 	bodyStructure := &bodyStructureVal
 	var plaintextBody *string
-	plaintextBodyResult, err := helpers.ExtractPlaintextBody(messageContent)
-	if err != nil {
-		s.WarnLog("failed to extract plaintext body", "error", err)
-		// The plaintext body is needed only for indexing, so we can ignore the error
-		// Use empty string as fallback
-		emptyStr := new(string)
-		plaintextBody = emptyStr
-	} else if plaintextBodyResult == nil {
+	plaintextBodyResult, extractErr := helpers.ExtractPlaintextBody(messageContent)
+	if extractErr != nil {
+		// Plaintext extraction had errors but may have succeeded partially.
+		// Log the issues for debugging malformed MIME (invalid Content-Type, truncated parts, etc.)
+		s.DebugLog("plaintext extraction encountered errors", "error", extractErr)
+	}
+
+	// Use whatever text was extracted (may be nil, partial, or complete)
+	if plaintextBodyResult == nil {
 		// No plaintext or HTML body found in the message
-		// Use empty string as fallback
+		// Use empty string as fallback for FTS indexing
 		emptyStr := new(string)
 		plaintextBody = emptyStr
 	} else {

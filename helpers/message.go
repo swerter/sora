@@ -34,6 +34,8 @@ func ExtractPlaintextBody(msg *message.Entity) (*string, error) {
 	defer mr.Close()
 
 	var plaintextBody, htmlBody *string
+	var skippedParts []string // Track reasons for skipped parts (for debugging)
+
 	for plaintextBody == nil {
 		part, err := mr.NextPart()
 		if err == io.EOF {
@@ -44,6 +46,7 @@ func ExtractPlaintextBody(msg *message.Entity) (*string, error) {
 			// cause encoding errors here. Rather than failing the entire extraction,
 			// we keep whatever plaintext/HTML we collected from earlier parts.
 			// This is acceptable because plaintext extraction is best-effort for FTS.
+			skippedParts = append(skippedParts, fmt.Sprintf("NextPart error: %v", err))
 			break
 		}
 
@@ -54,14 +57,20 @@ func ExtractPlaintextBody(msg *message.Entity) (*string, error) {
 
 		mediaType, _, err := header.ContentType()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get mail part Content-Type: %v", err)
+			// Malformed Content-Type header (e.g., invalid media parameters).
+			// Skip this part and continue - plaintext extraction is best-effort for FTS.
+			skippedParts = append(skippedParts, fmt.Sprintf("invalid Content-Type: %v", err))
+			continue
 		} else if mediaType != "text/plain" && mediaType != "text/html" {
 			continue
 		}
 
 		b, err := io.ReadAll(part.Body)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read inline part: %v", err)
+			// Malformed MIME part body (e.g., unexpected EOF, truncated data).
+			// Skip this part and continue - plaintext extraction is best-effort for FTS.
+			skippedParts = append(skippedParts, fmt.Sprintf("read %s part: %v", mediaType, err))
+			continue
 		}
 		s := string(b)
 
@@ -88,6 +97,13 @@ func ExtractPlaintextBody(msg *message.Entity) (*string, error) {
 
 		plaintext := html2text.HTML2Text(cleanedHTML)
 		plaintextBody = &plaintext
+	}
+
+	// If we skipped any parts due to errors, return an error with context.
+	// The caller can still use the extracted text (partial success) while logging the issues.
+	if len(skippedParts) > 0 {
+		return plaintextBody, fmt.Errorf("extracted text with %d skipped part(s): %s",
+			len(skippedParts), strings.Join(skippedParts, "; "))
 	}
 
 	return plaintextBody, nil

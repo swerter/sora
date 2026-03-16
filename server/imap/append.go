@@ -108,6 +108,11 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	// Read the entire message into a buffer
 	var buf bytes.Buffer
 	if _, err = io.Copy(&buf, r); err != nil {
+		// Network read errors during APPEND command are typically:
+		// - unexpected EOF: client disconnected mid-transmission
+		// - context canceled: timeout or shutdown
+		// - connection reset: network interruption
+		s.WarnLog("failed to read message data from network", "error", err, "bytes_read", buf.Len())
 		s.classifyAndTrackError("APPEND", err, nil)
 		return nil, s.internalError("failed to read message: %v", err)
 	}

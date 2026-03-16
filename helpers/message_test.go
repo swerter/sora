@@ -251,6 +251,44 @@ func TestExtractPlaintextBody_MalformedContentTransferEncoding(t *testing.T) {
 				"Body text here.\r\n",
 			expectBody: false, // message.Read returns degraded entity but body is not decodable
 		},
+		{
+			name: "multipart with malformed Content-Type media parameter",
+			rawMessage: "From: sender@example.com\r\n" +
+				"To: receiver@example.com\r\n" +
+				"Subject: Test\r\n" +
+				"MIME-Version: 1.0\r\n" +
+				"Content-Type: multipart/alternative; boundary=\"boundary456\"\r\n" +
+				"\r\n" +
+				"--boundary456\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\n" +
+				"\r\n" +
+				"Good text part.\r\n" +
+				"--boundary456\r\n" +
+				"Content-Type: text/html; charset=utf-8; invalid-param\r\n" + // MALFORMED media parameter!
+				"\r\n" +
+				"<html><body>HTML with bad Content-Type</body></html>\r\n" +
+				"--boundary456--\r\n",
+			expectBody: true, // Should return the first (good) part
+		},
+		{
+			name: "multipart with truncated part (unexpected EOF)",
+			rawMessage: "From: sender@example.com\r\n" +
+				"To: receiver@example.com\r\n" +
+				"Subject: Test\r\n" +
+				"MIME-Version: 1.0\r\n" +
+				"Content-Type: multipart/alternative; boundary=\"boundary789\"\r\n" +
+				"\r\n" +
+				"--boundary789\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\n" +
+				"\r\n" +
+				"Good text part.\r\n" +
+				"--boundary789\r\n" +
+				"Content-Type: text/html; charset=utf-8\r\n" +
+				"Content-Transfer-Encoding: base64\r\n" +
+				"\r\n" +
+				"TRUNCATED==", // Truncated base64 - will cause read error
+			expectBody: true, // Should return the first (good) part
+		},
 	}
 
 	for _, tt := range tests {
@@ -267,12 +305,22 @@ func TestExtractPlaintextBody_MalformedContentTransferEncoding(t *testing.T) {
 			}
 
 			// Extract plaintext body - should not crash even with malformed encoding
-			result, err := ExtractPlaintextBody(messageContent)
-			assert.NoError(t, err)
+			result, extractErr := ExtractPlaintextBody(messageContent)
 
 			if tt.expectBody {
 				assert.NotNil(t, result)
 				assert.NotEmpty(t, *result)
+				// May or may not have an error depending on whether parts were skipped
+				// If error is present, it should describe skipped parts
+				if extractErr != nil {
+					assert.Contains(t, extractErr.Error(), "skipped part")
+					t.Logf("Extraction succeeded with warnings: %v", extractErr)
+				}
+			} else {
+				// For degraded entities, we may get nil result but no crash
+				if extractErr != nil {
+					t.Logf("Extraction failed as expected: %v", extractErr)
+				}
 			}
 		})
 	}
