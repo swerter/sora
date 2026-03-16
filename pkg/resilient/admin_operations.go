@@ -407,6 +407,17 @@ func (rd *ResilientDatabase) executeWriteInTxWithRetry(ctx context.Context, conf
 			return cbErr
 		}
 
+		// Check if context was canceled before attempting commit.
+		// Even if the operation succeeded, we must not commit if the context is canceled
+		// because the caller has abandoned the operation (e.g., client disconnect).
+		// Without this check, the COMMIT may succeed on PostgreSQL's side while the
+		// client receives a context error, leaving the caller unaware that rows (e.g.,
+		// pending_uploads) were persisted. This creates orphaned records that reference
+		// local files the caller never finished writing or already cleaned up.
+		if ctx.Err() != nil {
+			return retry.Stop(ctx.Err())
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			if rd.isRetryableError(err) {
 				return err
