@@ -56,15 +56,10 @@ func extractBodyStructureSafe(data []byte) imap.BodyStructure {
 
 func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *imap.AppendOptions) (*imap.AppendData, error) {
 	start := time.Now()
-	success := false
-	defer func() {
-		status := "failure"
-		if success {
-			status = "success"
-		}
+	recordMetrics := func(status string) {
 		metrics.CommandsTotal.WithLabelValues("imap", "APPEND", status).Inc()
 		metrics.CommandDuration.WithLabelValues("imap", "APPEND").Observe(time.Since(start).Seconds())
-	}()
+	}
 
 	// Create a context that signals to use the master DB if the session is pinned.
 	readCtx := s.ctx
@@ -82,9 +77,11 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 				Text: fmt.Sprintf("mailbox '%s' does not exist", mboxName),
 			}
 			s.classifyAndTrackError("APPEND", err, imapErr)
+			recordMetrics("failure")
 			return nil, imapErr
 		}
 		s.classifyAndTrackError("APPEND", err, nil)
+		recordMetrics("failure")
 		return nil, s.internalError("failed to fetch mailbox '%s': %v", mboxName, err)
 	}
 
@@ -92,6 +89,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	hasInsertRight, err := s.server.rdb.CheckMailboxPermissionWithRetry(readCtx, mailbox.ID, s.AccountID(), 'i')
 	if err != nil {
 		s.classifyAndTrackError("APPEND", err, nil)
+		recordMetrics("failure")
 		return nil, s.internalError("failed to check insert permission: %v", err)
 	}
 	if !hasInsertRight {
@@ -102,6 +100,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 			Text: "You do not have permission to append messages to this mailbox",
 		}
 		s.classifyAndTrackError("APPEND", nil, imapErr)
+		recordMetrics("failure")
 		return nil, imapErr
 	}
 
@@ -114,6 +113,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		// - connection reset: network interruption
 		s.WarnLog("failed to read message data from network", "error", err, "bytes_read", buf.Len())
 		s.classifyAndTrackError("APPEND", err, nil)
+		recordMetrics("failure")
 		return nil, s.internalError("failed to read message: %v", err)
 	}
 
@@ -124,6 +124,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	if s.server.appendLimit > 0 && int64(len(fullMessageBytes)) > s.server.appendLimit {
 		s.DebugLog("message size exceeds APPENDLIMIT", "size", len(fullMessageBytes), "limit", s.server.appendLimit)
 		s.classifyAndTrackError("APPEND", nil, &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeTooBig})
+		recordMetrics("failure")
 		return nil, &imap.Error{
 			Type: imap.StatusResponseTypeNo,
 			Code: imap.ResponseCodeTooBig,
@@ -205,6 +206,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	// If a duplicate APPEND arrives while uploader is processing the first copy,
 	// we don't want to overwrite/delete the file the uploader is reading.
 	if s.server.uploader == nil {
+		recordMetrics("failure")
 		return nil, s.internalError("uploader not configured - cannot store message")
 	}
 	expectedPath := s.server.uploader.FilePath(contentHash, s.AccountID())
@@ -213,6 +215,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		// File doesn't exist, safe to write
 		filePath, err = s.server.uploader.StoreLocally(contentHash, s.AccountID(), fullMessageBytes)
 		if err != nil {
+			recordMetrics("failure")
 			return nil, s.internalError("failed to save message to disk: %v", err)
 		}
 		s.DebugLog("message accepted locally", "path", *filePath)
@@ -223,6 +226,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		s.DebugLog("message file already exists, skipping write (concurrent APPEND)", "path", expectedPath)
 	} else {
 		// Stat error (permission issue, etc.)
+		recordMetrics("failure")
 		return nil, s.internalError("failed to check file existence: %v", err)
 	}
 
@@ -283,7 +287,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 			}
 			s.DebugLog("duplicate message detected, skipping upload", "messageID", messageID, "existing_uid", messageUID)
 			// Return success with existing UID - don't notify uploader
-			success = true
+			recordMetrics("success")
 			return &imap.AppendData{
 				UID:         imap.UID(messageUID),
 				UIDValidity: mailbox.UIDValidity,
@@ -293,6 +297,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		if filePath != nil {
 			_ = os.Remove(*filePath)
 		}
+		recordMetrics("failure")
 		return nil, s.internalError("failed to insert message metadata: %v", err)
 	}
 
@@ -301,7 +306,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	if s.ctx.Err() != nil {
 		s.DebugLog("request aborted after message insertion")
 		// We've already inserted the message successfully, so still return success
-		success = true
+		recordMetrics("success")
 		return &imap.AppendData{
 			UID:         imap.UID(messageUID),
 			UIDValidity: mailbox.UIDValidity,
@@ -319,7 +324,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	acquired, release := s.mutexHelper.AcquireWriteLockWithTimeout()
 	if !acquired {
 		s.DebugLog("failed to acquire write lock within timeout")
-		success = true
+		recordMetrics("success")
 		return &imap.AppendData{
 			UID:         imap.UID(messageUID),
 			UIDValidity: mailbox.UIDValidity,
@@ -333,7 +338,7 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	// After re-acquiring the lock, check again if the context is still valid
 	if s.ctx.Err() != nil {
 		s.DebugLog("request aborted during mutex acquisition")
-		success = true
+		recordMetrics("success")
 		return &imap.AppendData{
 			UID:         imap.UID(messageUID),
 			UIDValidity: mailbox.UIDValidity,
@@ -363,13 +368,12 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 		metrics.TrackDomainMessage("imap", s.IMAPUser.Address.Domain(), "appended")
 	}
 
-	success = true
-
 	// Track for session summary
 	s.messagesAppended.Add(1)
 
 	s.DebugLog("successfully appended message", "mailbox", mboxName, "uid", messageUID, "uidvalidity", mailbox.UIDValidity)
 
+	recordMetrics("success")
 	return &imap.AppendData{
 		UID:         imap.UID(messageUID),
 		UIDValidity: mailbox.UIDValidity,

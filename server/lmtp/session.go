@@ -66,15 +66,10 @@ type LMTPSession struct {
 
 func (s *LMTPSession) Mail(from string, opts *smtp.MailOptions) error {
 	start := time.Now()
-	success := false
-	defer func() {
-		status := "failure"
-		if success {
-			status = "success"
-		}
+	recordMetrics := func(status string) {
 		metrics.CommandsTotal.WithLabelValues("lmtp", "MAIL", status).Inc()
 		metrics.CommandDuration.WithLabelValues("lmtp", "MAIL").Observe(time.Since(start).Seconds())
-	}()
+	}
 
 	s.DebugLog("processing mail from command", "from", from)
 
@@ -91,6 +86,7 @@ func (s *LMTPSession) Mail(from string, opts *smtp.MailOptions) error {
 		fromAddress, err = server.NewAddress(from)
 		if err != nil {
 			s.WarnLog("invalid from address", "from", from, "error", err)
+			recordMetrics("failure")
 			return &smtp.SMTPError{
 				Code:         553,
 				EnhancedCode: smtp.EnhancedCode{5, 1, 7},
@@ -104,6 +100,7 @@ func (s *LMTPSession) Mail(from string, opts *smtp.MailOptions) error {
 	acquired, release := s.mutexHelper.AcquireWriteLockWithTimeout()
 	if !acquired {
 		s.WarnLog("failed to acquire write lock", "command", "MAIL")
+		recordMetrics("failure")
 		return &smtp.SMTPError{
 			Code:         421,
 			EnhancedCode: smtp.EnhancedCode{4, 4, 5},
@@ -114,21 +111,16 @@ func (s *LMTPSession) Mail(from string, opts *smtp.MailOptions) error {
 
 	s.sender = &fromAddress
 
-	success = true
+	recordMetrics("success")
 	return nil
 }
 
 func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 	start := time.Now()
-	success := false
-	defer func() {
-		status := "failure"
-		if success {
-			status = "success"
-		}
+	recordMetrics := func(status string) {
 		metrics.CommandsTotal.WithLabelValues("lmtp", "RCPT", status).Inc()
 		metrics.CommandDuration.WithLabelValues("lmtp", "RCPT").Observe(time.Since(start).Seconds())
-	}()
+	}
 
 	s.DebugLog("processing rcpt to command", "to", to)
 
@@ -141,6 +133,7 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 	toAddress, err := server.NewAddress(to)
 	if err != nil {
 		s.WarnLog("invalid to address", "error", err)
+		recordMetrics("failure")
 		return &smtp.SMTPError{
 			Code:         513,
 			EnhancedCode: smtp.EnhancedCode{5, 0, 1},
@@ -168,6 +161,7 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 		if errors.Is(err, consts.ErrUserNotFound) {
 			// User not found or account deleted - permanent failure
 			s.DebugLog("user not found", "address", lookupAddress)
+			recordMetrics("failure")
 			return &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 1, 1},
@@ -176,6 +170,7 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 		}
 		// Database error (connection failure, timeout, etc.) - temporary failure
 		s.WarnLog("database error during user lookup", "address", lookupAddress, "error", err)
+		recordMetrics("failure")
 		return &smtp.SMTPError{
 			Code:         451,
 			EnhancedCode: smtp.EnhancedCode{4, 4, 3},
@@ -190,12 +185,14 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 		// Check if error is due to context cancellation (server shutdown)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			s.InfoLog("mailbox creation cancelled due to server shutdown")
+			recordMetrics("failure")
 			return &smtp.SMTPError{
 				Code:         421,
 				EnhancedCode: smtp.EnhancedCode{4, 2, 1},
 				Message:      "service shutting down",
 			}
 		}
+		recordMetrics("failure")
 		return s.InternalError("failed to create default mailboxes: %v", err)
 	}
 
@@ -206,6 +203,7 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 		// Check if error is due to context cancellation (server shutdown)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			s.InfoLog("primary email fetch cancelled due to server shutdown")
+			recordMetrics("failure")
 			return &smtp.SMTPError{
 				Code:         421,
 				EnhancedCode: smtp.EnhancedCode{4, 2, 1},
@@ -213,6 +211,7 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 			}
 		}
 		s.WarnLog("failed to get primary email", "account_id", AccountID, "error", err)
+		recordMetrics("failure")
 		return &smtp.SMTPError{
 			Code:         451,
 			EnhancedCode: smtp.EnhancedCode{4, 4, 3},
@@ -224,6 +223,7 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 	acquired, release := s.mutexHelper.AcquireWriteLockWithTimeout()
 	if !acquired {
 		s.WarnLog("failed to acquire write lock", "command", "RCPT")
+		recordMetrics("failure")
 		return &smtp.SMTPError{
 			Code:         421,
 			EnhancedCode: smtp.EnhancedCode{4, 4, 5},
@@ -252,34 +252,29 @@ func (s *LMTPSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 	// Pin the session to the master DB to prevent reading stale data from a replica.
 	s.useMasterDB = true
 
-	success = true
-
 	// Log recipient acceptance with alias detection
 	if fullAddress != primaryAddr.FullAddress() {
 		s.DebugLog("recipient accepted", "recipient", fullAddress, "primary_address", primaryAddr.FullAddress(), "account_id", AccountID)
 	} else {
 		s.DebugLog("recipient accepted", "recipient", fullAddress, "account_id", AccountID)
 	}
+	recordMetrics("success")
 	return nil
 }
 
 func (s *LMTPSession) Data(r io.Reader) error {
 	// Prometheus metrics - start delivery timing
 	start := time.Now()
-	success := false
-	defer func() {
-		status := "failure"
-		if success {
-			status = "success"
-		}
+	recordMetrics := func(status string) {
 		metrics.CommandsTotal.WithLabelValues("lmtp", "DATA", status).Inc()
 		metrics.CommandDuration.WithLabelValues("lmtp", "DATA").Observe(time.Since(start).Seconds())
-	}()
+	}
 
 	// Acquire write lock for accessing session state and potentially updating it (useMasterDB)
 	acquired, release := s.mutexHelper.AcquireWriteLockWithTimeout()
 	if !acquired {
 		s.WarnLog("failed to acquire write lock", "command", "DATA")
+		recordMetrics("failure")
 		return &smtp.SMTPError{
 			Code:         421,
 			EnhancedCode: smtp.EnhancedCode{4, 4, 5},
@@ -291,6 +286,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 	// Check if we have a valid sender and recipient
 	if s.sender == nil || s.User == nil {
 		s.WarnLog("data command without valid sender or recipient")
+		recordMetrics("failure")
 		return &smtp.SMTPError{
 			Code:         503,
 			EnhancedCode: smtp.EnhancedCode{5, 5, 1},
@@ -316,6 +312,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		// Note: If connection is truly closed, this error response won't reach the client,
 		// but the SMTP library handles failed writes gracefully and we need proper cleanup.
 		s.WarnLog("error reading message data", "error", err, "bytes_read", buf.Len())
+		recordMetrics("failure")
 		return &smtp.SMTPError{
 			Code:         421,
 			EnhancedCode: smtp.EnhancedCode{4, 4, 2},
@@ -326,6 +323,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 	// Check if message exceeds configured limit
 	if s.backend.maxMessageSize > 0 && int64(buf.Len()) > s.backend.maxMessageSize {
 		s.WarnLog("message size exceeds limit", "size", buf.Len(), "limit", s.backend.maxMessageSize)
+		recordMetrics("failure")
 		return &smtp.SMTPError{
 			Code:         552,
 			EnhancedCode: smtp.EnhancedCode{5, 3, 4},
@@ -357,6 +355,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 
 	messageContent, err := server.ParseMessage(bytes.NewReader(fullMessageBytes))
 	if err != nil {
+		recordMetrics("failure")
 		return s.InternalError("failed to parse message: %v", err)
 	}
 
@@ -582,6 +581,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		// File doesn't exist, safe to write
 		filePath, err = s.backend.uploader.StoreLocally(contentHash, s.AccountID(), fullMessageBytes)
 		if err != nil {
+			recordMetrics("failure")
 			return s.InternalError("failed to save message to disk: %v", err)
 		}
 		s.DebugLog("message accepted locally", "path", *filePath)
@@ -592,6 +592,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		s.DebugLog("message file already exists, skipping write (concurrent delivery)", "path", expectedPath)
 	} else {
 		// Stat error (permission issue, etc.)
+		recordMetrics("failure")
 		return s.InternalError("failed to check file existence: %v", err)
 	}
 
@@ -600,6 +601,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 	switch result.Action {
 	case sieveengine.ActionDiscard:
 		s.InfoLog("sieve message discarded")
+		recordMetrics("success")
 		return nil
 
 	case sieveengine.ActionFileInto:
@@ -613,6 +615,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 			if err != nil {
 				// Allow duplicates (message already in target mailbox)
 				if !errors.Is(err, consts.ErrMessageExists) && !errors.Is(err, consts.ErrDBUniqueViolation) {
+					recordMetrics("failure")
 					return s.InternalError("failed to save message to specified mailbox: %v", err)
 				}
 				s.DebugLog("duplicate message in target mailbox, continuing", "mailbox", mailboxName)
@@ -627,6 +630,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 			if err != nil {
 				// Allow duplicates (message already in INBOX)
 				if !errors.Is(err, consts.ErrMessageExists) && !errors.Is(err, consts.ErrDBUniqueViolation) {
+					recordMetrics("failure")
 					return s.InternalError("failed to save message copy to inbox: %v", err)
 				}
 				s.DebugLog("duplicate message in INBOX, continuing")
@@ -634,6 +638,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 
 			// Success - both copies saved
 			s.InfoLog("message delivered according to fileinto :copy directive")
+			recordMetrics("success")
 			return nil
 		} else {
 			s.InfoLog("sieve fileinto - saving to mailbox only", "mailbox", mailboxName)
@@ -659,6 +664,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 				// If :copy is not specified and relay succeeded, we don't store the message locally
 				if !result.Copy {
 					s.DebugLog("redirect without :copy - skipping local delivery")
+					recordMetrics("success")
 					return nil
 				}
 				s.DebugLog("redirect :copy - continuing with local delivery")
@@ -722,6 +728,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 					s.DebugLog("keeping file for cleanup job due to shutdown", "content_hash", contentHash)
 				}
 				metrics.MessageThroughput.WithLabelValues("lmtp", "delivered", "shutdown").Inc()
+				recordMetrics("failure")
 				return &smtp.SMTPError{
 					Code:         421,
 					EnhancedCode: smtp.EnhancedCode{4, 2, 1},
@@ -734,6 +741,7 @@ func (s *LMTPSession) Data(r io.Reader) error {
 				_ = os.Remove(*filePath)
 			}
 			metrics.MessageThroughput.WithLabelValues("lmtp", "delivered", "failure").Inc()
+			recordMetrics("failure")
 			return s.InternalError("failed to save message: %v", err)
 		}
 	} else {
@@ -750,21 +758,22 @@ func (s *LMTPSession) Data(r io.Reader) error {
 		metrics.TrackUserActivity("lmtp", s.FullAddress(), "command", 1)
 	}
 
-	success = true
+	recordMetrics("success")
 	return nil
 }
 
 func (s *LMTPSession) Reset() {
 	start := time.Now()
-	defer func() {
-		metrics.CommandsTotal.WithLabelValues("lmtp", "RSET", "success").Inc()
+	recordMetrics := func(status string) {
+		metrics.CommandsTotal.WithLabelValues("lmtp", "RSET", status).Inc()
 		metrics.CommandDuration.WithLabelValues("lmtp", "RSET").Observe(time.Since(start).Seconds())
-	}()
+	}
 
 	// Acquire write lock to reset session state
 	acquired, release := s.mutexHelper.AcquireWriteLockWithTimeout()
 	if !acquired {
 		s.WarnLog("failed to acquire write lock", "command", "RESET")
+		recordMetrics("failure")
 		return
 	}
 	defer release()
@@ -773,6 +782,7 @@ func (s *LMTPSession) Reset() {
 	s.sender = nil
 
 	s.DebugLog("session reset")
+	recordMetrics("success")
 }
 
 func (s *LMTPSession) Logout() error {

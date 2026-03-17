@@ -131,15 +131,10 @@ func (s *POP3Session) handleConnection() {
 		switch cmd {
 		case "CAPA":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "CAPA", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "CAPA").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// CAPA command - list server capabilities
 			writer.WriteString("+OK Capability list follows\r\n")
@@ -155,28 +150,26 @@ func (s *POP3Session) handleConnection() {
 			writer.WriteString("UTF8\r\n")
 			writer.WriteString("IMPLEMENTATION Sora-POP3-Server\r\n")
 			writer.WriteString(".\r\n")
-			success = true
+
+			recordMetrics("success")
 
 		case "USER":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "USER", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "USER").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting user command")
+				recordMetrics("failure")
 				return
 			}
 
 			// Check authentication state (atomic read, no lock needed)
 			if s.authenticated.Load() {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Already authenticated\r\n") {
 					// Close the connection if too many errors are encountered
 					return
@@ -190,6 +183,7 @@ func (s *POP3Session) handleConnection() {
 			newUserAddress, err := server.NewAddress(username)
 			if err != nil {
 				s.DebugLog("invalid username format", "error", err)
+				recordMetrics("failure")
 				if s.handleClientError(writer, fmt.Sprintf("-ERR %s\r\n", err.Error())) {
 					return
 				}
@@ -197,28 +191,26 @@ func (s *POP3Session) handleConnection() {
 			}
 			userAddress = &newUserAddress
 			writer.WriteString("+OK User accepted\r\n")
-			success = true
+
+			recordMetrics("success")
 
 		case "PASS":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "PASS", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "PASS").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting pass command")
+				recordMetrics("failure")
 				return
 			}
 
 			// Check authentication state (atomic read, no lock needed)
 			if s.authenticated.Load() {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Already authenticated\r\n") {
 					return
 				}
@@ -229,12 +221,14 @@ func (s *POP3Session) handleConnection() {
 				s.DebugLog("pass without user")
 				writer.WriteString("-ERR Must provide USER first\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
 			// Check insecure_auth: reject PASS over non-TLS when insecure_auth is false
 			if !s.server.insecureAuth && !s.isConnectionSecure() {
 				s.DebugLog("authentication rejected - TLS required", "address", userAddress.FullAddress())
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Authentication requires TLS connection\r\n") {
 					return
 				}
@@ -249,6 +243,7 @@ func (s *POP3Session) handleConnection() {
 			// Reject empty passwords immediately - no rate limiting needed
 			// Empty passwords are never valid under any condition
 			if password == "" {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Authentication failed\r\n") {
 					return
 				}
@@ -288,6 +283,7 @@ func (s *POP3Session) handleConnection() {
 						metrics.AuthenticationAttempts.WithLabelValues("pop3", s.server.name, s.server.hostname, "rate_limited").Inc()
 					}
 
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR [LOGIN-DELAY] Too many authentication attempts. Please try again later.\r\n") {
 						return
 					}
@@ -314,6 +310,7 @@ func (s *POP3Session) handleConnection() {
 						if s.server.authLimiter != nil {
 							s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, netConn, proxyInfo, userAddress.BaseAddress(), false)
 						}
+						recordMetrics("failure")
 						if s.handleClientError(writer, "-ERR [AUTH] Authentication failed\r\n") {
 							s.DebugLog("authentication failed")
 							return
@@ -328,6 +325,7 @@ func (s *POP3Session) handleConnection() {
 					}
 
 					// Master username suffix was provided but master password was wrong - fail immediately
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR [AUTH] Invalid master credentials\r\n") {
 						s.DebugLog("authentication failed, invalid master credentials")
 						return
@@ -350,6 +348,7 @@ func (s *POP3Session) handleConnection() {
 						if s.server.authLimiter != nil {
 							s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, netConn, proxyInfo, userAddress.BaseAddress(), false)
 						}
+						recordMetrics("failure")
 						if s.handleClientError(writer, "-ERR [AUTH] Authentication failed\r\n") {
 							s.DebugLog("authentication failed")
 							return
@@ -368,6 +367,7 @@ func (s *POP3Session) handleConnection() {
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 						s.InfoLog("authentication cancelled due to server shutdown")
 						metrics.CriticalOperationDuration.WithLabelValues("pop3_authentication").Observe(time.Since(start).Seconds())
+						recordMetrics("failure")
 						if s.handleClientError(writer, "-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n") {
 							return
 						}
@@ -381,6 +381,7 @@ func (s *POP3Session) handleConnection() {
 					// Track failed authentication
 					metrics.AuthenticationAttempts.WithLabelValues("pop3", s.server.name, s.server.hostname, "failure").Inc()
 					metrics.CriticalOperationDuration.WithLabelValues("pop3_authentication").Observe(time.Since(start).Seconds())
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR [AUTH] Authentication failed\r\n") {
 						s.DebugLog("authentication failed")
 						return
@@ -402,6 +403,7 @@ func (s *POP3Session) handleConnection() {
 				s.DebugLog("error creating default mailboxes", "error", err)
 				writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 			// Create a context that signals to the DB layer to use the master connection.
@@ -413,6 +415,7 @@ func (s *POP3Session) handleConnection() {
 				s.DebugLog("error getting inbox", "error", err)
 				writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -422,6 +425,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog(" failed to acquire write lock within timeout")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -462,23 +466,20 @@ func (s *POP3Session) handleConnection() {
 			s.startTerminationPoller()
 
 			writer.WriteString("+OK Password accepted\r\n")
-			success = true
+
+			recordMetrics("success")
 
 		case "STAT":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "STAT", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "STAT").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting stat command")
+				recordMetrics("failure")
 				return
 			}
 
@@ -494,6 +495,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire read lock within timeout")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -508,6 +510,7 @@ func (s *POP3Session) handleConnection() {
 				s.DebugLog("stat error", "error", err)
 				writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -522,28 +525,26 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			writer.WriteString(fmt.Sprintf("+OK %d %d\r\n", adjustedCount, adjustedSize))
-			success = true
+
+			recordMetrics("success")
 
 		case "LIST":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "LIST", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "LIST").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting list command")
+				recordMetrics("failure")
 				return
 			}
 
 			// Check authentication state (atomic read, no lock needed)
 			if !s.authenticated.Load() {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Not authenticated\r\n") {
 					return
 				}
@@ -556,6 +557,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire read lock within timeout")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 			mailboxID := s.inboxMailboxID
@@ -575,6 +577,7 @@ func (s *POP3Session) handleConnection() {
 					s.DebugLog("list error", "error", err)
 					writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 
@@ -584,6 +587,7 @@ func (s *POP3Session) handleConnection() {
 					s.WarnLog("failed to acquire write lock within timeout")
 					writer.WriteString("-ERR Server busy, please try again\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 				s.messages = messages
@@ -595,6 +599,7 @@ func (s *POP3Session) handleConnection() {
 			if len(parts) > 1 {
 				msgNumber, err := strconv.Atoi(parts[1])
 				if err != nil || msgNumber < 1 {
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR Invalid message number\r\n") {
 						return
 					}
@@ -607,6 +612,7 @@ func (s *POP3Session) handleConnection() {
 					s.WarnLog("failed to acquire read lock within timeout")
 					writer.WriteString("-ERR Server busy, please try again\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 
@@ -614,6 +620,7 @@ func (s *POP3Session) handleConnection() {
 				release()
 
 				if !ok {
+					recordMetrics("failure")
 					if msgNumber > len(s.messages) {
 						if s.handleClientError(writer, "-ERR No such message\r\n") {
 							return
@@ -635,6 +642,7 @@ func (s *POP3Session) handleConnection() {
 					s.WarnLog("failed to acquire read lock within timeout")
 					writer.WriteString("-ERR Server busy, please try again\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 
@@ -652,28 +660,25 @@ func (s *POP3Session) handleConnection() {
 			}
 			s.DebugLog("list command executed")
 
-			success = true
+			recordMetrics("success")
 
 		case "UIDL":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "UIDL", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "UIDL").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting uidl command")
+				recordMetrics("failure")
 				return
 			}
 
 			// Check authentication state (atomic read, no lock needed)
 			if !s.authenticated.Load() {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Not authenticated\r\n") {
 					return
 				}
@@ -686,6 +691,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire read lock within timeout")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 			mailboxID := s.inboxMailboxID
@@ -703,6 +709,7 @@ func (s *POP3Session) handleConnection() {
 					s.DebugLog("uidl error", "error", err)
 					writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 
@@ -712,6 +719,7 @@ func (s *POP3Session) handleConnection() {
 					s.WarnLog("failed to acquire write lock within timeout")
 					writer.WriteString("-ERR Server busy, please try again\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 				s.messages = messages
@@ -722,6 +730,7 @@ func (s *POP3Session) handleConnection() {
 			if len(parts) > 1 {
 				msgNumber, err := strconv.Atoi(parts[1])
 				if err != nil || msgNumber < 1 {
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR Invalid message number\r\n") {
 						return
 					}
@@ -734,11 +743,13 @@ func (s *POP3Session) handleConnection() {
 					s.WarnLog("failed to acquire read lock within timeout")
 					writer.WriteString("-ERR Server busy, please try again\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 
 				if msgNumber > len(s.messages) {
 					release()
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR No such message\r\n") {
 						return
 					}
@@ -748,6 +759,7 @@ func (s *POP3Session) handleConnection() {
 				msg := s.messages[msgNumber-1]
 				if s.deleted[msgNumber-1] {
 					release()
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR Message is deleted\r\n") {
 						return
 					}
@@ -765,6 +777,7 @@ func (s *POP3Session) handleConnection() {
 					s.WarnLog("failed to acquire read lock within timeout")
 					writer.WriteString("-ERR Server busy, please try again\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 
@@ -781,27 +794,25 @@ func (s *POP3Session) handleConnection() {
 				writer.WriteString(".\r\n")
 			}
 			s.DebugLog("uidl command executed")
-			success = true
+
+			recordMetrics("success")
 
 		case "TOP":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "TOP", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "TOP").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting top command")
+				recordMetrics("failure")
 				return
 			}
 
 			if len(parts) < 3 {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Missing message number or lines parameter\r\n") {
 					return
 				}
@@ -810,6 +821,7 @@ func (s *POP3Session) handleConnection() {
 
 			msgNumber, err := strconv.Atoi(parts[1])
 			if err != nil || msgNumber < 1 {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Invalid message number\r\n") {
 					return
 				}
@@ -818,6 +830,7 @@ func (s *POP3Session) handleConnection() {
 
 			lines, err := strconv.Atoi(parts[2])
 			if err != nil || lines < 0 {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Invalid lines parameter\r\n") {
 					return
 				}
@@ -826,6 +839,7 @@ func (s *POP3Session) handleConnection() {
 
 			// Check authentication state (atomic read, no lock needed)
 			if !s.authenticated.Load() {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Not authenticated\r\n") {
 					return
 				}
@@ -838,6 +852,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire read lock within timeout")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 			mailboxID := s.inboxMailboxID
@@ -857,6 +872,7 @@ func (s *POP3Session) handleConnection() {
 					s.DebugLog("top error", "error", err)
 					writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 			}
@@ -877,6 +893,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire lock for top command")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -898,6 +915,7 @@ func (s *POP3Session) handleConnection() {
 
 			// Phase 4: Handle message retrieval and response outside the lock.
 			if !msgFound {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
 					return
 				}
@@ -905,6 +923,7 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			if isDeleted {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Message is deleted\r\n") {
 					return
 				}
@@ -912,6 +931,7 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			if msg.UID == 0 {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
 					return
 				}
@@ -928,6 +948,7 @@ func (s *POP3Session) handleConnection() {
 					writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 				}
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -951,6 +972,7 @@ func (s *POP3Session) handleConnection() {
 				if s.memTracker != nil && bodyData != nil {
 					s.memTracker.Free(int64(len(bodyData)))
 				}
+				recordMetrics("success")
 				continue
 			}
 
@@ -996,28 +1018,26 @@ func (s *POP3Session) handleConnection() {
 			if s.memTracker != nil && bodyData != nil {
 				s.memTracker.Free(int64(len(bodyData)))
 			}
-			success = true
+
+			recordMetrics("success")
 
 		case "RETR":
 			retrieveStart := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "RETR", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "RETR").Observe(time.Since(retrieveStart).Seconds())
-			}()
+			}
 
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting retr command")
+				recordMetrics("failure")
 				return
 			}
 
 			// Check authentication state (atomic read, no lock needed)
 			if !s.authenticated.Load() {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Not authenticated\r\n") {
 					return
 				}
@@ -1025,6 +1045,7 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			if len(parts) < 2 {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Missing message number\r\n") {
 					return
 				}
@@ -1033,6 +1054,7 @@ func (s *POP3Session) handleConnection() {
 
 			msgNumber, err := strconv.Atoi(parts[1])
 			if err != nil || msgNumber < 1 {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Invalid message number\r\n") {
 					return
 				}
@@ -1045,6 +1067,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire read lock within timeout")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 			mailboxID := s.inboxMailboxID
@@ -1064,6 +1087,7 @@ func (s *POP3Session) handleConnection() {
 					s.DebugLog("retr error", "error", err)
 					writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 			}
@@ -1083,6 +1107,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire lock for retr command")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -1102,6 +1127,7 @@ func (s *POP3Session) handleConnection() {
 
 			// Phase 4: Handle message retrieval and response outside the lock.
 			if !msgFound {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
 					return
 				}
@@ -1109,6 +1135,7 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			if isDeleted {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Message is deleted\r\n") {
 					return
 				}
@@ -1116,6 +1143,7 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			if msg.UID == 0 {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
 					return
 				}
@@ -1132,6 +1160,7 @@ func (s *POP3Session) handleConnection() {
 					writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 				}
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 			s.DebugLog("retrieved message body", "uid", msg.UID)
@@ -1143,6 +1172,7 @@ func (s *POP3Session) handleConnection() {
 				if s.memTracker != nil {
 					s.memTracker.Free(int64(len(bodyData)))
 				}
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Message body is empty\r\n") {
 					return
 				}
@@ -1182,38 +1212,30 @@ func (s *POP3Session) handleConnection() {
 			// Track for session summary
 			s.messagesRetrieved++
 
-			success = true
+			recordMetrics("success")
 
 		case "NOOP":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "NOOP", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "NOOP").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			writer.WriteString("+OK\r\n")
-			success = true
+
+			recordMetrics("success")
 
 		case "RSET":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "RSET", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "RSET").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting rset command")
+				recordMetrics("failure")
 				return
 			}
 
@@ -1223,6 +1245,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire write lock within timeout")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 			defer release()
@@ -1230,28 +1253,26 @@ func (s *POP3Session) handleConnection() {
 
 			writer.WriteString("+OK\r\n")
 			s.DebugLog("deleted messages reset")
-			success = true
+
+			recordMetrics("success")
 
 		case "DELE":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "DELE", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "DELE").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting dele command")
+				recordMetrics("failure")
 				return
 			}
 
 			if len(parts) < 2 {
 				logger.Debug("missing message number")
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Missing message number\r\n") {
 					return
 				}
@@ -1261,6 +1282,7 @@ func (s *POP3Session) handleConnection() {
 			msgNumber, err := strconv.Atoi(parts[1])
 			if err != nil || msgNumber < 1 {
 				s.DebugLog("dele invalid message number", "error", err)
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Invalid message number\r\n") {
 					return
 				}
@@ -1269,6 +1291,7 @@ func (s *POP3Session) handleConnection() {
 
 			// Check authentication state (atomic read, no lock needed)
 			if !s.authenticated.Load() {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Not authenticated\r\n") {
 					return
 				}
@@ -1281,6 +1304,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire read lock for dele command")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 			needsLoading := (s.messages == nil)
@@ -1300,6 +1324,7 @@ func (s *POP3Session) handleConnection() {
 					s.DebugLog("dele error", "error", err)
 					writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 			}
@@ -1310,6 +1335,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire write lock for dele command")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -1323,6 +1349,7 @@ func (s *POP3Session) handleConnection() {
 			if msgNumber > len(s.messages) {
 				release()
 				s.DebugLog("dele no such message", "msg_number", msgNumber)
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
 					return
 				}
@@ -1333,6 +1360,7 @@ func (s *POP3Session) handleConnection() {
 			if msg.UID == 0 {
 				release()
 				s.DebugLog("dele no such message", "msg_number", msgNumber)
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR No such message\r\n") {
 					return
 				}
@@ -1350,28 +1378,26 @@ func (s *POP3Session) handleConnection() {
 			s.DebugLog("marked message for deletion", "msg_number", msgNumber, "uid", msg.UID, "mailbox_id", mailboxID, "total_deleted", len(s.deleted))
 
 			metrics.MessageThroughput.WithLabelValues("pop3", "deleted", "success").Inc()
-			success = true
+
+			recordMetrics("success")
 
 		case "AUTH":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "AUTH", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "AUTH").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting auth command")
+				recordMetrics("failure")
 				return
 			}
 
 			// Check authentication state (atomic read, no lock needed)
 			if s.authenticated.Load() {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Already authenticated\r\n") {
 					return
 				}
@@ -1379,6 +1405,7 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			if len(parts) < 2 {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Missing authentication mechanism\r\n") {
 					return
 				}
@@ -1389,6 +1416,7 @@ func (s *POP3Session) handleConnection() {
 			mechanism := server.UnquoteString(parts[1])
 			mechanism = strings.ToUpper(mechanism)
 			if mechanism != "PLAIN" {
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Unsupported authentication mechanism\r\n") {
 					return
 				}
@@ -1398,6 +1426,7 @@ func (s *POP3Session) handleConnection() {
 			// Check insecure_auth: reject AUTH over non-TLS when insecure_auth is false
 			if !s.server.insecureAuth && !s.isConnectionSecure() {
 				s.DebugLog("AUTH PLAIN rejected - TLS required")
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR Authentication requires TLS connection\r\n") {
 					return
 				}
@@ -1418,6 +1447,7 @@ func (s *POP3Session) handleConnection() {
 				authLine, err := reader.ReadString('\n')
 				if err != nil {
 					s.DebugLog("error reading auth data", "error", err)
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR Authentication failed\r\n") {
 						return
 					}
@@ -1432,6 +1462,7 @@ func (s *POP3Session) handleConnection() {
 			if authData == "*" {
 				writer.WriteString("-ERR Authentication cancelled\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -1439,6 +1470,7 @@ func (s *POP3Session) handleConnection() {
 			decoded, err := base64.StdEncoding.DecodeString(authData)
 			if err != nil {
 				s.DebugLog("error decoding auth data", "error", err)
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR [AUTH] Invalid authentication data\r\n") {
 					return
 				}
@@ -1449,6 +1481,7 @@ func (s *POP3Session) handleConnection() {
 			parts := strings.Split(string(decoded), "\x00")
 			if len(parts) != 3 {
 				s.DebugLog("invalid sasl plain format")
+				recordMetrics("failure")
 				if s.handleClientError(writer, "-ERR [AUTH] Invalid authentication format\r\n") {
 					return
 				}
@@ -1484,6 +1517,7 @@ func (s *POP3Session) handleConnection() {
 					address, err := server.NewAddress(targetUserToImpersonate)
 					if err != nil {
 						s.DebugLog("failed to parse impersonation target user", "target_user", targetUserToImpersonate, "error", err)
+						recordMetrics("failure")
 						if s.handleClientError(writer, "-ERR [AUTH] Invalid impersonation target user format\r\n") {
 							return
 						}
@@ -1493,6 +1527,7 @@ func (s *POP3Session) handleConnection() {
 					accountID, err = s.server.rdb.GetAccountIDByAddressWithRetry(ctx, address.BaseAddress())
 					if err != nil {
 						s.DebugLog("failed to get account id for impersonation target user", "target_user", targetUserToImpersonate, "error", err)
+						recordMetrics("failure")
 						if s.handleClientError(writer, "-ERR [AUTH] Impersonation target user not found\r\n") {
 							return
 						}
@@ -1505,6 +1540,7 @@ func (s *POP3Session) handleConnection() {
 					metrics.AuthenticationAttempts.WithLabelValues("pop3", s.server.name, s.server.hostname, "failure").Inc()
 
 					// Master username suffix was provided but master password was wrong - fail immediately
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR [AUTH] Invalid master credentials\r\n") {
 						s.DebugLog("authentication failed, invalid master credentials")
 						return
@@ -1520,6 +1556,7 @@ func (s *POP3Session) handleConnection() {
 					// Master SASL authentication successful
 					if authzID == "" {
 						s.DebugLog("master sasl authentication successful but no authorization identity provided", "authn_id", authnID)
+						recordMetrics("failure")
 						if s.handleClientError(writer, "-ERR [AUTH] Master SASL login requires an authorization identity.\r\n") {
 							return
 						}
@@ -1532,6 +1569,7 @@ func (s *POP3Session) handleConnection() {
 					address, err := server.NewAddress(authzID)
 					if err != nil {
 						s.DebugLog("failed to parse impersonation target user", "authz_id", authzID, "error", err)
+						recordMetrics("failure")
 						if s.handleClientError(writer, "-ERR [AUTH] Invalid impersonation target user format\r\n") {
 							return
 						}
@@ -1541,6 +1579,7 @@ func (s *POP3Session) handleConnection() {
 					accountID, err = s.server.rdb.GetAccountIDByAddressWithRetry(ctx, address.BaseAddress())
 					if err != nil {
 						s.DebugLog("failed to get account id for impersonation target user", "authz_id", authzID, "error", err)
+						recordMetrics("failure")
 						if s.handleClientError(writer, "-ERR [AUTH] Impersonation target user not found\r\n") {
 							return
 						}
@@ -1556,6 +1595,7 @@ func (s *POP3Session) handleConnection() {
 				// For regular POP3, we don't support proxy authentication
 				if authzID != "" && authzID != authnID {
 					s.DebugLog("proxy authentication requires master credentials", "authz_id", authzID, "authn_id", authnID)
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR [AUTH] Proxy authentication requires master_sasl_username and master_sasl_password to be configured\r\n") {
 						return
 					}
@@ -1566,6 +1606,7 @@ func (s *POP3Session) handleConnection() {
 				address, err := server.NewAddress(authnID)
 				if err != nil {
 					s.DebugLog("invalid address format", "error", err)
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR [AUTH] Invalid username format\r\n") {
 						return
 					}
@@ -1591,6 +1632,7 @@ func (s *POP3Session) handleConnection() {
 				if s.server.authLimiter != nil {
 					if err := s.server.authLimiter.CanAttemptAuthWithProxy(ctx, netConn, proxyInfo, address.FullAddress()); err != nil {
 						s.DebugLog("sasl plain rate limited", "error", err)
+						recordMetrics("failure")
 						if s.handleClientError(writer, "-ERR [LOGIN-DELAY] Too many authentication attempts. Please try again later.\r\n") {
 							return
 						}
@@ -1603,6 +1645,7 @@ func (s *POP3Session) handleConnection() {
 					// Check if error is due to context cancellation (server shutdown)
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 						s.InfoLog("sasl authentication cancelled due to server shutdown")
+						recordMetrics("failure")
 						if s.handleClientError(writer, "-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n") {
 							return
 						}
@@ -1613,6 +1656,7 @@ func (s *POP3Session) handleConnection() {
 					if s.server.authLimiter != nil {
 						s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, netConn, proxyInfo, address.FullAddress(), false)
 					}
+					recordMetrics("failure")
 					if s.handleClientError(writer, "-ERR [AUTH] Authentication failed\r\n") {
 						s.DebugLog("authentication failed")
 						return
@@ -1633,6 +1677,7 @@ func (s *POP3Session) handleConnection() {
 				s.DebugLog("error creating default mailboxes", "error", err)
 				writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 			// Create a context that signals to the DB layer to use the master connection.
@@ -1644,6 +1689,7 @@ func (s *POP3Session) handleConnection() {
 				s.DebugLog("error getting inbox", "error", err)
 				writer.WriteString("-ERR [SYS/TEMP] Service temporarily unavailable, please try again later\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -1653,6 +1699,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire write lock within timeout")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 
@@ -1699,19 +1746,15 @@ func (s *POP3Session) handleConnection() {
 			s.startTerminationPoller()
 
 			writer.WriteString("+OK Authentication successful\r\n")
-			success = true
+
+			recordMetrics("success")
 
 		case "LANG":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "LANG", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "LANG").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// LANG command - set or query language
 			// Acquire read lock to access current language
@@ -1720,6 +1763,7 @@ func (s *POP3Session) handleConnection() {
 				s.WarnLog("failed to acquire read lock within timeout")
 				writer.WriteString("-ERR Server busy, please try again\r\n")
 				writer.Flush()
+				recordMetrics("failure")
 				continue
 			}
 			currentLang := s.language
@@ -1738,6 +1782,7 @@ func (s *POP3Session) handleConnection() {
 				if langTag != "en" && langTag != "*" {
 					writer.WriteString("-ERR [LANG] Unsupported language\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 
@@ -1747,6 +1792,7 @@ func (s *POP3Session) handleConnection() {
 					s.WarnLog("failed to acquire write lock within timeout")
 					writer.WriteString("-ERR Server busy, please try again\r\n")
 					writer.Flush()
+					recordMetrics("failure")
 					continue
 				}
 				defer release()
@@ -1760,43 +1806,36 @@ func (s *POP3Session) handleConnection() {
 				writer.WriteString(fmt.Sprintf("+OK Language changed to %s\r\n", s.language))
 			}
 			s.DebugLog("lang command executed", "current", currentLang)
-			success = true
+
+			recordMetrics("success")
 
 		case "UTF8":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "UTF8", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "UTF8").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// UTF8 command - enable UTF-8 mode (atomic write, no lock needed)
 			s.utf8Mode.Store(true)
 
 			writer.WriteString("+OK UTF8 enabled\r\n")
 			s.DebugLog("utf8 mode enabled")
-			success = true
+
+			recordMetrics("success")
 
 		case "QUIT":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "QUIT", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "QUIT").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			s.DebugLog("quit command received, starting message expunge process")
 			// Check context before processing command
 			if s.ctx.Err() != nil {
 				s.WarnLog("request aborted, aborting quit command")
+				recordMetrics("failure")
 				return
 			}
 
@@ -1849,22 +1888,17 @@ func (s *POP3Session) handleConnection() {
 			writer.WriteString("+OK Goodbye\r\n")
 			writer.Flush()
 
-			success = true
+			recordMetrics("success")
 			// Return and let defer s.Close() handle cleanup
 			return
 
 		case "XCLIENT":
 			// XCLIENT command for Dovecot-style parameter forwarding
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("pop3", "XCLIENT", status).Inc()
 				metrics.CommandDuration.WithLabelValues("pop3", "XCLIENT").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Extract the arguments (everything after XCLIENT)
 			args := ""
@@ -1873,7 +1907,8 @@ func (s *POP3Session) handleConnection() {
 			}
 
 			s.handleXCLIENT(args, writer)
-			success = true
+
+			recordMetrics("success")
 
 		default:
 			writer.WriteString(fmt.Sprintf("-ERR Unknown command: %s\r\n", cmd))

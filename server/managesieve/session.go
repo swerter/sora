@@ -148,31 +148,26 @@ func (s *ManageSieveSession) handleConnection() {
 		switch command {
 		case "CAPABILITY":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "CAPABILITY", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "CAPABILITY").Observe(time.Since(start).Seconds())
-			}()
-			success = s.handleCapability()
+			}
+			if s.handleCapability() {
+				recordMetrics("success")
+			} else {
+				recordMetrics("failure")
+			}
 
 		case "LOGIN":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "LOGIN", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "LOGIN").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			if len(parts) < 3 {
 				s.sendResponse("NO Syntax: LOGIN address password\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			// Remove quotes if present
@@ -183,6 +178,7 @@ func (s *ManageSieveSession) handleConnection() {
 			if err != nil {
 				s.DebugLog("invalid address", "error", err)
 				s.sendResponse("NO Invalid address\r\n")
+				recordMetrics("failure")
 				continue
 			}
 
@@ -216,6 +212,7 @@ func (s *ManageSieveSession) handleConnection() {
 					}
 
 					s.sendResponse("NO Too many authentication attempts. Please try again later.\r\n")
+					recordMetrics("failure")
 					continue
 				}
 			}
@@ -241,6 +238,7 @@ func (s *ManageSieveSession) handleConnection() {
 						}
 						metrics.AuthenticationAttempts.WithLabelValues("managesieve", s.server.name, s.server.hostname, "failure").Inc()
 						s.sendResponse("NO Authentication failed\r\n")
+						recordMetrics("failure")
 						continue
 					}
 				} else {
@@ -252,6 +250,7 @@ func (s *ManageSieveSession) handleConnection() {
 
 					// Master username suffix was provided but master password was wrong - fail immediately
 					s.sendResponse("NO Invalid master credentials\r\n")
+					recordMetrics("failure")
 					continue
 				}
 			}
@@ -272,6 +271,7 @@ func (s *ManageSieveSession) handleConnection() {
 						}
 						metrics.AuthenticationAttempts.WithLabelValues("managesieve", s.server.name, s.server.hostname, "failure").Inc()
 						s.sendResponse("NO Authentication failed\r\n")
+						recordMetrics("failure")
 						continue
 					}
 				}
@@ -287,6 +287,7 @@ func (s *ManageSieveSession) handleConnection() {
 					}
 					metrics.AuthenticationAttempts.WithLabelValues("managesieve", s.server.name, s.server.hostname, "failure").Inc()
 					s.sendResponse("NO Authentication failed\r\n")
+					recordMetrics("failure")
 					continue
 				}
 				authSuccess = true
@@ -300,6 +301,7 @@ func (s *ManageSieveSession) handleConnection() {
 			// Check if the context was cancelled during authentication logic
 			if s.ctx.Err() != nil {
 				s.DebugLog("request aborted, aborting session update")
+				recordMetrics("failure")
 				continue
 			}
 
@@ -308,6 +310,7 @@ func (s *ManageSieveSession) handleConnection() {
 			if !acquired {
 				s.WarnLog("failed to acquire write lock", "command", "LOGIN")
 				s.sendResponse("NO Server busy, try again later\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			defer release()
@@ -346,80 +349,77 @@ func (s *ManageSieveSession) handleConnection() {
 			s.startTerminationPoller()
 
 			s.sendResponse("OK Authenticated\r\n")
-			success = true
+			recordMetrics("success")
 
 		case "AUTHENTICATE":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "AUTHENTICATE", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "AUTHENTICATE").Observe(time.Since(start).Seconds())
-			}()
-			success = s.handleAuthenticate(parts)
+			}
+			if s.handleAuthenticate(parts) {
+				recordMetrics("success")
+			} else {
+				recordMetrics("failure")
+			}
 
 		case "LISTSCRIPTS":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "LISTSCRIPTS", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "LISTSCRIPTS").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			if !s.authenticated {
 				s.sendResponse("NO Not authenticated\r\n")
+				recordMetrics("failure")
 				continue
 			}
-			success = s.handleListScripts()
+			if s.handleListScripts() {
+				recordMetrics("success")
+			} else {
+				recordMetrics("failure")
+			}
 
 		case "GETSCRIPT":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "GETSCRIPT", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "GETSCRIPT").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			if !s.authenticated {
 				s.sendResponse("NO Not authenticated\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			if len(parts) < 2 {
 				s.sendResponse("NO Syntax: GETSCRIPT scriptName\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			scriptName := parts[1]
-			success = s.handleGetScript(scriptName)
+			if s.handleGetScript(scriptName) {
+				recordMetrics("success")
+			} else {
+				recordMetrics("failure")
+			}
 
 		case "PUTSCRIPT":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "PUTSCRIPT", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "PUTSCRIPT").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			if !s.authenticated {
 				s.sendResponse("NO Not authenticated\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			if len(parts) < 3 {
 				s.sendResponse("NO Syntax: PUTSCRIPT scriptName scriptContent\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			scriptName := parts[1]
@@ -432,6 +432,7 @@ func (s *ManageSieveSession) handleConnection() {
 				length := 0
 				if _, err := fmt.Sscanf(lengthStr, "%d", &length); err != nil || length < 0 {
 					s.sendResponse("NO Invalid literal string length\r\n")
+					recordMetrics("failure")
 					continue
 				}
 
@@ -443,77 +444,81 @@ func (s *ManageSieveSession) handleConnection() {
 				n, err := io.ReadFull(s.reader, literalContent)
 				if err != nil || n != length {
 					s.sendResponse("NO Failed to read literal string content\r\n")
+					recordMetrics("failure")
 					continue
 				}
 				scriptContent = string(literalContent)
 			}
 
-			success = s.handlePutScript(scriptName, scriptContent)
+			if s.handlePutScript(scriptName, scriptContent) {
+				recordMetrics("success")
+			} else {
+				recordMetrics("failure")
+			}
 
 		case "SETACTIVE":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "SETACTIVE", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "SETACTIVE").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			if !s.authenticated {
 				s.sendResponse("NO Not authenticated\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			if len(parts) < 2 {
 				s.sendResponse("NO Syntax: SETACTIVE scriptName\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			scriptName := parts[1]
-			success = s.handleSetActive(scriptName)
+			if s.handleSetActive(scriptName) {
+				recordMetrics("success")
+			} else {
+				recordMetrics("failure")
+			}
 
 		case "DELETESCRIPT":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "DELETESCRIPT", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "DELETESCRIPT").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			if !s.authenticated {
 				s.sendResponse("NO Not authenticated\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			if len(parts) < 2 {
 				s.sendResponse("NO Syntax: DELETESCRIPT scriptName\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			scriptName := parts[1]
-			success = s.handleDeleteScript(scriptName)
+			if s.handleDeleteScript(scriptName) {
+				recordMetrics("success")
+			} else {
+				recordMetrics("failure")
+			}
 
 		case "STARTTLS":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "STARTTLS", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "STARTTLS").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			if !s.server.useStartTLS || s.server.tlsConfig == nil {
 				s.sendResponse("NO STARTTLS not supported\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			if s.isTLS {
 				s.sendResponse("NO TLS already active\r\n")
+				recordMetrics("failure")
 				continue
 			}
 			s.sendResponse("OK Begin TLS negotiation\r\n")
@@ -523,12 +528,14 @@ func (s *ManageSieveSession) handleConnection() {
 			if err := tlsConn.Handshake(); err != nil {
 				s.WarnLog("tls handshake failed", "error", err)
 				s.sendResponse("NO TLS handshake failed\r\n")
+				recordMetrics("failure")
 				continue
 			}
 
 			// Check if context was cancelled during handshake
 			if s.ctx.Err() != nil {
 				s.DebugLog("request aborted after handshake")
+				recordMetrics("failure")
 				return
 			}
 
@@ -537,6 +544,7 @@ func (s *ManageSieveSession) handleConnection() {
 			if !acquired {
 				s.WarnLog("failed to acquire write lock", "command", "STARTTLS")
 				s.sendResponse("NO Server busy, try again later\r\n")
+				recordMetrics("failure")
 				continue
 			}
 
@@ -550,19 +558,14 @@ func (s *ManageSieveSession) handleConnection() {
 			release()
 
 			s.DebugLog("tls negotiation successful")
-			success = true
+			recordMetrics("success")
 
 		case "NOOP":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "NOOP", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "NOOP").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			// Handle NOOP with optional tag argument (e.g., NOOP "STARTTLS-RESYNC-CAPA")
 			// sieve-connect uses this to verify capabilities were received
@@ -572,24 +575,19 @@ func (s *ManageSieveSession) handleConnection() {
 			} else {
 				s.sendResponse("OK\r\n")
 			}
-			success = true
+			recordMetrics("success")
 
 		case "LOGOUT":
 			start := time.Now()
-			success := false
-			defer func() {
-				status := "failure"
-				if success {
-					status = "success"
-				}
+			recordMetrics := func(status string) {
 				metrics.CommandsTotal.WithLabelValues("managesieve", "LOGOUT", status).Inc()
 				metrics.CommandDuration.WithLabelValues("managesieve", "LOGOUT").Observe(time.Since(start).Seconds())
-			}()
+			}
 
 			s.sendResponse("OK Goodbye\r\n")
 			s.writer.Flush()
 
-			success = true
+			recordMetrics("success")
 			// Return and let defer s.Close() handle cleanup
 			return
 
@@ -804,16 +802,6 @@ func (s *ManageSieveSession) handlePutScript(name, content string) bool {
 			return false
 		}
 
-		// Track script upload/update
-		metrics.ManageSieveScriptsUploaded.Inc()
-		metrics.CriticalOperationDuration.WithLabelValues("managesieve_putscript").Observe(time.Since(start).Seconds())
-
-		// Track domain and user activity - PUTSCRIPT is script processing intensive!
-		if s.User != nil {
-			metrics.TrackDomainCommand("managesieve", s.Domain(), "PUTSCRIPT")
-			metrics.TrackUserActivity("managesieve", s.FullAddress(), "command", 1)
-		}
-
 		responseMsg = "OK Script updated\r\n"
 	} else {
 		_, err = s.server.rdb.CreateScriptWithRetry(s.ctx, accountID, name, content)
@@ -833,7 +821,7 @@ func (s *ManageSieveSession) handlePutScript(name, content string) bool {
 		release()
 	}
 
-	// Track script upload/create
+	// Track script upload
 	metrics.ManageSieveScriptsUploaded.Inc()
 	metrics.CriticalOperationDuration.WithLabelValues("managesieve_putscript").Observe(time.Since(start).Seconds())
 

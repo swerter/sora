@@ -85,15 +85,10 @@ func extractPartial(b []byte, partial *imap.SectionPartial) []byte {
 
 func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
 	start := time.Now()
-	success := false
-	defer func() {
-		status := "failure"
-		if success {
-			status = "success"
-		}
+	recordMetrics := func(status string) {
 		metrics.CommandsTotal.WithLabelValues("imap", "FETCH", status).Inc()
 		metrics.CommandDuration.WithLabelValues("imap", "FETCH").Observe(time.Since(start).Seconds())
-	}()
+	}
 
 	// First, safely read necessary session state and decode the sequence numbers all within a single read lock
 	var selectedMailboxID int64
@@ -103,6 +98,7 @@ func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 	acquired, release := s.mutexHelper.AcquireReadLockWithTimeout()
 	if !acquired {
 		s.WarnLog("failed to acquire read lock within timeout")
+		recordMetrics("failure")
 		return &imap.Error{
 			Type: imap.StatusResponseTypeNo,
 			Code: imap.ResponseCodeServerBug,
@@ -113,6 +109,7 @@ func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 	if s.selectedMailbox == nil {
 		release()
 		s.DebugLog("no mailbox selected")
+		recordMetrics("failure")
 		return &imap.Error{
 			Type: imap.StatusResponseTypeNo,
 			Code: imap.ResponseCodeNonExistent,
@@ -132,6 +129,7 @@ func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 
 	messages, err := s.server.rdb.GetMessagesByNumSetWithRetry(s.ctx, selectedMailboxID, decodedNumSet)
 	if err != nil {
+		recordMetrics("failure")
 		return s.internalError("failed to retrieve messages: %v", err)
 	}
 
@@ -144,13 +142,14 @@ func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 			decodedNumSet = s.decodeNumSet(numSet) // This will re-lock, but it's a rare case
 			messages, err = s.server.rdb.GetMessagesByNumSetWithRetry(s.ctx, selectedMailboxID, decodedNumSet)
 			if err != nil {
+				recordMetrics("failure")
 				return s.internalError("failed to retrieve messages: %v", err)
 			}
 		}
 	}
 
 	if len(messages) == 0 {
-		success = true
+		recordMetrics("success")
 		return nil
 	}
 
@@ -208,7 +207,7 @@ func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 		metrics.TrackDomainBytes("imap", s.IMAPUser.Domain(), "out", totalBytesFetched)
 	}
 
-	success = true
+	recordMetrics("success")
 	return nil
 }
 
