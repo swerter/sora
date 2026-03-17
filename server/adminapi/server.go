@@ -323,6 +323,7 @@ func (s *Server) setupRoutes() http.Handler {
 
 	// Authentication statistics routes
 	mux.HandleFunc("/admin/auth/stats", routeHandler("GET", s.handleAuthStats))
+	mux.HandleFunc("/admin/auth/blocked", routeHandler("GET", s.handleAuthBlocked))
 
 	// Health monitoring routes
 	mux.HandleFunc("/admin/health/overview", routeHandler("GET", s.handleHealthOverview))
@@ -1677,6 +1678,23 @@ func (s *Server) handleAuthStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleAuthBlocked(w http.ResponseWriter, r *http.Request) {
+	// Get optional protocol filter from query parameter
+	protocol := r.URL.Query().Get("protocol")
+
+	var entries []server.BlockedEntry
+	if protocol != "" {
+		entries = server.GetBlockedEntriesByProtocol(protocol)
+	} else {
+		entries = server.GetAllBlockedEntries()
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"blocked_entries": entries,
+		"count":           len(entries),
+	})
+}
+
 // Message restoration handlers
 
 func (s *Server) handleListDeletedMessages(w http.ResponseWriter, r *http.Request) {
@@ -1908,6 +1926,7 @@ func (s *Server) handleConfigInfo(w http.ResponseWriter, r *http.Request) {
 			},
 			"system_information": {
 				"GET /admin/auth/stats",
+				"GET /admin/auth/blocked",
 				"GET /admin/config",
 			},
 		},

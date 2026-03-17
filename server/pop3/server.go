@@ -157,6 +157,7 @@ func New(appCtx context.Context, name, hostname, popAddr string, s3 *storage.S3S
 
 	// Initialize authentication rate limiter with trusted networks
 	authLimiter := serverPkg.NewAuthRateLimiterWithTrustedNetworks("POP3", name, hostname, options.AuthRateLimit, options.TrustedNetworks)
+	serverPkg.RegisterRateLimiter("pop3", name, authLimiter)
 
 	// Initialize authentication cache from config
 	// Default to enabled if not explicitly configured
@@ -552,6 +553,9 @@ func (s *POP3Server) SetConnTracker(tracker *serverPkg.ConnectionTracker) {
 }
 
 func (s *POP3Server) Close() {
+	// Unregister rate limiter from global registry
+	serverPkg.UnregisterRateLimiter("pop3", s.name)
+
 	// Stop connection tracker first to prevent it from trying to access closed database
 	if s.connTracker != nil {
 		s.connTracker.Stop()

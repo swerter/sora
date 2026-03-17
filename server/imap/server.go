@@ -400,6 +400,7 @@ func New(appCtx context.Context, name, hostname, imapAddr string, s3 *storage.S3
 
 	// Initialize authentication rate limiter with trusted networks
 	authLimiter := serverPkg.NewAuthRateLimiterWithTrustedNetworks("IMAP", name, hostname, options.AuthRateLimit, options.TrustedNetworks)
+	serverPkg.RegisterRateLimiter("imap", name, authLimiter)
 
 	// Initialize search rate limiter
 	searchRateLimiter := serverPkg.NewSearchRateLimiter("IMAP", options.SearchRateLimitPerMin, options.SearchRateLimitWindow)
@@ -1023,6 +1024,9 @@ func (s *IMAPServer) SetConnTracker(tracker *serverPkg.ConnectionTracker) {
 }
 
 func (s *IMAPServer) Close() {
+	// Unregister rate limiter from global registry
+	serverPkg.UnregisterRateLimiter("imap", s.name)
+
 	// Stop connection tracker first to prevent it from trying to access closed database
 	if s.connTracker != nil {
 		s.connTracker.Stop()

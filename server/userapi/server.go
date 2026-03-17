@@ -88,6 +88,7 @@ func New(rdb *resilient.ResilientDatabase, options ServerOptions) (*Server, erro
 
 	// Create auth rate limiter
 	authLimiter := server.NewAuthRateLimiter("user-api", options.Name, "", options.AuthRateLimit)
+	server.RegisterRateLimiter("userapi", options.Name, authLimiter)
 
 	// Initialize authentication cache if configured
 	var authCache *lookupcache.LookupCache
@@ -213,6 +214,7 @@ func (s *Server) start(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		logger.Info("HTTP Mail API: Shutting down server...", "name", s.name)
+		server.UnregisterRateLimiter("userapi", s.name)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := s.server.Shutdown(shutdownCtx); err != nil {

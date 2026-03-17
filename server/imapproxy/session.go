@@ -604,7 +604,7 @@ func (s *Session) authenticateUser(username, password string) error {
 				// by rate limiting, not by extending cache TTL.
 				s.DebugLog("cache hit - negative entry with same password", "username", username, "age", time.Since(cached.CreatedAt))
 				metrics.CacheOperationsTotal.WithLabelValues("get", "hit_negative").Inc()
-				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, username, false)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, username, false)
 				metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "failure").Inc()
 				return consts.ErrAuthenticationFailed
 			} else {
@@ -646,7 +646,7 @@ func (s *Session) authenticateUser(username, password string) error {
 				}
 
 				// Use actual username (resolved email) for rate limiting and metrics
-				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, s.username, true)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, s.username, true)
 				metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "success").Inc()
 
 				// Track domain and user activity using resolved email
@@ -686,7 +686,7 @@ func (s *Session) authenticateUser(username, password string) error {
 					// Entry is fresh - likely wrong password attempt
 					s.DebugLog("cache hit - wrong password on fresh positive entry", "username", username)
 					metrics.CacheOperationsTotal.WithLabelValues("get", "hit_positive_wrong_pw").Inc()
-					s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, username, false)
+					s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, username, false)
 					metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "failure").Inc()
 					return consts.ErrAuthenticationFailed
 				}
@@ -742,7 +742,7 @@ func (s *Session) authenticateUser(username, password string) error {
 			// Suffix matches master username - validate master password locally
 			if !checkMasterCredential(password, s.server.masterPassword) {
 				// Wrong master password - fail immediately
-				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, parsedAddr.BaseAddress(), false)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, parsedAddr.BaseAddress(), false)
 				metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "failure").Inc()
 				return consts.ErrAuthenticationFailed
 			}
@@ -791,7 +791,7 @@ func (s *Session) authenticateUser(username, password string) error {
 			if errors.Is(err, proxy.ErrRemoteLookupInvalidResponse) {
 				// Invalid response from remotelookup (malformed 2xx) - this is a server bug, fail hard
 				logger.Error("remotelookup returned invalid response - server bug", "proxy", s.server.name, "user", username, "error", err)
-				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, username, false)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, username, false)
 				metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "failure").Inc()
 				return fmt.Errorf("remotelookup server error: invalid response")
 			}
@@ -808,7 +808,7 @@ func (s *Session) authenticateUser(username, password string) error {
 				// These are service availability issues, not "user not found" cases
 				s.WarnLog("remotelookup transient error - service unavailable", "error", err)
 				metrics.RemoteLookupResult.WithLabelValues("imap", "transient_error_rejected").Inc()
-				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, username, false)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, username, false)
 				metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "failure").Inc()
 				return fmt.Errorf("remotelookup service unavailable")
 			} else {
@@ -837,7 +837,7 @@ func (s *Session) authenticateUser(username, password string) error {
 				s.username = resolvedEmail // Use for backend impersonation
 
 				// Use resolvedEmail for rate limiting and metrics (the actual user)
-				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, resolvedEmail, true)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, resolvedEmail, true)
 				metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "success").Inc()
 
 				// For metrics, use resolvedEmail for accurate tracking
@@ -885,7 +885,7 @@ func (s *Session) authenticateUser(username, password string) error {
 				if masterAuthValidated {
 					s.WarnLog("remotelookup failed but master auth was already validated - routing issue", "user", username)
 				}
-				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, username, false)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, username, false)
 				metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "failure").Inc()
 
 				// Cache negative result (failed authentication) WITH password hash
@@ -921,7 +921,7 @@ func (s *Session) authenticateUser(username, password string) error {
 				} else {
 					s.InfoLog("user not found in remotelookup, local lookup disabled - rejecting")
 					metrics.RemoteLookupResult.WithLabelValues("imap", "user_not_found_rejected").Inc()
-					s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, username, false)
+					s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, username, false)
 					metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "failure").Inc()
 					return consts.ErrAuthenticationFailed
 				}
@@ -960,7 +960,7 @@ func (s *Session) authenticateUser(username, password string) error {
 			}
 
 			s.InfoLog("master auth failed - account not found", "user", address.BaseAddress(), "error", err)
-			s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, address.BaseAddress(), false)
+			s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, address.BaseAddress(), false)
 			metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "failure").Inc()
 			return fmt.Errorf("account not found: %w", err)
 		}
@@ -978,7 +978,7 @@ func (s *Session) authenticateUser(username, password string) error {
 				return server.ErrServerShuttingDown
 			}
 
-			s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, username, false)
+			s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, username, false)
 			metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "failure").Inc()
 
 			// Only cache definitive authentication failures, NOT transient errors
@@ -1027,7 +1027,7 @@ func (s *Session) authenticateUser(username, password string) error {
 	// Set username to base address (without master username suffix or +detail)
 	// This is what gets sent to the backend for impersonation
 	s.username = address.BaseAddress()
-	s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, nil, username, true)
+	s.server.authLimiter.RecordAuthAttemptWithProxy(s.ctx, s.clientConn, s.proxyInfo, username, true)
 
 	// Track successful authentication.
 	metrics.AuthenticationAttempts.WithLabelValues("imap_proxy", s.server.name, s.server.hostname, "success").Inc()

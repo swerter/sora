@@ -435,7 +435,7 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 					// by rate limiting, not by extending cache TTL.
 					s.DebugLog("cache hit - negative entry with same password", "username", username, "age", time.Since(cached.CreatedAt))
 					metrics.CacheOperationsTotal.WithLabelValues("get", "hit_negative").Inc()
-					s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, username, false)
+					s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, username, false)
 					metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "failure").Inc()
 					return consts.ErrAuthenticationFailed
 				} else {
@@ -473,7 +473,7 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 					}
 
 					// Use resolved username for rate limiting and metrics
-					s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, s.username, true)
+					s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, s.username, true)
 					metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "success").Inc()
 
 					// Track domain and user activity using resolved email
@@ -513,7 +513,7 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 						// Entry is fresh - likely wrong password attempt
 						s.DebugLog("cache hit - wrong password on fresh positive entry", "username", username)
 						metrics.CacheOperationsTotal.WithLabelValues("get", "hit_positive_wrong_pw").Inc()
-						s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, username, false)
+						s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, username, false)
 						metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "failure").Inc()
 						return consts.ErrAuthenticationFailed
 					}
@@ -565,7 +565,7 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 			// Suffix matches master username - validate master password locally
 			if !checkMasterCredential(password, []byte(s.server.masterPassword)) {
 				// Wrong master password - fail immediately
-				s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, parsedAddr.BaseAddress(), false)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, parsedAddr.BaseAddress(), false)
 				metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "failure").Inc()
 				return consts.ErrAuthenticationFailed
 			}
@@ -616,7 +616,7 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 			if errors.Is(err, proxy.ErrRemoteLookupInvalidResponse) {
 				// Invalid response from remotelookup (malformed 2xx) - this is a server bug, fail hard
 				s.WarnLog("remotelookup returned invalid response - server bug, rejecting authentication", "error", err)
-				s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, username, false)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, username, false)
 				metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "failure").Inc()
 				return fmt.Errorf("remotelookup server error: invalid response")
 			}
@@ -633,7 +633,7 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 				// These are service availability issues, not "user not found" cases
 				s.WarnLog("remotelookup transient error - service unavailable", "error", err)
 				metrics.RemoteLookupResult.WithLabelValues("pop3", "transient_error_rejected").Inc()
-				s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, username, false)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, username, false)
 				metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "failure").Inc()
 				return fmt.Errorf("remotelookup service unavailable")
 			} else {
@@ -692,7 +692,7 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 
 				s.authenticated = true
 				// Use resolvedEmail for rate limiting (not submitted username with token)
-				s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, resolvedEmail, true)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, resolvedEmail, true)
 				metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "success").Inc()
 
 				// For metrics, use resolvedEmail for accurate tracking
@@ -735,7 +735,7 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 					})
 				}
 
-				s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, username, false)
+				s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, username, false)
 				metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "failure").Inc()
 
 				// Single consolidated log for authentication failure
@@ -758,7 +758,7 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 				} else {
 					s.InfoLog("user not found in remotelookup, local lookup disabled - rejecting")
 					metrics.RemoteLookupResult.WithLabelValues("pop3", "user_not_found_rejected").Inc()
-					s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, username, false)
+					s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, username, false)
 					metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "failure").Inc()
 					return consts.ErrAuthenticationFailed
 				}
@@ -796,7 +796,7 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 				return server.ErrServerShuttingDown
 			}
 
-			s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, address.BaseAddress(), false)
+			s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, address.BaseAddress(), false)
 			metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "failure").Inc()
 			return fmt.Errorf("account not found: %w", err)
 		}
@@ -848,13 +848,13 @@ func (s *POP3ProxySession) authenticate(username, password string) error {
 				s.InfoLog("authentication failed", "reason", reason, "cached", false, "method", "main_db")
 			}
 
-			s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, username, false)
+			s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, username, false)
 			metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "failure").Inc()
 			return fmt.Errorf("%w: %w", consts.ErrAuthenticationFailed, err)
 		}
 	}
 
-	s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, nil, username, true)
+	s.server.authLimiter.RecordAuthAttemptWithProxy(ctx, s.clientConn, s.proxyInfo, username, true)
 
 	// Track successful authentication.
 	metrics.AuthenticationAttempts.WithLabelValues("pop3_proxy", s.server.name, s.server.hostname, "success").Inc()

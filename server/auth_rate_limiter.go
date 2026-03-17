@@ -885,6 +885,69 @@ func (a *AuthRateLimiter) GetStats(ctx context.Context, windowDuration time.Dura
 	return stats
 }
 
+// BlockedEntry represents a blocked IP or IP+username combination
+type BlockedEntry struct {
+	IP           string    `json:"ip"`
+	Username     string    `json:"username,omitempty"` // Empty for IP-only blocks
+	BlockedUntil time.Time `json:"blocked_until"`
+	FailureCount int       `json:"failure_count"`
+	FirstFailure time.Time `json:"first_failure"`
+	LastFailure  time.Time `json:"last_failure"`
+	Protocol     string    `json:"protocol"`
+	Type         string    `json:"type"` // "ip_username" or "ip"
+}
+
+// GetBlockedEntries returns all currently blocked IPs and IP+username combinations
+func (a *AuthRateLimiter) GetBlockedEntries() []BlockedEntry {
+	if a == nil {
+		return nil
+	}
+
+	var entries []BlockedEntry
+	now := time.Now()
+
+	// Get IP+username blocks (Tier 1)
+	a.ipUsernameMu.RLock()
+	for _, info := range a.blockedIPUsernames {
+		// Skip if block has expired
+		if info.BlockedUntil.Before(now) {
+			continue
+		}
+		entries = append(entries, BlockedEntry{
+			IP:           info.IP,
+			Username:     info.Username,
+			BlockedUntil: info.BlockedUntil,
+			FailureCount: info.FailureCount,
+			FirstFailure: info.FirstFailure,
+			LastFailure:  info.LastFailure,
+			Protocol:     info.Protocol,
+			Type:         "ip_username",
+		})
+	}
+	a.ipUsernameMu.RUnlock()
+
+	// Get IP-only blocks (Tier 2)
+	a.ipMu.RLock()
+	for ip, info := range a.blockedIPs {
+		// Skip if block has expired
+		if info.BlockedUntil.Before(now) {
+			continue
+		}
+		entries = append(entries, BlockedEntry{
+			IP:           ip,
+			BlockedUntil: info.BlockedUntil,
+			FailureCount: info.FailureCount,
+			FirstFailure: info.FirstFailure,
+			LastFailure:  info.LastFailure,
+			Protocol:     info.Protocol,
+			Type:         "ip",
+		})
+	}
+	a.ipMu.RUnlock()
+
+	return entries
+}
+
 func (a *AuthRateLimiter) Stop() {
 	if a == nil {
 		return

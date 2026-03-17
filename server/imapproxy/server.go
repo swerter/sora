@@ -256,6 +256,7 @@ func New(appCtx context.Context, rdb *resilient.ResilientDatabase, hostname stri
 
 	// Initialize authentication rate limiter with trusted networks
 	authLimiter := server.NewAuthRateLimiterWithTrustedNetworks("IMAP-PROXY", opts.Name, hostname, opts.AuthRateLimit, opts.TrustedProxies)
+	server.RegisterRateLimiter("imap_proxy", opts.Name, authLimiter)
 
 	// Initialize connection limiter with trusted networks
 	var limiter *server.ConnectionLimiter
@@ -624,6 +625,9 @@ func (s *Server) GetConnectionManager() *proxy.ConnectionManager {
 // Stop stops the IMAP proxy server.
 func (s *Server) Stop() error {
 	logger.Info("Stopping proxy server", "proxy", s.name)
+
+	// Unregister rate limiter from global registry
+	server.UnregisterRateLimiter("imap_proxy", s.name)
 
 	// Stop connection tracker first to prevent it from trying to access closed database
 	if s.connTracker != nil {

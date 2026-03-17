@@ -160,6 +160,7 @@ func New(appCtx context.Context, name, hostname, addr string, rdb *resilient.Res
 
 	// Initialize authentication rate limiter with trusted networks
 	authLimiter := serverPkg.NewAuthRateLimiterWithTrustedNetworks("ManageSieve", name, hostname, options.AuthRateLimit, options.TrustedNetworks)
+	serverPkg.RegisterRateLimiter("managesieve", name, authLimiter)
 
 	// Initialize authentication cache from config
 	// Default to enabled if not explicitly configured
@@ -564,6 +565,9 @@ func (s *ManageSieveServer) SetConnTracker(tracker *serverPkg.ConnectionTracker)
 }
 
 func (s *ManageSieveServer) Close() {
+	// Unregister rate limiter from global registry
+	serverPkg.UnregisterRateLimiter("managesieve", s.name)
+
 	// Stop connection tracker first to prevent it from trying to access closed database
 	if s.connTracker != nil {
 		s.connTracker.Stop()

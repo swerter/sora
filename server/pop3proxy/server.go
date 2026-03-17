@@ -241,6 +241,7 @@ func New(appCtx context.Context, hostname, addr string, rdb *resilient.Resilient
 
 	// Initialize authentication rate limiter with trusted networks
 	authLimiter := server.NewAuthRateLimiterWithTrustedNetworks("POP3-PROXY", options.Name, hostname, options.AuthRateLimit, options.TrustedProxies)
+	server.RegisterRateLimiter("pop3_proxy", options.Name, authLimiter)
 
 	// Initialize connection limiter with trusted networks
 	var limiter *server.ConnectionLimiter
@@ -600,6 +601,9 @@ func (s *POP3ProxyServer) GetConnectionManager() *proxy.ConnectionManager {
 
 func (s *POP3ProxyServer) Stop() error {
 	logger.Debug("POP3 Proxy: Stopping", "proxy", s.name)
+
+	// Unregister rate limiter from global registry
+	server.UnregisterRateLimiter("pop3_proxy", s.name)
 
 	// Stop connection tracker first to prevent it from trying to access closed database
 	if s.connTracker != nil {

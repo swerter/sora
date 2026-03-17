@@ -27,6 +27,8 @@ func handleStatsCommand(ctx context.Context) {
 	switch subcommand {
 	case "auth":
 		handleAuthStatsCommand(ctx)
+	case "blocked":
+		handleBlockedCommand(ctx)
 	case "connection":
 		handleConnectionStats(ctx)
 	case "help", "--help", "-h":
@@ -77,6 +79,44 @@ Examples:
 	// Show auth stats
 	if err := showAuthStats(ctx, globalConfig); err != nil {
 		logger.Fatalf("Failed to get auth stats: %v", err)
+	}
+}
+
+func handleBlockedCommand(ctx context.Context) {
+	// Parse blocked specific flags
+	fs := flag.NewFlagSet("stats blocked", flag.ExitOnError)
+	protocol := fs.String("protocol", "", "Filter by protocol (imap, pop3, managesieve, imap_proxy, pop3_proxy, managesieve_proxy, userapi)")
+
+	fs.Usage = func() {
+		fmt.Printf(`Show blocked IPs and rate-limited addresses
+
+Usage:
+  sora-admin stats blocked [options]
+
+Options:
+  --config string     Path to TOML configuration file (required)
+  --protocol string   Filter by protocol (optional)
+
+Protocols:
+  imap, pop3, managesieve          Backend servers
+  imap_proxy, pop3_proxy           Proxy servers
+  managesieve_proxy, userapi       Other services
+
+Examples:
+  sora-admin stats blocked --config config.toml
+  sora-admin stats blocked --config config.toml --protocol imap_proxy
+  sora-admin stats blocked --config config.toml --protocol pop3
+`)
+	}
+
+	// Parse the remaining arguments
+	if err := fs.Parse(os.Args[3:]); err != nil {
+		logger.Fatalf("Error parsing flags: %v", err)
+	}
+
+	// Show blocked entries
+	if err := showBlockedEntries(ctx, globalConfig, *protocol); err != nil {
+		logger.Fatalf("Failed to get blocked entries: %v", err)
 	}
 }
 
@@ -136,11 +176,14 @@ Usage:
   sora-admin stats <subcommand> [options]
 
 Subcommands:
-  auth        Show authentication statistics and blocked IPs
+  auth        Show authentication statistics
+  blocked     Show blocked IPs and rate-limited addresses
   connection  Show active proxy connections and statistics
 
 Examples:
-  sora-admin stats auth --window 1h --blocked
+  sora-admin stats auth --config config.toml
+  sora-admin stats blocked --config config.toml
+  sora-admin stats blocked --config config.toml --protocol imap_proxy
   sora-admin stats connection --user user@example.com
 
 Use 'sora-admin stats <subcommand> --help' for detailed help.
@@ -241,6 +284,124 @@ func showAuthStats(ctx context.Context, cfg AdminConfig) error {
 	// Database table removal info
 	if dbInfo, ok := result["database_table_removed"].(string); ok {
 		fmt.Printf("      %s\n", dbInfo)
+	}
+
+	return nil
+}
+
+func showBlockedEntries(ctx context.Context, cfg AdminConfig, protocol string) error {
+	// Create HTTP API client
+	client, err := createHTTPAPIClient(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP API client: %w", err)
+	}
+
+	// Build URL with optional protocol filter
+	url := fmt.Sprintf("%s/admin/auth/blocked", cfg.HTTPAPIAddr)
+	if protocol != "" {
+		url = fmt.Sprintf("%s?protocol=%s", url, protocol)
+	}
+
+	// Make request
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Check status code
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API request failed (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var result struct {
+		BlockedEntries []struct {
+			IP           string    `json:"ip"`
+			Username     string    `json:"username,omitempty"`
+			BlockedUntil time.Time `json:"blocked_until"`
+			FailureCount int       `json:"failure_count"`
+			FirstFailure time.Time `json:"first_failure"`
+			LastFailure  time.Time `json:"last_failure"`
+			Protocol     string    `json:"protocol"`
+			Type         string    `json:"type"`
+		} `json:"blocked_entries"`
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Display results
+	fmt.Println("Blocked IPs and Rate-Limited Addresses")
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Println()
+
+	if result.Count == 0 {
+		fmt.Println("No blocked entries found.")
+		return nil
+	}
+
+	fmt.Printf("Total blocked entries: %d\n\n", result.Count)
+
+	// Group by type for better display
+	ipUsernameBlocks := []int{}
+	ipBlocks := []int{}
+	for i, entry := range result.BlockedEntries {
+		if entry.Type == "ip_username" {
+			ipUsernameBlocks = append(ipUsernameBlocks, i)
+		} else {
+			ipBlocks = append(ipBlocks, i)
+		}
+	}
+
+	// Display IP+username blocks
+	if len(ipUsernameBlocks) > 0 {
+		fmt.Printf("IP+Username Blocks (%d):\n", len(ipUsernameBlocks))
+		fmt.Println(strings.Repeat("-", 70))
+		for _, i := range ipUsernameBlocks {
+			entry := result.BlockedEntries[i]
+			fmt.Printf("  IP:           %s\n", entry.IP)
+			fmt.Printf("  Username:     %s\n", entry.Username)
+			fmt.Printf("  Protocol:     %s\n", entry.Protocol)
+			fmt.Printf("  Blocked until: %s (%s remaining)\n",
+				entry.BlockedUntil.Format("2006-01-02 15:04:05 MST"),
+				time.Until(entry.BlockedUntil).Round(time.Second))
+			fmt.Printf("  Failures:     %d (first: %s, last: %s)\n",
+				entry.FailureCount,
+				entry.FirstFailure.Format("15:04:05"),
+				entry.LastFailure.Format("15:04:05"))
+			fmt.Println()
+		}
+	}
+
+	// Display IP-only blocks
+	if len(ipBlocks) > 0 {
+		fmt.Printf("IP-Only Blocks (%d):\n", len(ipBlocks))
+		fmt.Println(strings.Repeat("-", 70))
+		for _, i := range ipBlocks {
+			entry := result.BlockedEntries[i]
+			fmt.Printf("  IP:           %s\n", entry.IP)
+			fmt.Printf("  Protocol:     %s\n", entry.Protocol)
+			fmt.Printf("  Blocked until: %s (%s remaining)\n",
+				entry.BlockedUntil.Format("2006-01-02 15:04:05 MST"),
+				time.Until(entry.BlockedUntil).Round(time.Second))
+			fmt.Printf("  Failures:     %d (first: %s, last: %s)\n",
+				entry.FailureCount,
+				entry.FirstFailure.Format("15:04:05"),
+				entry.LastFailure.Format("15:04:05"))
+			fmt.Println()
+		}
 	}
 
 	return nil
