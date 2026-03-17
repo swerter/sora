@@ -11,6 +11,13 @@ import (
 const LocalPartRegex = `^(?i)(?:[a-z0-9!#$%&'*+/=?^_\{\|\}~-])+(?:\.(?:[a-z0-9!#$%&'*+/=?^_\{\|\}~-])+)*$`
 const DomainNameRegex = `^(?i)(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`
 
+// RFC 5321 length limits for email addresses
+const (
+	MaxLocalPartLength = 64  // Maximum length for local part (before @)
+	MaxDomainLength    = 255 // Maximum length for domain part (after @)
+	MaxAddressLength   = 320 // Maximum total length (64 + 1 + 255)
+)
+
 // Separator constant for master authentication
 const (
 	// SuffixSeparator is used for master username and remotelookup tokens
@@ -148,14 +155,30 @@ func NewAddress(input string) (Address, error) {
 	localPart := emailParts[0]
 	domain := emailParts[1]
 
-	// Validate local part
+	// Validate local part length (RFC 5321)
+	if len(localPart) > MaxLocalPartLength {
+		return Address{}, fmt.Errorf("local part exceeds maximum length of %d characters: '%s'", MaxLocalPartLength, localPart)
+	}
+
+	// Validate local part format
 	if !regexp.MustCompile(LocalPartRegex).MatchString(localPart) {
 		return Address{}, fmt.Errorf("unacceptable local part: '%s'", localPart)
 	}
 
-	// Validate domain
+	// Validate domain length (RFC 5321)
+	if len(domain) > MaxDomainLength {
+		return Address{}, fmt.Errorf("domain exceeds maximum length of %d characters: '%s'", MaxDomainLength, domain)
+	}
+
+	// Validate domain format
 	if !regexp.MustCompile(DomainNameRegex).MatchString(domain) {
 		return Address{}, fmt.Errorf("unacceptable domain: '%s'", domain)
+	}
+
+	// Validate total address length (RFC 5321)
+	totalLength := len(localPart) + 1 + len(domain) // +1 for @ sign
+	if totalLength > MaxAddressLength {
+		return Address{}, fmt.Errorf("email address exceeds maximum length of %d characters (got %d): '%s'", MaxAddressLength, totalLength, emailPart)
 	}
 
 	// Parse detail part from local part (plus addressing)
