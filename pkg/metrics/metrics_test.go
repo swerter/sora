@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -116,6 +117,130 @@ func TestConnectionDurationHistogram(t *testing.T) {
 		// Record one more observation to verify it's working
 		metric.Observe(0.5)
 	}
+}
+
+func TestConnectionDurationLongLivedConnections(t *testing.T) {
+	testCases := []struct {
+		name     string
+		protocol string
+		duration float64 // in seconds
+		desc     string
+	}{
+		{"LMTP quick delivery", "lmtp", 0.15, "150ms - typical delivery"},
+		{"POP3 short session", "pop3", 5.5, "5.5s - quick download"},
+		{"POP3 medium session", "pop3", 45, "45s - larger mailbox"},
+		{"ManageSieve script edit", "managesieve", 120, "2m - script editing"},
+		{"IMAP short session", "imap", 180, "3m - mailbox browsing"},
+		{"IMAP IDLE 15min", "imap", 900, "15m - IDLE connection"},
+		{"IMAP IDLE 30min", "imap", 1800, "30m - IDLE connection"},
+		{"IMAP long session", "imap", 3600, "1h - extended IDLE"},
+		{"IMAP very long session", "imap", 7200, "2h - very long IDLE"},
+		{"IMAP 6h IDLE", "imap", 21600, "6h - long IDLE"},
+		{"IMAP 12h IDLE", "imap", 43200, "12h - half-day IDLE"},
+		{"IMAP 24h IDLE", "imap", 86400, "24h - max session timeout"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset for each test to avoid accumulation
+			ConnectionDuration.Reset()
+
+			// Record the observation
+			ConnectionDuration.WithLabelValues(tc.protocol, testServerName, testHostname).Observe(tc.duration)
+
+			// Verify it was recorded by gathering metrics
+			metricFamily, err := prometheus.DefaultGatherer.Gather()
+			if err != nil {
+				t.Fatalf("Failed to gather metrics: %v", err)
+			}
+
+			// Find the connection duration metric
+			found := false
+			for _, mf := range metricFamily {
+				if mf.GetName() == "sora_connection_duration_seconds" {
+					for _, m := range mf.GetMetric() {
+						labels := m.GetLabel()
+						matchesProtocol := false
+						for _, label := range labels {
+							if label.GetName() == "protocol" && label.GetValue() == tc.protocol {
+								matchesProtocol = true
+								break
+							}
+						}
+						if matchesProtocol {
+							found = true
+							histogram := m.GetHistogram()
+							if histogram.GetSampleCount() == 0 {
+								t.Errorf("%s: Expected at least 1 sample, got 0", tc.desc)
+							}
+							// Verify the sum is approximately correct
+							if histogram.GetSampleSum() < tc.duration*0.9 || histogram.GetSampleSum() > tc.duration*1.1 {
+								t.Errorf("%s: Expected sum ~%.1f, got %.1f", tc.desc, tc.duration, histogram.GetSampleSum())
+							}
+						}
+					}
+				}
+			}
+
+			if !found {
+				t.Errorf("%s: Metric not found for protocol=%s", tc.desc, tc.protocol)
+			}
+		})
+	}
+
+	// Verify buckets can handle all durations without truncation at 10s
+	t.Run("verify_buckets_coverage", func(t *testing.T) {
+		ConnectionDuration.Reset()
+		// Record one sample to ensure metric appears
+		ConnectionDuration.WithLabelValues("imap", testServerName, testHostname).Observe(100)
+
+		// Buckets we defined - Prometheus will handle +Inf automatically
+		expectedBuckets := []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300, 900, 1800, 3600, 7200, 21600, 43200, 86400}
+
+		metricFamily, err := prometheus.DefaultGatherer.Gather()
+		if err != nil {
+			t.Fatalf("Failed to gather metrics: %v", err)
+		}
+
+		for _, mf := range metricFamily {
+			if mf.GetName() == "sora_connection_duration_seconds" {
+				for _, m := range mf.GetMetric() {
+					histogram := m.GetHistogram()
+					buckets := histogram.GetBucket()
+
+					// Verify we have at least our expected buckets
+					if len(buckets) < len(expectedBuckets) {
+						t.Errorf("Expected at least %d buckets, got %d", len(expectedBuckets), len(buckets))
+					}
+
+					// Verify bucket upper bounds match
+					for i := 0; i < len(expectedBuckets) && i < len(buckets); i++ {
+						actualBound := buckets[i].GetUpperBound()
+						expectedBound := expectedBuckets[i]
+						if actualBound != expectedBound && !math.IsInf(actualBound, 1) {
+							t.Errorf("Bucket %d: expected upper bound %.3f, got %.3f", i, expectedBound, actualBound)
+						}
+					}
+
+					// Verify the maximum finite bucket is >= 24 hours (86400s)
+					// This ensures we can track long-lived IMAP IDLE connections up to absolute_session_timeout
+					maxFiniteBucket := 0.0
+					for _, bucket := range buckets {
+						bound := bucket.GetUpperBound()
+						if !math.IsInf(bound, 1) && bound > maxFiniteBucket {
+							maxFiniteBucket = bound
+						}
+					}
+					if maxFiniteBucket < 86400 {
+						t.Errorf("Maximum finite bucket is %.0fs, need at least 86400s (24h) for long IMAP IDLE connections", maxFiniteBucket)
+					}
+
+					return // Only need to check one metric instance
+				}
+			}
+		}
+		t.Error("sora_connection_duration_seconds metric not found")
+	})
 }
 
 func TestDatabaseMetrics(t *testing.T) {

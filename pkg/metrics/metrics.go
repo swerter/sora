@@ -33,9 +33,15 @@ var (
 
 	ConnectionDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "sora_connection_duration_seconds",
-			Help:    "Duration of connections in seconds",
-			Buckets: prometheus.DefBuckets,
+			Name: "sora_connection_duration_seconds",
+			Help: "Duration of connections in seconds",
+			// Custom buckets for email protocols with long-lived connections
+			// LMTP: typically <1s (delivery)
+			// POP3: seconds to minutes (download and disconnect)
+			// ManageSieve: seconds to minutes (script management)
+			// IMAP: minutes to hours (IDLE limited to 24h max by absolute_session_timeout)
+			// Buckets: 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s, 1m, 5m, 15m, 30m, 1h, 2h, 6h, 12h, 24h
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300, 900, 1800, 3600, 7200, 21600, 43200, 86400},
 		},
 		[]string{"protocol", "server_name", "hostname"},
 	)
