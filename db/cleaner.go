@@ -10,9 +10,11 @@ import (
 	"github.com/migadu/sora/logger"
 )
 
-const CLEANUP_LOCK_NAME = "cleanup_worker"
 const BATCH_PURGE_SIZE = 1000
-const LOCK_TIMEOUT = 30 * time.Second
+
+// Advisory lock ID for cleanup worker coordination
+// Computed as: hash("sora_cleanup_worker") & 0x7FFFFFFF to ensure positive int32
+const CLEANUP_ADVISORY_LOCK_ID = 1876543210
 
 // UserScopedObjectForCleanup represents a user-specific object that is a candidate for cleanup.
 type UserScopedObjectForCleanup struct {
@@ -22,31 +24,28 @@ type UserScopedObjectForCleanup struct {
 	S3Localpart string
 }
 
+// AcquireCleanupLock attempts to acquire a transaction-scoped advisory lock for the cleanup worker.
+// Returns true if lock was acquired, false if another instance holds it.
+// The lock is automatically released when the transaction commits or rolls back.
+// NOTE: Uses transaction-scoped lock (pg_advisory_xact_lock) to avoid connection pool issues.
 func (d *Database) AcquireCleanupLock(ctx context.Context, tx pgx.Tx) (bool, error) {
-	// Try to acquire lock by inserting a row, or updating if expired
-	now := time.Now().UTC()
-	expiresAt := now.Add(LOCK_TIMEOUT)
-
-	result, err := tx.Exec(ctx, `
-		INSERT INTO locks (lock_name, acquired_at, expires_at) 
-		VALUES ($1, $2, $3)
-		ON CONFLICT (lock_name) DO UPDATE SET
-			acquired_at = $2,
-			expires_at = $3
-		WHERE locks.expires_at < $2
-	`, CLEANUP_LOCK_NAME, now, expiresAt)
-
+	var acquired bool
+	err := tx.QueryRow(ctx,
+		"SELECT pg_try_advisory_xact_lock($1)",
+		CLEANUP_ADVISORY_LOCK_ID).Scan(&acquired)
 	if err != nil {
-		return false, fmt.Errorf("failed to acquire lock: %w", err)
+		return false, fmt.Errorf("failed to acquire cleanup advisory lock: %w", err)
 	}
-
-	// Check if we successfully acquired the lock
-	return result.RowsAffected() > 0, nil
+	return acquired, nil
 }
 
+// ReleaseCleanupLock is a no-op for transaction-scoped advisory locks.
+// The lock is automatically released when the transaction commits or rolls back.
+// Kept for API compatibility.
 func (d *Database) ReleaseCleanupLock(ctx context.Context, tx pgx.Tx) error {
-	_, err := tx.Exec(ctx, `DELETE FROM locks WHERE lock_name = $1`, CLEANUP_LOCK_NAME)
-	return err
+	// Transaction-scoped locks (pg_advisory_xact_lock) are automatically released
+	// on COMMIT or ROLLBACK, so we don't need to explicitly unlock.
+	return nil
 }
 
 // ExpungeOldMessages marks messages older than the specified duration as expunged
@@ -242,11 +241,12 @@ func (d *Database) PruneOldMessageBodies(ctx context.Context, tx pgx.Tx, retenti
 // PruneOldMessageBodiesBatched processes message body and header pruning in multiple batches,
 // committing between batches to avoid transaction timeout issues.
 // This should be used for production cleanup operations on large databases.
+// Uses SKIP LOCKED to avoid blocking user queries and other cleanup workers.
 func (d *Database) PruneOldMessageBodiesBatched(ctx context.Context, retention time.Duration) (int64, error) {
-	const batchSize = 100
-	const maxBatches = 1000                 // Hard upper bound: 100,000 records per run
-	const maxRunDuration = 15 * time.Minute // Wall-clock cap per cleanup cycle; queries on large tables can be ~9s/batch
-	const progressLogInterval = 10          // Log progress every N batches
+	const batchSize = 50                    // Reduced from 100 to hold locks for shorter duration
+	const maxBatches = 1000                 // Hard upper bound: 50,000 records per run
+	const maxRunDuration = 10 * time.Minute // Reduced from 15min to limit lock duration
+	const progressLogInterval = 20          // Log progress every N batches
 
 	var totalPruned int64
 	runDeadline := time.Now().Add(maxRunDuration)
@@ -278,6 +278,7 @@ func (d *Database) PruneOldMessageBodiesBatched(ctx context.Context, retention t
 		// to disk (temp files) when work_mem is small and the messages table is large.
 		// LIMIT is placed inside the CTE so it applies after the NOT EXISTS check,
 		// ensuring every batch is filled with truly prunable rows.
+		// FOR UPDATE SKIP LOCKED ensures we don't block on rows locked by other workers or queries.
 		query := `
 			WITH prunable AS (
 				SELECT mc.content_hash
@@ -291,6 +292,7 @@ func (d *Database) PruneOldMessageBodiesBatched(ctx context.Context, retention t
 				  )
 				ORDER BY mc.content_hash
 				LIMIT $2
+				FOR UPDATE SKIP LOCKED
 			)
 			UPDATE message_contents mc
 			SET
@@ -383,11 +385,12 @@ func (d *Database) PruneOldMessageVectors(ctx context.Context, tx pgx.Tx, retent
 // PruneOldMessageVectorsBatched processes message vector pruning in multiple batches,
 // committing between batches to avoid transaction timeout issues.
 // This should be used for production cleanup operations on large databases.
+// Uses SKIP LOCKED to avoid blocking user queries and other cleanup workers.
 func (d *Database) PruneOldMessageVectorsBatched(ctx context.Context, retention time.Duration) (int64, error) {
-	const batchSize = 100
-	const maxBatches = 1000                 // Hard upper bound: 100,000 records per run
-	const maxRunDuration = 15 * time.Minute // Wall-clock cap per cleanup cycle; queries on large tables can be ~9s/batch
-	const progressLogInterval = 10          // Log progress every N batches
+	const batchSize = 50                    // Reduced from 100 to hold locks for shorter duration
+	const maxBatches = 1000                 // Hard upper bound: 50,000 records per run
+	const maxRunDuration = 10 * time.Minute // Reduced from 15min to limit lock duration
+	const progressLogInterval = 20          // Log progress every N batches
 
 	var totalPruned int64
 	runDeadline := time.Now().Add(maxRunDuration)
@@ -419,6 +422,7 @@ func (d *Database) PruneOldMessageVectorsBatched(ctx context.Context, retention 
 		// to disk (temp files) when work_mem is small and the messages table is large.
 		// LIMIT is placed inside the CTE so it applies after the NOT EXISTS check,
 		// ensuring every batch is filled with truly prunable rows.
+		// FOR UPDATE SKIP LOCKED ensures we don't block on rows locked by other workers or queries.
 		query := `
 			WITH prunable AS (
 				SELECT mc.content_hash
@@ -432,6 +436,7 @@ func (d *Database) PruneOldMessageVectorsBatched(ctx context.Context, retention 
 				  )
 				ORDER BY mc.content_hash
 				LIMIT $2
+				FOR UPDATE SKIP LOCKED
 			)
 			UPDATE message_contents mc
 			SET

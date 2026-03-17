@@ -11,6 +11,7 @@ import (
 // --- Cleanup Worker Wrappers ---
 
 func (rd *ResilientDatabase) AcquireCleanupLockWithRetry(ctx context.Context) (bool, error) {
+	// Transaction-scoped advisory lock - use executeWriteInTxWithRetry
 	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return rd.getOperationalDatabaseForOperation(true).AcquireCleanupLock(ctx, tx)
 	}
@@ -22,6 +23,8 @@ func (rd *ResilientDatabase) AcquireCleanupLockWithRetry(ctx context.Context) (b
 }
 
 func (rd *ResilientDatabase) ReleaseCleanupLockWithRetry(ctx context.Context) error {
+	// Transaction-scoped locks auto-release on commit/rollback - this is a no-op
+	// Kept for API compatibility
 	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return nil, rd.getOperationalDatabaseForOperation(true).ReleaseCleanupLock(ctx, tx)
 	}

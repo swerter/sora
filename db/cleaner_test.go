@@ -346,13 +346,7 @@ func TestCleanupLock(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Clean up any existing locks first
-	tx0, err := db.GetWritePool().Begin(ctx)
-	require.NoError(t, err)
-	db.ReleaseCleanupLock(ctx, tx0) // Ignore error, might not exist
-	tx0.Commit(ctx)
-
-	// Test 1: Acquire lock successfully
+	// Test 1: Acquire lock successfully in a transaction
 	tx1, err := db.GetWritePool().Begin(ctx)
 	require.NoError(t, err)
 	defer tx1.Rollback(ctx)
@@ -361,33 +355,32 @@ func TestCleanupLock(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, acquired, "Should successfully acquire lock")
 
-	err = tx1.Commit(ctx)
-	require.NoError(t, err)
-
-	// Test 2: Try to acquire lock again without releasing first (should fail)
+	// Test 2: Try to acquire lock in another transaction (should fail while tx1 holds it)
 	tx2, err := db.GetWritePool().Begin(ctx)
 	require.NoError(t, err)
 	defer tx2.Rollback(ctx)
 
 	acquired2, err := db.AcquireCleanupLock(ctx, tx2)
 	require.NoError(t, err)
-	assert.False(t, acquired2, "Should not acquire lock when one is already active")
+	assert.False(t, acquired2, "Should not acquire lock when another transaction holds it")
 
+	// Rollback tx2
 	tx2.Rollback(ctx)
 
-	// Test 3: Release the first lock, then try to acquire again
+	// Test 3: Commit tx1 (releases the lock), then try to acquire in new transaction
+	err = tx1.Commit(ctx)
+	require.NoError(t, err)
+
+	// Now try to acquire in a new transaction after first was committed
 	tx3, err := db.GetWritePool().Begin(ctx)
 	require.NoError(t, err)
 	defer tx3.Rollback(ctx)
 
-	err = db.ReleaseCleanupLock(ctx, tx3)
-	require.NoError(t, err)
-
-	// Now try to acquire after release
 	acquired3, err := db.AcquireCleanupLock(ctx, tx3)
 	require.NoError(t, err)
-	assert.True(t, acquired3, "Should acquire lock after previous was released")
+	assert.True(t, acquired3, "Should acquire lock after previous transaction committed")
 
+	// Clean up - commit to release the lock
 	err = tx3.Commit(ctx)
 	require.NoError(t, err)
 
