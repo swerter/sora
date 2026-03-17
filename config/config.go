@@ -2369,6 +2369,88 @@ func applyConfigDefaults(cfg *Config) {
 
 	// For now, we do nothing here - users must explicitly set remote_health_checks = true
 	// in their config file. The config.toml.example shows this as the default.
+
+	// Apply auth rate limiter defaults for enabled rate limiters
+	// When auth_rate_limit.enabled = true is set without other fields,
+	// merge with defaults so users don't have to specify every field
+	applyAuthRateLimitDefaults(cfg)
+}
+
+// applyAuthRateLimitDefaults merges auth rate limit config with defaults for all server types
+func applyAuthRateLimitDefaults(cfg *Config) {
+	defaults := DefaultAuthRateLimiterConfig()
+
+	// Helper to merge rate limit config with defaults
+	mergeAuthRateLimit := func(config *AuthRateLimiterConfig) {
+		// Only apply defaults if rate limiting is enabled
+		if !config.Enabled {
+			return
+		}
+
+		// For each field, if it's zero (not set), use the default
+		if config.MaxAttemptsPerIPUsername == 0 {
+			config.MaxAttemptsPerIPUsername = defaults.MaxAttemptsPerIPUsername
+		}
+		if config.IPUsernameBlockDuration == 0 {
+			config.IPUsernameBlockDuration = defaults.IPUsernameBlockDuration
+		}
+		if config.IPUsernameWindowDuration == 0 {
+			config.IPUsernameWindowDuration = defaults.IPUsernameWindowDuration
+		}
+		if config.MaxAttemptsPerIP == 0 {
+			config.MaxAttemptsPerIP = defaults.MaxAttemptsPerIP
+		}
+		if config.IPBlockDuration == 0 {
+			config.IPBlockDuration = defaults.IPBlockDuration
+		}
+		if config.IPWindowDuration == 0 {
+			config.IPWindowDuration = defaults.IPWindowDuration
+		}
+		if config.MaxAttemptsPerUsername == 0 {
+			config.MaxAttemptsPerUsername = defaults.MaxAttemptsPerUsername
+		}
+		if config.UsernameWindowDuration == 0 {
+			config.UsernameWindowDuration = defaults.UsernameWindowDuration
+		}
+		if config.CleanupInterval == 0 {
+			config.CleanupInterval = defaults.CleanupInterval
+		}
+		if config.DelayStartThreshold == 0 {
+			config.DelayStartThreshold = defaults.DelayStartThreshold
+		}
+		if config.InitialDelay == 0 {
+			config.InitialDelay = defaults.InitialDelay
+		}
+		if config.MaxDelay == 0 {
+			config.MaxDelay = defaults.MaxDelay
+		}
+		if config.DelayMultiplier == 0 {
+			config.DelayMultiplier = defaults.DelayMultiplier
+		}
+		if config.CacheCleanupInterval == 0 {
+			config.CacheCleanupInterval = defaults.CacheCleanupInterval
+		}
+		if config.MaxIPUsernameEntries == 0 {
+			config.MaxIPUsernameEntries = defaults.MaxIPUsernameEntries
+		}
+		if config.MaxIPEntries == 0 {
+			config.MaxIPEntries = defaults.MaxIPEntries
+		}
+		if config.MaxUsernameEntries == 0 {
+			config.MaxUsernameEntries = defaults.MaxUsernameEntries
+		}
+	}
+
+	// Apply to dynamic servers array (multiple instances of same type)
+	// This is where [[server]] entries from TOML are stored
+	for i := range cfg.DynamicServers {
+		serverCfg := &cfg.DynamicServers[i]
+
+		// Check if this server config has auth_rate_limit field
+		if serverCfg.AuthRateLimit != nil {
+			mergeAuthRateLimit(serverCfg.AuthRateLimit)
+		}
+	}
 }
 
 // removeDuplicateKeysFromTOML removes duplicate keys from TOML content

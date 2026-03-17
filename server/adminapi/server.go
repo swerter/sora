@@ -322,7 +322,6 @@ func (s *Server) setupRoutes() http.Handler {
 	mux.HandleFunc("/admin/uploader/failed", routeHandler("GET", s.handleFailedUploads))
 
 	// Authentication statistics routes
-	mux.HandleFunc("/admin/auth/stats", routeHandler("GET", s.handleAuthStats))
 	mux.HandleFunc("/admin/auth/blocked", routeHandler("GET", s.handleAuthBlocked))
 
 	// Health monitoring routes
@@ -1654,30 +1653,6 @@ func (s *Server) handleFailedUploads(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleAuthStats(w http.ResponseWriter, r *http.Request) {
-	// Authentication rate limiting is now in-memory (gossip-synchronized in cluster mode)
-	// Each protocol server (IMAP, POP3, ManageSieve, proxies) maintains its own rate limiter
-	// This endpoint provides information about how to access those stats
-	s.writeJSON(w, http.StatusOK, map[string]any{
-		"implementation": "in-memory",
-		"tracking_mode": map[string]string{
-			"local":   "Per-server in-memory counters",
-			"cluster": "Synchronized via gossip (50-200ms latency)",
-		},
-		"available_stats": []string{
-			"blocked_ips: Currently blocked IP addresses",
-			"tracked_ips: IPs with failure history",
-			"tracked_usernames: Usernames with failures (cluster-wide in cluster mode)",
-			"cluster_enabled: Whether gossip synchronization is active",
-		},
-		"access_methods": []string{
-			"Prometheus metrics: sora_auth_* metrics",
-			"Server logs: Auth limiter debug logs (set log level to DEBUG)",
-			"Per-protocol stats: Each protocol server tracks its own stats",
-		},
-	})
-}
-
 func (s *Server) handleAuthBlocked(w http.ResponseWriter, r *http.Request) {
 	// Get optional protocol filter from query parameter
 	protocol := r.URL.Query().Get("protocol")
@@ -1925,7 +1900,6 @@ func (s *Server) handleConfigInfo(w http.ResponseWriter, r *http.Request) {
 				"GET /admin/uploader/failed",
 			},
 			"system_information": {
-				"GET /admin/auth/stats",
 				"GET /admin/auth/blocked",
 				"GET /admin/config",
 			},

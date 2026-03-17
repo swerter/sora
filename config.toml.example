@@ -933,28 +933,28 @@ auth_rate_limit.enabled = false                   # Enable authentication rate l
 
 # TIER 1: Fast IP+username blocking (protects shared IPs like corporate gateways)
 # Blocks specific user from specific IP - does NOT affect other users on same IP
-auth_rate_limit.max_attempts_per_ip_username = 3  # Max failed attempts per IP+username combo before blocking.
-auth_rate_limit.ip_username_block_duration = "5m" # How long to block specific IP+username combo.
-auth_rate_limit.ip_username_window_duration = "5m" # Time window for counting IP+username failures.
+auth_rate_limit.max_attempts_per_ip_username = 5   # Max failed attempts per IP+username combo before blocking.
+auth_rate_limit.ip_username_block_duration = "15m" # How long to block specific IP+username combo.
+auth_rate_limit.ip_username_window_duration = "10m" # Time window for counting IP+username failures.
 
 # TIER 2: Slow IP-only blocking (catches distributed attacks from same IP)
 # Blocks entire IP when threshold reached - use high threshold to avoid false positives
 auth_rate_limit.max_attempts_per_ip = 50          # Max failed attempts per IP (any username) before blocking entire IP.
-auth_rate_limit.ip_block_duration = "15m"         # How long to block entire IP after max_attempts_per_ip reached.
-auth_rate_limit.ip_window_duration = "15m"        # Time window for counting IP failures.
+auth_rate_limit.ip_block_duration = "30m"         # How long to block entire IP after max_attempts_per_ip reached.
+auth_rate_limit.ip_window_duration = "30m"        # Time window for counting IP failures.
 
 # Username tracking (statistics only, does NOT block - prevents DoS)
-auth_rate_limit.max_attempts_per_username = 5     # Track username failures across all IPs (monitoring only).
-auth_rate_limit.username_window_duration = "30m"  # Time window for username failure tracking.
+auth_rate_limit.max_attempts_per_username = 10    # Track username failures across all IPs (monitoring only).
+auth_rate_limit.username_window_duration = "60m"  # Time window for username failure tracking.
 
 # Progressive delays (applied before blocking thresholds)
 auth_rate_limit.delay_start_threshold = 2         # Failed attempts before applying progressive authentication delays.
-auth_rate_limit.initial_delay = "2s"              # Initial authentication delay after delay_start_threshold.
+auth_rate_limit.initial_delay = "1s"              # Initial authentication delay after delay_start_threshold.
 auth_rate_limit.max_delay = "30s"                 # Maximum authentication delay (cap for exponential backoff).
 auth_rate_limit.delay_multiplier = 2.0            # Multiplier for progressive delay (exponential backoff).
 
 # Cleanup intervals
-auth_rate_limit.cache_cleanup_interval = "1m"     # How often to clean up expired in-memory cache entries.
+auth_rate_limit.cache_cleanup_interval = "10m"    # How often to clean up expired in-memory cache entries.
 auth_rate_limit.cleanup_interval = "5m"           # How often to clean up expired rate limiting data.
 
 # Memory safety limits (prevents unbounded growth during burst attacks)

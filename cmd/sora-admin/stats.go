@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,8 +26,6 @@ func handleStatsCommand(ctx context.Context) {
 
 	subcommand := os.Args[2]
 	switch subcommand {
-	case "auth":
-		handleAuthStatsCommand(ctx)
 	case "blocked":
 		handleBlockedCommand(ctx)
 	case "connection":
@@ -37,48 +36,6 @@ func handleStatsCommand(ctx context.Context) {
 		fmt.Printf("Unknown stats subcommand: %s\n\n", subcommand)
 		printStatsUsage()
 		os.Exit(1)
-	}
-}
-
-func handleAuthStatsCommand(ctx context.Context) {
-	// Parse auth-stats specific flags
-	fs := flag.NewFlagSet("stats auth", flag.ExitOnError)
-
-	fs.Usage = func() {
-		fmt.Printf(`Show authentication rate limiting statistics
-
-Usage:
-  sora-admin stats auth [options]
-
-Options:
-  --config string       Path to TOML configuration file (required)
-
-NOTE: Authentication rate limiting uses in-memory tracking:
-      - Local mode: Per-server in-memory counters
-      - Cluster mode: Synchronized via gossip (50-200ms latency)
-      Statistics are retrieved via HTTP Admin API.
-
-This command shows:
-  - Implementation mode (in-memory)
-  - Available statistics (blocked_ips, tracked_ips, tracked_usernames)
-  - Access methods (Prometheus, logs, API)
-  - Notes about database persistence (removed)
-
-Examples:
-  sora-admin stats auth --config config.toml
-`)
-	}
-
-	// Parse the remaining arguments
-	if err := fs.Parse(os.Args[3:]); err != nil {
-		logger.Fatalf("Error parsing flags: %v", err)
-	}
-
-	// Validate required arguments
-
-	// Show auth stats
-	if err := showAuthStats(ctx, globalConfig); err != nil {
-		logger.Fatalf("Failed to get auth stats: %v", err)
 	}
 }
 
@@ -176,117 +133,16 @@ Usage:
   sora-admin stats <subcommand> [options]
 
 Subcommands:
-  auth        Show authentication statistics
   blocked     Show blocked IPs and rate-limited addresses
   connection  Show active proxy connections and statistics
 
 Examples:
-  sora-admin stats auth --config config.toml
   sora-admin stats blocked --config config.toml
   sora-admin stats blocked --config config.toml --protocol imap_proxy
   sora-admin stats connection --user user@example.com
 
 Use 'sora-admin stats <subcommand> --help' for detailed help.
 `)
-}
-
-func showAuthStats(ctx context.Context, cfg AdminConfig) error {
-	// Create HTTP API client
-	client, err := createHTTPAPIClient(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create HTTP API client: %w", err)
-	}
-
-	// Build URL
-	url := fmt.Sprintf("%s/admin/auth/stats", cfg.HTTPAPIAddr)
-
-	// Create request
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+cfg.HTTPAPIKey)
-
-	// Send request
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to get auth stats: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Check status code
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("API request failed (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	// Parse response
-	var result map[string]any
-	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	// Display results
-	fmt.Println("Authentication Rate Limiting - In-Memory Stats")
-	fmt.Println(strings.Repeat("=", 50))
-	fmt.Println()
-
-	// Implementation mode
-	if impl, ok := result["implementation"].(string); ok {
-		fmt.Printf("Implementation: %s\n\n", impl)
-	}
-
-	// Tracking modes
-	if modes, ok := result["tracking_mode"].(map[string]any); ok {
-		fmt.Println("Tracking Modes:")
-		if local, ok := modes["local"].(string); ok {
-			fmt.Printf("  • Local:   %s\n", local)
-		}
-		if cluster, ok := modes["cluster"].(string); ok {
-			fmt.Printf("  • Cluster: %s\n", cluster)
-		}
-		fmt.Println()
-	}
-
-	// Available stats
-	if stats, ok := result["available_stats"].([]any); ok && len(stats) > 0 {
-		fmt.Println("Available Statistics:")
-		for _, stat := range stats {
-			if s, ok := stat.(string); ok {
-				fmt.Printf("  • %s\n", s)
-			}
-		}
-		fmt.Println()
-	}
-
-	// Access methods
-	if methods, ok := result["access_methods"].([]any); ok && len(methods) > 0 {
-		fmt.Println("Access Methods:")
-		for i, method := range methods {
-			if m, ok := method.(string); ok {
-				fmt.Printf("  %d. %s\n", i+1, m)
-			}
-		}
-		fmt.Println()
-	}
-
-	// Note
-	if note, ok := result["note"].(string); ok {
-		fmt.Printf("Note: %s\n", note)
-	}
-
-	// Database table removal info
-	if dbInfo, ok := result["database_table_removed"].(string); ok {
-		fmt.Printf("      %s\n", dbInfo)
-	}
-
-	return nil
 }
 
 func showBlockedEntries(ctx context.Context, cfg AdminConfig, protocol string) error {
@@ -307,6 +163,8 @@ func showBlockedEntries(ctx context.Context, cfg AdminConfig, protocol string) e
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+
+	req.Header.Set("Authorization", "Bearer "+cfg.HTTPAPIKey)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -542,7 +400,16 @@ func showConnectionStats(ctx context.Context, cfg AdminConfig, userEmail string,
 
 		if len(result.ConnectionsByProtocol) > 0 {
 			fmt.Printf("By Protocol:\n")
-			for protocol, count := range result.ConnectionsByProtocol {
+
+			// Sort protocols alphabetically
+			protocols := make([]string, 0, len(result.ConnectionsByProtocol))
+			for protocol := range result.ConnectionsByProtocol {
+				protocols = append(protocols, protocol)
+			}
+			sort.Strings(protocols)
+
+			for _, protocol := range protocols {
+				count := result.ConnectionsByProtocol[protocol]
 				fmt.Printf("  %-12s %d\n", protocol+":", count)
 			}
 			fmt.Println()
