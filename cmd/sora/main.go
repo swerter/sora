@@ -899,7 +899,11 @@ func initializeServices(ctx context.Context, cfg config.Config, errorHandler *er
 
 	// Start metrics collector for database statistics (if database is available)
 	if deps.resilientDB != nil {
-		deps.metricsCollector = metrics.NewCollector(deps.resilientDB, 60*time.Second)
+		if deps.cacheInstance != nil {
+			deps.metricsCollector = metrics.NewCollectorWithCache(deps.resilientDB, deps.cacheInstance, 60*time.Second)
+		} else {
+			deps.metricsCollector = metrics.NewCollector(deps.resilientDB, 60*time.Second)
+		}
 		go deps.metricsCollector.Start(ctx)
 	}
 

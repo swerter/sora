@@ -21,7 +21,7 @@ type StatsProvider interface {
 
 // CacheStatsProvider is an interface for cache statistics
 type CacheStatsProvider interface {
-	GetStats() (objectCount int64, totalSize int64, err error)
+	GetCacheStats() (objectCount int64, totalSize int64, err error)
 }
 
 // Collector periodically collects and updates database-backed metrics
@@ -105,7 +105,7 @@ func (c *Collector) collect(ctx context.Context) {
 
 	// Update cache metrics if cache provider is available
 	if c.cacheProvider != nil {
-		objectCount, totalSize, err := c.cacheProvider.GetStats()
+		objectCount, totalSize, err := c.cacheProvider.GetCacheStats()
 		if err != nil {
 			logger.Error("MetricsCollector: error collecting cache metrics", "error", err)
 		} else {

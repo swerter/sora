@@ -978,6 +978,16 @@ type CacheMetrics struct {
 	InstanceID string    `json:"instance_id"`
 }
 
+// GetCacheStats returns cache statistics suitable for metrics collection.
+// It satisfies the metrics.CacheStatsProvider interface.
+func (c *Cache) GetCacheStats() (objectCount int64, totalSize int64, err error) {
+	stats, err := c.GetStats()
+	if err != nil {
+		return 0, 0, err
+	}
+	return stats.ObjectCount, stats.TotalSize, nil
+}
+
 // GetStats returns current cache statistics
 func (c *Cache) GetStats() (*CacheStats, error) {
 	c.mu.Lock()

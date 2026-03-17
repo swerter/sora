@@ -169,6 +169,12 @@ func NewAuthRateLimiterWithTrustedNetworks(protocol, serverName, hostname string
 		stopCleanup:           make(chan struct{}),
 	}
 
+	// Initialize metrics to zero so they appear immediately in Prometheus
+	metrics.AuthRateLimiterIPUsernameEntries.WithLabelValues(protocol, serverName, hostname).Set(0)
+	metrics.AuthRateLimiterIPEntries.WithLabelValues(protocol, serverName, hostname).Set(0)
+	metrics.AuthRateLimiterUsernameEntries.WithLabelValues(protocol, serverName, hostname).Set(0)
+	metrics.AuthRateLimiterBlockedIPs.WithLabelValues(protocol, serverName, hostname).Set(0)
+
 	// Start background cleanup routine
 	go limiter.cleanupRoutine(config.CacheCleanupInterval)
 
