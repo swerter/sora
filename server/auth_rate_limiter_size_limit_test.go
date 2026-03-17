@@ -15,7 +15,7 @@ func TestIPUsernameSizeLimit(t *testing.T) {
 		MaxAttemptsPerIPUsername: 3,
 		IPUsernameBlockDuration:  5 * time.Minute,
 		IPUsernameWindowDuration: 10 * time.Minute,
-		CacheCleanupInterval:     1 * time.Hour, // Don't cleanup during test
+		CleanupInterval:          1 * time.Hour, // Don't cleanup during test
 		MaxIPUsernameEntries:     5,             // Small limit for testing
 	}
 
@@ -82,12 +82,12 @@ func TestIPUsernameSizeLimit(t *testing.T) {
 // TestIPSizeLimit tests that max_ip_entries enforces size limit with LRU eviction
 func TestIPSizeLimit(t *testing.T) {
 	config := AuthRateLimiterConfig{
-		Enabled:              true,
-		MaxAttemptsPerIP:     10,
-		IPBlockDuration:      30 * time.Minute,
-		IPWindowDuration:     30 * time.Minute,
-		CacheCleanupInterval: 1 * time.Hour, // Don't cleanup during test
-		MaxIPEntries:         3,             // Small limit for testing
+		Enabled:          true,
+		MaxAttemptsPerIP: 10,
+		IPBlockDuration:  30 * time.Minute,
+		IPWindowDuration: 30 * time.Minute,
+		CleanupInterval:  1 * time.Hour, // Don't cleanup during test
+		MaxIPEntries:     3,             // Small limit for testing
 	}
 
 	limiter := NewAuthRateLimiter("test", "", "", config)
@@ -153,7 +153,7 @@ func TestUsernameSizeLimit(t *testing.T) {
 		Enabled:                true,
 		MaxAttemptsPerUsername: 10,
 		UsernameWindowDuration: 60 * time.Minute,
-		CacheCleanupInterval:   1 * time.Hour, // Don't cleanup during test
+		CleanupInterval:        1 * time.Hour, // Don't cleanup during test
 		MaxUsernameEntries:     4,             // Small limit for testing
 	}
 
@@ -222,7 +222,7 @@ func TestSizeLimitDisabled(t *testing.T) {
 		MaxAttemptsPerIPUsername: 3,
 		IPUsernameBlockDuration:  5 * time.Minute,
 		IPUsernameWindowDuration: 10 * time.Minute,
-		CacheCleanupInterval:     1 * time.Hour,
+		CleanupInterval:          1 * time.Hour,
 		MaxIPUsernameEntries:     0, // Disabled - unlimited
 	}
 
@@ -255,7 +255,7 @@ func TestEvictionOrderByFirstFailure(t *testing.T) {
 		MaxAttemptsPerIPUsername: 3,
 		IPUsernameBlockDuration:  5 * time.Minute,
 		IPUsernameWindowDuration: 10 * time.Minute,
-		CacheCleanupInterval:     1 * time.Hour,
+		CleanupInterval:          1 * time.Hour,
 		MaxIPUsernameEntries:     3,
 	}
 

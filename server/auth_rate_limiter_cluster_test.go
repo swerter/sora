@@ -67,14 +67,14 @@ func TestClusterRateLimitSync(t *testing.T) {
 
 	// Create auth rate limiters
 	rateLimitCfg := config.AuthRateLimiterConfig{
-		Enabled:              true,
-		MaxAttemptsPerIP:     5, // Block after 5 failures
-		IPBlockDuration:      5 * time.Minute,
-		DelayStartThreshold:  2,
-		MaxDelay:             30 * time.Second,
-		InitialDelay:         2 * time.Second,
-		DelayMultiplier:      2.0,
-		CacheCleanupInterval: 1 * time.Minute,
+		Enabled:             true,
+		MaxAttemptsPerIP:    5, // Block after 5 failures
+		IPBlockDuration:     5 * time.Minute,
+		DelayStartThreshold: 2,
+		MaxDelay:            30 * time.Second,
+		InitialDelay:        2 * time.Second,
+		DelayMultiplier:     2.0,
+		CleanupInterval:     1 * time.Minute,
 	}
 
 	limiter1 := NewAuthRateLimiter("imap", "", "", rateLimitCfg)
@@ -288,7 +288,7 @@ func TestClusterUsernameRateLimitSync(t *testing.T) {
 		MaxDelay:               30 * time.Second,
 		InitialDelay:           2 * time.Second,
 		DelayMultiplier:        2.0,
-		CacheCleanupInterval:   1 * time.Minute,
+		CleanupInterval:        1 * time.Minute,
 	}
 
 	limiter1 := NewAuthRateLimiter("imap", "", "", rateLimitCfg)

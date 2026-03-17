@@ -26,7 +26,7 @@ func TestAuthRateLimiter_TwoTierBlocking_SharedIP(t *testing.T) {
 
 		MaxAttemptsPerUsername: 5,
 		UsernameWindowDuration: 30 * time.Minute,
-		CacheCleanupInterval:   1 * time.Minute,
+		CleanupInterval:        1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -92,7 +92,7 @@ func TestAuthRateLimiter_TwoTierBlocking_DistributedAttack(t *testing.T) {
 
 		MaxAttemptsPerUsername: 5,
 		UsernameWindowDuration: 30 * time.Minute,
-		CacheCleanupInterval:   1 * time.Minute,
+		CleanupInterval:        1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -145,7 +145,7 @@ func TestAuthRateLimiter_TwoTierBlocking_Cleanup(t *testing.T) {
 
 		MaxAttemptsPerUsername: 5,
 		UsernameWindowDuration: 30 * time.Minute,
-		CacheCleanupInterval:   50 * time.Millisecond, // Fast cleanup for testing
+		CleanupInterval:        50 * time.Millisecond, // Fast cleanup for testing
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -206,7 +206,7 @@ func TestAuthRateLimiter_TwoTierBlocking_SuccessfulAuthClears(t *testing.T) {
 
 		MaxAttemptsPerUsername: 5,
 		UsernameWindowDuration: 30 * time.Minute,
-		CacheCleanupInterval:   1 * time.Minute,
+		CleanupInterval:        1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -265,7 +265,7 @@ func TestAuthRateLimiter_TwoTierBlocking_Stats(t *testing.T) {
 
 		MaxAttemptsPerUsername: 5,
 		UsernameWindowDuration: 30 * time.Minute,
-		CacheCleanupInterval:   1 * time.Minute,
+		CleanupInterval:        1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)

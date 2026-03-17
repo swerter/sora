@@ -18,7 +18,7 @@ func newTestLimiter(protocol, name string) *AuthRateLimiter {
 		MaxAttemptsPerIP:         3,
 		IPBlockDuration:          2 * time.Minute,
 		IPWindowDuration:         10 * time.Minute,
-		CacheCleanupInterval:     1 * time.Hour, // Don't auto-clean in tests
+		CleanupInterval:          1 * time.Hour, // Don't auto-clean in tests
 	}
 	return NewAuthRateLimiter(protocol, name, "localhost", cfg)
 }

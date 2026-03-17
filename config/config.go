@@ -425,14 +425,13 @@ type AuthRateLimiterConfig struct {
 	MaxAttemptsPerUsername int           `toml:"max_attempts_per_username"` // Max failed attempts per username (tracking only, does not block)
 	UsernameWindowDuration time.Duration `toml:"username_window_duration"`  // Time window for username-based tracking
 
-	CleanupInterval time.Duration `toml:"cleanup_interval"` // How often to clean up old entries
+	CleanupInterval time.Duration `toml:"cleanup_interval"` // How often to clean up old entries and update metrics
 
 	// Progressive delay settings
-	DelayStartThreshold  int           `toml:"delay_start_threshold"`  // Failed attempts before progressive delays start
-	InitialDelay         time.Duration `toml:"initial_delay"`          // First delay duration
-	MaxDelay             time.Duration `toml:"max_delay"`              // Maximum delay duration
-	DelayMultiplier      float64       `toml:"delay_multiplier"`       // Delay increase factor
-	CacheCleanupInterval time.Duration `toml:"cache_cleanup_interval"` // How often to clean in-memory cache
+	DelayStartThreshold int           `toml:"delay_start_threshold"` // Failed attempts before progressive delays start
+	InitialDelay        time.Duration `toml:"initial_delay"`         // First delay duration
+	MaxDelay            time.Duration `toml:"max_delay"`             // Maximum delay duration
+	DelayMultiplier     float64       `toml:"delay_multiplier"`      // Delay increase factor
 
 	// Memory safety limits (prevents unbounded growth during burst attacks)
 	MaxIPUsernameEntries int `toml:"max_ip_username_entries"` // Maximum IP+username tracking entries (0 = unlimited, default: 100000)
@@ -464,11 +463,10 @@ func DefaultAuthRateLimiterConfig() AuthRateLimiterConfig {
 		CleanupInterval: 5 * time.Minute, // Clean up expired entries every 5 minutes
 
 		// Progressive delays (slows down attackers before blocking)
-		DelayStartThreshold:  2,                // Start delays after 2 failures
-		InitialDelay:         1 * time.Second,  // 1 second initial delay
-		MaxDelay:             30 * time.Second, // Max 30 second delay
-		DelayMultiplier:      2.0,              // Double delay each time
-		CacheCleanupInterval: 10 * time.Minute, // Clean in-memory cache every 10 min
+		DelayStartThreshold: 2,                // Start delays after 2 failures
+		InitialDelay:        1 * time.Second,  // 1 second initial delay
+		MaxDelay:            30 * time.Second, // Max 30 second delay
+		DelayMultiplier:     2.0,              // Double delay each time
 
 		// Memory safety limits (prevents OOM during burst attacks)
 		MaxIPUsernameEntries: 100000, // ~25MB per protocol at capacity
@@ -2426,9 +2424,6 @@ func applyAuthRateLimitDefaults(cfg *Config) {
 		}
 		if config.DelayMultiplier == 0 {
 			config.DelayMultiplier = defaults.DelayMultiplier
-		}
-		if config.CacheCleanupInterval == 0 {
-			config.CacheCleanupInterval = defaults.CacheCleanupInterval
 		}
 		if config.MaxIPUsernameEntries == 0 {
 			config.MaxIPUsernameEntries = defaults.MaxIPUsernameEntries

@@ -13,11 +13,11 @@ import (
 // TestAuthRateLimiterBasicIPBlocking tests that IPs are blocked after exceeding max_attempts_per_ip (Tier 2)
 func TestAuthRateLimiterBasicIPBlocking(t *testing.T) {
 	cfg := config.AuthRateLimiterConfig{
-		Enabled:              true,
-		MaxAttemptsPerIP:     3, // Tier 2: Block after 3 failures
-		IPBlockDuration:      5 * time.Minute,
-		IPWindowDuration:     15 * time.Minute,
-		CacheCleanupInterval: 1 * time.Minute,
+		Enabled:          true,
+		MaxAttemptsPerIP: 3, // Tier 2: Block after 3 failures
+		IPBlockDuration:  5 * time.Minute,
+		IPWindowDuration: 15 * time.Minute,
+		CleanupInterval:  1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -54,14 +54,14 @@ func TestAuthRateLimiterBasicIPBlocking(t *testing.T) {
 // TestAuthRateLimiterProgressiveDelays tests that delays increase exponentially
 func TestAuthRateLimiterProgressiveDelays(t *testing.T) {
 	cfg := config.AuthRateLimiterConfig{
-		Enabled:              true,
-		DelayStartThreshold:  2, // Start delays after 2 failures
-		InitialDelay:         100 * time.Millisecond,
-		MaxDelay:             1 * time.Second,
-		DelayMultiplier:      2.0, // Double each time
-		MaxAttemptsPerIP:     10,  // High threshold so we don't block
-		IPWindowDuration:     15 * time.Minute,
-		CacheCleanupInterval: 1 * time.Minute,
+		Enabled:             true,
+		DelayStartThreshold: 2, // Start delays after 2 failures
+		InitialDelay:        100 * time.Millisecond,
+		MaxDelay:            1 * time.Second,
+		DelayMultiplier:     2.0, // Double each time
+		MaxAttemptsPerIP:    10,  // High threshold so we don't block
+		IPWindowDuration:    15 * time.Minute,
+		CleanupInterval:     1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -234,14 +234,14 @@ func TestAuthRateLimiterDisabled(t *testing.T) {
 // TestAuthRateLimiterMaxDelayCapEnforced tests that delays don't exceed max_delay
 func TestAuthRateLimiterMaxDelayCapEnforced(t *testing.T) {
 	cfg := config.AuthRateLimiterConfig{
-		Enabled:              true,
-		DelayStartThreshold:  1,
-		InitialDelay:         100 * time.Millisecond,
-		MaxDelay:             300 * time.Millisecond, // Cap at 300ms
-		DelayMultiplier:      2.0,
-		MaxAttemptsPerIP:     10,
-		IPWindowDuration:     15 * time.Minute,
-		CacheCleanupInterval: 1 * time.Minute,
+		Enabled:             true,
+		DelayStartThreshold: 1,
+		InitialDelay:        100 * time.Millisecond,
+		MaxDelay:            300 * time.Millisecond, // Cap at 300ms
+		DelayMultiplier:     2.0,
+		MaxAttemptsPerIP:    10,
+		IPWindowDuration:    15 * time.Minute,
+		CleanupInterval:     1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -334,11 +334,11 @@ func TestAuthRateLimiterGetStats(t *testing.T) {
 // TestAuthRateLimiterCleanupExpiredEntries tests that cleanup removes old entries
 func TestAuthRateLimiterCleanupExpiredEntries(t *testing.T) {
 	cfg := config.AuthRateLimiterConfig{
-		Enabled:              true,
-		MaxAttemptsPerIP:     3,
-		IPBlockDuration:      100 * time.Millisecond, // Very short for testing
-		IPWindowDuration:     100 * time.Millisecond,
-		CacheCleanupInterval: 50 * time.Millisecond, // Frequent cleanup
+		Enabled:          true,
+		MaxAttemptsPerIP: 3,
+		IPBlockDuration:  100 * time.Millisecond, // Very short for testing
+		IPWindowDuration: 100 * time.Millisecond,
+		CleanupInterval:  50 * time.Millisecond, // Frequent cleanup
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -382,7 +382,7 @@ func TestAuthRateLimiterUsernameCleanup(t *testing.T) {
 		MaxAttemptsPerIP:       10,
 		IPWindowDuration:       100 * time.Millisecond,
 		UsernameWindowDuration: 100 * time.Millisecond, // Very short for testing
-		CacheCleanupInterval:   50 * time.Millisecond,  // Frequent cleanup
+		CleanupInterval:        50 * time.Millisecond,  // Frequent cleanup
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -437,7 +437,7 @@ func TestAuthRateLimiterCompleteMemoryCleanup(t *testing.T) {
 		MaxDelay:               100 * time.Millisecond,
 		IPWindowDuration:       100 * time.Millisecond,
 		UsernameWindowDuration: 100 * time.Millisecond,
-		CacheCleanupInterval:   50 * time.Millisecond, // Cleanup every 50ms
+		CleanupInterval:        50 * time.Millisecond, // Cleanup every 50ms
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -536,7 +536,7 @@ func TestAuthRateLimiterContinuousCleanup(t *testing.T) {
 		IPBlockDuration:        200 * time.Millisecond,
 		IPWindowDuration:       200 * time.Millisecond,
 		UsernameWindowDuration: 200 * time.Millisecond,
-		CacheCleanupInterval:   50 * time.Millisecond, // Cleanup every 50ms
+		CleanupInterval:        50 * time.Millisecond, // Cleanup every 50ms
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -590,10 +590,10 @@ func TestAuthRateLimiterContinuousCleanup(t *testing.T) {
 // TestAuthRateLimiterConcurrentAccess tests thread safety
 func TestAuthRateLimiterConcurrentAccess(t *testing.T) {
 	cfg := config.AuthRateLimiterConfig{
-		Enabled:              true,
-		MaxAttemptsPerIP:     10,
-		IPWindowDuration:     15 * time.Minute,
-		CacheCleanupInterval: 1 * time.Minute,
+		Enabled:          true,
+		MaxAttemptsPerIP: 10,
+		IPWindowDuration: 15 * time.Minute,
+		CleanupInterval:  1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -629,10 +629,10 @@ func TestAuthRateLimiterConcurrentAccess(t *testing.T) {
 // TestAuthRateLimiterWithTrustedNetworks tests that limiter can be created with trusted networks config
 func TestAuthRateLimiterWithTrustedNetworks(t *testing.T) {
 	cfg := config.AuthRateLimiterConfig{
-		Enabled:              true,
-		MaxAttemptsPerIP:     3,
-		IPWindowDuration:     15 * time.Minute,
-		CacheCleanupInterval: 1 * time.Minute,
+		Enabled:          true,
+		MaxAttemptsPerIP: 3,
+		IPWindowDuration: 15 * time.Minute,
+		CleanupInterval:  1 * time.Minute,
 	}
 
 	trustedNets := []string{"10.0.0.0/8", "192.168.1.0/24"}
@@ -651,11 +651,11 @@ func TestAuthRateLimiterWithTrustedNetworks(t *testing.T) {
 // TestAuthRateLimiterTrustedNetworksWithProxy tests that trusted networks bypass rate limiting when using proxy methods
 func TestAuthRateLimiterTrustedNetworksWithProxy(t *testing.T) {
 	cfg := config.AuthRateLimiterConfig{
-		Enabled:              true,
-		MaxAttemptsPerIP:     1, // Block after just 1 failure
-		IPBlockDuration:      5 * time.Minute,
-		IPWindowDuration:     15 * time.Minute,
-		CacheCleanupInterval: 1 * time.Minute,
+		Enabled:          true,
+		MaxAttemptsPerIP: 1, // Block after just 1 failure
+		IPBlockDuration:  5 * time.Minute,
+		IPWindowDuration: 15 * time.Minute,
+		CleanupInterval:  1 * time.Minute,
 	}
 
 	trustedNets := []string{"10.0.0.0/8", "192.168.1.0/24"}
@@ -712,11 +712,11 @@ func TestAuthRateLimiterTrustedNetworksWithProxy(t *testing.T) {
 // TestAuthRateLimiterProxyProtocolInfo tests rate limiting with proxy protocol info
 func TestAuthRateLimiterProxyProtocolInfo(t *testing.T) {
 	cfg := config.AuthRateLimiterConfig{
-		Enabled:              true,
-		MaxAttemptsPerIP:     2,
-		IPBlockDuration:      5 * time.Minute,
-		IPWindowDuration:     15 * time.Minute,
-		CacheCleanupInterval: 1 * time.Minute,
+		Enabled:          true,
+		MaxAttemptsPerIP: 2,
+		IPBlockDuration:  5 * time.Minute,
+		IPWindowDuration: 15 * time.Minute,
+		CleanupInterval:  1 * time.Minute,
 	}
 
 	trustedNets := []string{"127.0.0.0/8"} // Trust localhost/proxy
@@ -786,7 +786,7 @@ func TestAuthRateLimiter_IPUsernameBlocking_Basic(t *testing.T) {
 		MaxAttemptsPerIP:         100,
 		IPBlockDuration:          15 * time.Minute,
 		IPWindowDuration:         15 * time.Minute,
-		CacheCleanupInterval:     1 * time.Minute,
+		CleanupInterval:          1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -825,7 +825,7 @@ func TestAuthRateLimiter_IPUsernameBlocking_IsolatesUsers(t *testing.T) {
 		IPBlockDuration:  15 * time.Minute,
 		IPWindowDuration: 15 * time.Minute,
 
-		CacheCleanupInterval: 1 * time.Minute,
+		CleanupInterval: 1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -884,7 +884,7 @@ func TestAuthRateLimiter_IPUsernameBlocking_DifferentIPsSameUser(t *testing.T) {
 		IPBlockDuration:  15 * time.Minute,
 		IPWindowDuration: 15 * time.Minute,
 
-		CacheCleanupInterval: 1 * time.Minute,
+		CleanupInterval: 1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -936,7 +936,7 @@ func TestAuthRateLimiter_IPUsernameBlocking_SuccessClears(t *testing.T) {
 		IPBlockDuration:  15 * time.Minute,
 		IPWindowDuration: 15 * time.Minute,
 
-		CacheCleanupInterval: 1 * time.Minute,
+		CleanupInterval: 1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -994,7 +994,7 @@ func TestAuthRateLimiter_IPUsernameBlocking_EmptyUsername(t *testing.T) {
 		IPBlockDuration:  15 * time.Minute,
 		IPWindowDuration: 15 * time.Minute,
 
-		CacheCleanupInterval: 1 * time.Minute,
+		CleanupInterval: 1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -1042,7 +1042,7 @@ func TestAuthRateLimiter_TierInteraction_BothTiersActive(t *testing.T) {
 		IPBlockDuration:  15 * time.Minute,
 		IPWindowDuration: 15 * time.Minute,
 
-		CacheCleanupInterval: 1 * time.Minute,
+		CleanupInterval: 1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -1093,7 +1093,7 @@ func TestAuthRateLimiter_TierInteraction_Tier2OnlyWhenDisabledTier1(t *testing.T
 		IPBlockDuration:  15 * time.Minute,
 		IPWindowDuration: 15 * time.Minute,
 
-		CacheCleanupInterval: 1 * time.Minute,
+		CleanupInterval: 1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)
@@ -1150,7 +1150,7 @@ func TestAuthRateLimiter_IPUsernameBlocking_CleanupExpired(t *testing.T) {
 		IPBlockDuration:  1 * time.Minute,
 		IPWindowDuration: 1 * time.Minute,
 
-		CacheCleanupInterval: 50 * time.Millisecond, // Fast cleanup
+		CleanupInterval: 50 * time.Millisecond, // Fast cleanup
 	}
 
 	limiter := NewAuthRateLimiter("imap", "", "", cfg)

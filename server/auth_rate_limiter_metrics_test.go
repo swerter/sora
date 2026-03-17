@@ -33,7 +33,6 @@ func TestAuthRateLimiterMetrics(t *testing.T) {
 		MaxAttemptsPerUsername:   10,
 		UsernameWindowDuration:   30 * time.Minute,
 		CleanupInterval:          100 * time.Millisecond, // Fast cleanup for testing
-		CacheCleanupInterval:     100 * time.Millisecond,
 	}
 
 	protocol := "test-metrics"
@@ -143,7 +142,6 @@ func TestAuthRateLimiterMetricsCleanup(t *testing.T) {
 		MaxAttemptsPerUsername:   10,
 		UsernameWindowDuration:   200 * time.Millisecond,
 		CleanupInterval:          50 * time.Millisecond, // Frequent cleanup
-		CacheCleanupInterval:     50 * time.Millisecond,
 	}
 
 	protocol := "test-cleanup"
@@ -192,12 +190,11 @@ func TestAuthRateLimiterMetricsCleanup(t *testing.T) {
 // TestAuthRateLimiterMetricsMultipleProtocols verifies metrics are tracked per protocol
 func TestAuthRateLimiterMetricsMultipleProtocols(t *testing.T) {
 	cfg := config.AuthRateLimiterConfig{
-		Enabled:              true,
-		MaxAttemptsPerIP:     3,
-		IPBlockDuration:      5 * time.Minute,
-		IPWindowDuration:     5 * time.Minute,
-		CleanupInterval:      100 * time.Millisecond,
-		CacheCleanupInterval: 100 * time.Millisecond,
+		Enabled:          true,
+		MaxAttemptsPerIP: 3,
+		IPBlockDuration:  5 * time.Minute,
+		IPWindowDuration: 5 * time.Minute,
+		CleanupInterval:  100 * time.Millisecond,
 	}
 
 	hostname := "test-host"

@@ -98,9 +98,6 @@ auth_rate_limit.enabled = true
 	if rlCfg.DelayMultiplier != defaults.DelayMultiplier {
 		t.Errorf("DelayMultiplier: got %f, want %f", rlCfg.DelayMultiplier, defaults.DelayMultiplier)
 	}
-	if rlCfg.CacheCleanupInterval != defaults.CacheCleanupInterval {
-		t.Errorf("CacheCleanupInterval: got %v, want %v", rlCfg.CacheCleanupInterval, defaults.CacheCleanupInterval)
-	}
 	if rlCfg.MaxIPUsernameEntries != defaults.MaxIPUsernameEntries {
 		t.Errorf("MaxIPUsernameEntries: got %d, want %d", rlCfg.MaxIPUsernameEntries, defaults.MaxIPUsernameEntries)
 	}

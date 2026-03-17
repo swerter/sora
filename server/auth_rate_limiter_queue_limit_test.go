@@ -16,7 +16,7 @@ func TestClusterRateLimiter_BroadcastQueueSizeLimit(t *testing.T) {
 		MaxAttemptsPerIP:         10,
 		IPUsernameBlockDuration:  5 * time.Minute,
 		IPBlockDuration:          15 * time.Minute,
-		CacheCleanupInterval:     1 * time.Hour,
+		CleanupInterval:          1 * time.Hour,
 	}
 
 	limiter := NewAuthRateLimiter("test", "", "", config)
@@ -88,7 +88,7 @@ func TestClusterRateLimiter_QueueEvictionPreservesNewest(t *testing.T) {
 		MaxAttemptsPerIP:         10,
 		IPUsernameBlockDuration:  5 * time.Minute,
 		IPBlockDuration:          15 * time.Minute,
-		CacheCleanupInterval:     1 * time.Hour,
+		CleanupInterval:          1 * time.Hour,
 	}
 
 	limiter := NewAuthRateLimiter("test", "", "", config)
@@ -157,7 +157,7 @@ func TestClusterRateLimiter_QueueDoesNotGrowUnbounded(t *testing.T) {
 		MaxAttemptsPerIP:         10,
 		IPUsernameBlockDuration:  5 * time.Minute,
 		IPBlockDuration:          15 * time.Minute,
-		CacheCleanupInterval:     1 * time.Hour,
+		CleanupInterval:          1 * time.Hour,
 	}
 
 	limiter := NewAuthRateLimiter("test", "", "", config)

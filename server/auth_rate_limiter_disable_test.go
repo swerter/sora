@@ -20,7 +20,7 @@ func TestAuthRateLimiter_DisableByZero(t *testing.T) {
 		InitialDelay:             200 * time.Millisecond,
 		MaxDelay:                 5 * time.Second,
 		DelayMultiplier:          2.0,
-		CacheCleanupInterval:     1 * time.Minute,
+		CleanupInterval:          1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("test", "", "", config)
@@ -70,7 +70,7 @@ func TestAuthRateLimiter_DisableTier1Only(t *testing.T) {
 		InitialDelay:             200 * time.Millisecond,
 		MaxDelay:                 5 * time.Second,
 		DelayMultiplier:          2.0,
-		CacheCleanupInterval:     1 * time.Minute,
+		CleanupInterval:          1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("test", "", "", config)
@@ -119,7 +119,7 @@ func TestAuthRateLimiter_DisableTier2Only(t *testing.T) {
 		InitialDelay:             200 * time.Millisecond,
 		MaxDelay:                 5 * time.Second,
 		DelayMultiplier:          2.0,
-		CacheCleanupInterval:     1 * time.Minute,
+		CleanupInterval:          1 * time.Minute,
 	}
 
 	limiter := NewAuthRateLimiter("test", "", "", config)

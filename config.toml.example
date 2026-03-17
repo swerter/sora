@@ -953,9 +953,8 @@ auth_rate_limit.initial_delay = "1s"              # Initial authentication delay
 auth_rate_limit.max_delay = "30s"                 # Maximum authentication delay (cap for exponential backoff).
 auth_rate_limit.delay_multiplier = 2.0            # Multiplier for progressive delay (exponential backoff).
 
-# Cleanup intervals
-auth_rate_limit.cache_cleanup_interval = "10m"    # How often to clean up expired in-memory cache entries.
-auth_rate_limit.cleanup_interval = "5m"           # How often to clean up expired rate limiting data.
+# Cleanup interval
+auth_rate_limit.cleanup_interval = "5m"           # How often to clean up expired entries and update metrics.
 
 # Memory safety limits (prevents unbounded growth during burst attacks)
 # These limits protect against memory exhaustion when under sustained attack. When a map exceeds

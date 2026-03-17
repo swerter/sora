@@ -248,7 +248,7 @@ func TestIMAP_RateLimiting_IPBlockingWithUsernameTracking(t *testing.T) {
 		IPBlockDuration:        1 * time.Minute,
 		IPWindowDuration:       5 * time.Minute,
 		UsernameWindowDuration: 5 * time.Minute,
-		CacheCleanupInterval:   1 * time.Minute,
+		CleanupInterval:        1 * time.Minute,
 	})
 	defer srv.Close()
 
@@ -291,7 +291,7 @@ func TestIMAP_RateLimiting_Tier1_IPUsername(t *testing.T) {
 		IPUsernameWindowDuration: 5 * time.Minute, // 5 minute window
 		MaxAttemptsPerIP:         0,               // Tier 2: Disabled
 		DelayStartThreshold:      100,             // Disable delays
-		CacheCleanupInterval:     1 * time.Minute,
+		CleanupInterval:          1 * time.Minute,
 	})
 	defer srv.Close()
 
@@ -353,7 +353,7 @@ func TestIMAP_RateLimiting_Tier1_OnlyBlocksIPUsernameCombination(t *testing.T) {
 		IPUsernameWindowDuration: 5 * time.Minute, // 5 minute window
 		MaxAttemptsPerIP:         0,               // Tier 2: DISABLED - we want to test Tier 1 in isolation
 		DelayStartThreshold:      100,             // Disable delays
-		CacheCleanupInterval:     1 * time.Minute,
+		CleanupInterval:          1 * time.Minute,
 	})
 	defer srv.Close()
 
@@ -425,7 +425,7 @@ func TestIMAP_RateLimiting_TCPLevelBlocking(t *testing.T) {
 		IPBlockDuration:          2 * time.Minute, // Block for 2 minutes
 		IPWindowDuration:         5 * time.Minute, // 5 minute window
 		DelayStartThreshold:      100,             // Disable delays
-		CacheCleanupInterval:     1 * time.Minute,
+		CleanupInterval:          1 * time.Minute,
 	})
 	defer srv.Close()
 
@@ -484,7 +484,7 @@ func TestIMAP_RateLimiting_Tier2_BlockExpiration(t *testing.T) {
 		IPBlockDuration:          2 * time.Second, // SHORT: 2 seconds for testing
 		IPWindowDuration:         5 * time.Minute,
 		DelayStartThreshold:      100, // Disable delays
-		CacheCleanupInterval:     1 * time.Minute,
+		CleanupInterval:          1 * time.Minute,
 	})
 	defer srv.Close()
 
@@ -561,7 +561,7 @@ func TestIMAP_RateLimiting_Tier1_BlockExpiration(t *testing.T) {
 		IPUsernameWindowDuration: 5 * time.Minute,
 		MaxAttemptsPerIP:         0,   // Tier 2: Disabled
 		DelayStartThreshold:      100, // Disable delays
-		CacheCleanupInterval:     1 * time.Minute,
+		CleanupInterval:          1 * time.Minute,
 	})
 	defer srv.Close()
 
@@ -640,7 +640,7 @@ func TestIMAP_RateLimiting_BothTiers(t *testing.T) {
 		IPBlockDuration:          5 * time.Minute,  // Block for 5 minutes
 		IPWindowDuration:         10 * time.Minute, // 10 minute window
 		DelayStartThreshold:      100,              // Disable delays
-		CacheCleanupInterval:     1 * time.Minute,
+		CleanupInterval:          1 * time.Minute,
 	})
 	defer srv.Close()
 

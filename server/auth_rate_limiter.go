@@ -176,7 +176,7 @@ func NewAuthRateLimiterWithTrustedNetworks(protocol, serverName, hostname string
 	metrics.AuthRateLimiterBlockedIPs.WithLabelValues(protocol, serverName, hostname).Set(0)
 
 	// Start background cleanup routine
-	go limiter.cleanupRoutine(config.CacheCleanupInterval)
+	go limiter.cleanupRoutine(config.CleanupInterval)
 
 	logger.Debug("Auth limiter: Initialized", "protocol", protocol,
 		"max_attempts_per_ip_username", config.MaxAttemptsPerIPUsername, "ip_username_block_duration", config.IPUsernameBlockDuration,
