@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -130,20 +129,23 @@ func (s *IMAPSession) internalError(format string, a ...any) *imap.Error {
 	// Log using structured logging with the formatted message
 	s.InfoLog(errorText)
 
-	// Detect transient infrastructure errors (DB exhaustion, network issues)
-	// and return [UNAVAILABLE] instead of [SERVERBUG] so clients back off
-	// instead of retrying aggressively
-	errLower := strings.ToLower(errorText)
-	if strings.Contains(errLower, "no more connections") ||
-		strings.Contains(errLower, "failed to connect") ||
-		strings.Contains(errLower, "connection refused") ||
-		strings.Contains(errLower, "too many clients") ||
-		strings.Contains(errLower, "connection pool") ||
-		strings.Contains(errLower, "max_client_conn") ||
-		strings.Contains(errLower, "operation failed after") ||
-		strings.Contains(errLower, "circuit breaker") ||
-		strings.Contains(errLower, "failed to retrieve message") ||
-		strings.Contains(errLower, "s3 returned empty data") {
+	// Extract the actual error from variadic args to check its type.
+	// The error is typically passed as the last argument (e.g., "failed to do X: %v", err).
+	var actualErr error
+	for i := len(a) - 1; i >= 0; i-- {
+		if err, ok := a[i].(error); ok {
+			actualErr = err
+			break
+		}
+	}
+
+	// Detect transient infrastructure errors (DB exhaustion, circuit breakers,
+	// storage failures, timeouts) and return [UNAVAILABLE] instead of [SERVERBUG]
+	// so clients back off instead of retrying aggressively.
+	//
+	// db.ClassifyDBError bridges raw pgx errors (which use plain strings like
+	// "too many clients") to our sentinel errors, making errors.Is() work.
+	if actualErr != nil && isTransientError(db.ClassifyDBError(actualErr)) {
 		return &imap.Error{
 			Type: imap.StatusResponseTypeNo,
 			Code: imap.ResponseCodeUnavailable,

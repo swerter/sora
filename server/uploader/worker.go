@@ -3,6 +3,7 @@ package uploader
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/helpers"
 	"github.com/migadu/sora/logger"
+	"github.com/migadu/sora/pkg/circuitbreaker"
 	"github.com/migadu/sora/pkg/metrics"
 	"github.com/migadu/sora/pkg/resilient"
 	"github.com/migadu/sora/server"
@@ -625,13 +627,24 @@ func (w *UploadWorker) isTransientS3Error(err error) bool {
 	if err == nil {
 		return false
 	}
+
+	// Check for known sentinel errors first (preferred method)
+	if errors.Is(err, circuitbreaker.ErrCircuitBreakerOpen) ||
+		errors.Is(err, circuitbreaker.ErrTooManyRequests) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) {
+		return true
+	}
+
+	// Fallback to string matching for errors from external libraries (AWS SDK, network stack)
+	// that don't expose typed errors
 	errStr := strings.ToLower(err.Error())
 	transientPatterns := []string{
 		"connection refused", "connection reset", "connection timeout",
 		"i/o timeout", "network unreachable", "no such host",
 		"temporary failure", "service unavailable", "internal server error",
 		"bad gateway", "gateway timeout", "timeout", "slowdown",
-		"throttling", "rate limit", "circuit breaker",
+		"throttling", "rate limit",
 	}
 	for _, pattern := range transientPatterns {
 		if strings.Contains(errStr, pattern) {

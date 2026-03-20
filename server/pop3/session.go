@@ -25,6 +25,7 @@ import (
 	"github.com/migadu/sora/helpers"
 	"github.com/migadu/sora/pkg/metrics"
 	"github.com/migadu/sora/server"
+	"github.com/migadu/sora/storage"
 )
 
 const Pop3MaxErrorsAllowed = 3                  // Maximum number of errors tolerated before the connection is terminated
@@ -2084,7 +2085,7 @@ func (s *POP3Session) getMessageBody(msg *db.Message) ([]byte, error) {
 
 		reader, err := s.server.s3.GetWithRetry(s.server.appCtx, s3Key)
 		if err != nil {
-			return nil, fmt.Errorf("failed to retrieve message UID %d from S3: %v", msg.UID, err)
+			return nil, fmt.Errorf("message UID %d: %w: %v", msg.UID, storage.ErrRetrieveFailed, err)
 		}
 		defer reader.Close()
 		data, err = io.ReadAll(reader)
@@ -2094,7 +2095,7 @@ func (s *POP3Session) getMessageBody(msg *db.Message) ([]byte, error) {
 		// Validate S3 data is not empty
 		if len(data) == 0 {
 			logger.Warn("POP3: Retrieved empty body from S3", "uid", msg.UID, "hash", msg.ContentHash, "s3_key", s3Key)
-			return nil, fmt.Errorf("message UID %d has empty body in S3 (hash: %s)", msg.UID, msg.ContentHash)
+			return nil, fmt.Errorf("message UID %d (hash: %s): %w", msg.UID, msg.ContentHash, storage.ErrEmptyData)
 		}
 		// Track memory usage for S3 data
 		if s.memTracker != nil {

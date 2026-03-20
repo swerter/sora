@@ -45,6 +45,45 @@ var (
 	ErrBackendUnavailable = errors.New("backend server temporarily unavailable")
 )
 
+// TransientError wraps an error to indicate that it represents a transient failure
+// (network issues, timeouts, circuit breakers, connection pool exhaustion, etc.)
+// that should be handled as a temporary failure rather than a permanent error.
+//
+// This allows clean error categorization without string matching:
+//
+//	var transient *TransientError
+//	if errors.As(err, &transient) {
+//	    // Handle as temporary failure
+//	    return &imap.Error{Type: imap.ErrTempFail, ...}
+//	}
+type TransientError struct {
+	Err error
+}
+
+func (e *TransientError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *TransientError) Unwrap() error {
+	return e.Err
+}
+
+// IsTransientError checks if an error is a transient error that should be treated
+// as a temporary failure. It checks for the TransientError wrapper type.
+//
+// Due to import cycle constraints (server ↔ db), this function only checks for
+// the TransientError wrapper. For comprehensive sentinel-based checks, use the
+// isTransientError helper in the protocol session packages (e.g., server/imap)
+// which can import all required packages without cycles.
+func IsTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var transient *TransientError
+	return errors.As(err, &transient)
+}
+
 // IsTemporaryAuthFailure checks if an authentication error is temporary (server shutdown, service unavailable)
 // and should result in an UNAVAILABLE response rather than AUTHENTICATIONFAILED.
 func IsTemporaryAuthFailure(err error) bool {

@@ -14,6 +14,7 @@ import (
 	"github.com/emersion/go-message/textproto"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/helpers"
+	"github.com/migadu/sora/storage"
 
 	tp "net/textproto"
 
@@ -657,7 +658,7 @@ func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 					return diskData, nil
 				}
 			}
-			return nil, fmt.Errorf("failed to retrieve message UID %d from S3: %v", msg.UID, s3GetErr)
+			return nil, fmt.Errorf("message UID %d: %w: %v", msg.UID, storage.ErrRetrieveFailed, s3GetErr)
 		}
 		defer reader.Close()
 		data, err := io.ReadAll(reader)
@@ -670,7 +671,7 @@ func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 		if len(data) == 0 {
 			s.WarnLog("S3 returned empty data", "uid", msg.UID, "s3_key", s3Key, "expected_size", msg.Size,
 				"get_breaker_state", s.server.s3.GetGetBreakerState())
-			return nil, fmt.Errorf("S3 returned empty data for message UID %d (expected %d bytes)", msg.UID, msg.Size)
+			return nil, fmt.Errorf("message UID %d (expected %d bytes): %w", msg.UID, msg.Size, storage.ErrEmptyData)
 		}
 
 		s.DebugLog("successfully fetched from S3", "uid", msg.UID, "size", len(data))
@@ -698,7 +699,7 @@ func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 	filePath := s.server.uploader.FilePath(msg.ContentHash, msg.AccountID)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve message UID %d from disk: %v", msg.UID, err)
+		return nil, fmt.Errorf("message UID %d from disk: %w: %v", msg.UID, storage.ErrRetrieveFailed, err)
 	}
 	if data == nil {
 		return nil, fmt.Errorf("message UID %d not found on disk", msg.UID)

@@ -115,7 +115,7 @@ func WithRetry(ctx context.Context, fn RetryableFunc, config BackoffConfig) erro
 		}
 	}
 
-	return fmt.Errorf("operation failed after %d attempts: %w", attempts, lastErr)
+	return fmt.Errorf("%w: %w (after %d attempts)", ErrMaxRetriesExceeded, lastErr, attempts)
 }
 
 // StopError wraps an error to indicate that retries should stop immediately
@@ -185,5 +185,5 @@ func WithRetryAdvanced(ctx context.Context, fn RetryableFunc, config BackoffConf
 		}
 	}
 
-	return fmt.Errorf("operation failed after %d attempts: %w", attempts, lastErr)
+	return fmt.Errorf("%w: %w (after %d attempts)", ErrMaxRetriesExceeded, lastErr, attempts)
 }

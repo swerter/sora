@@ -74,6 +74,17 @@ func (s *IMAPSession) submitMessageTraining(ctx context.Context, mailboxID int64
 
 	msg := messages[0]
 
+	// Validate S3 key components before attempting fetch
+	if msg.S3Domain == "" || msg.S3Localpart == "" || msg.ContentHash == "" {
+		logger.Warn("Message missing S3 key information - skipping spam training",
+			"uid", uid,
+			"type", trainingType,
+			"has_domain", msg.S3Domain != "",
+			"has_localpart", msg.S3Localpart != "",
+			"has_hash", msg.ContentHash != "")
+		return
+	}
+
 	// Construct S3 key
 	s3Key := helpers.NewS3Key(msg.S3Domain, msg.S3Localpart, msg.ContentHash)
 

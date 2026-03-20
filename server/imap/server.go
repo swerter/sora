@@ -1494,6 +1494,13 @@ func (s *IMAPServer) executeWarmup(job warmupJob) {
 			default:
 			}
 
+			// Skip messages with empty content hash (pending upload)
+			if contentHash == "" {
+				logger.Debug("IMAP: Warmup - skipping message with empty content hash", "name", s.name)
+				skippedCount++
+				continue
+			}
+
 			// Check if already in cache
 			exists, err := s.cache.Exists(contentHash)
 			if err != nil {

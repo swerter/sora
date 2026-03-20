@@ -97,6 +97,17 @@ func (s *Server) handleGetMessageBody(w http.ResponseWriter, r *http.Request) {
 
 	// Fallback to S3 if not in cache
 	if bodyData == nil {
+		// Validate S3 key components before attempting fetch
+		if message.S3Domain == "" || message.S3Localpart == "" || message.ContentHash == "" {
+			logger.Warn("HTTP Mail API: Message missing S3 key information (may be pending upload)",
+				"name", s.name, "message_id", messageID,
+				"has_domain", message.S3Domain != "",
+				"has_localpart", message.S3Localpart != "",
+				"has_hash", message.ContentHash != "")
+			s.writeError(w, http.StatusServiceUnavailable, "Message body not yet available")
+			return
+		}
+
 		s3Key := helpers.NewS3Key(message.S3Domain, message.S3Localpart, message.ContentHash)
 		reader, err := s.storage.Get(s3Key)
 		if err != nil {
@@ -199,6 +210,17 @@ func (s *Server) handleGetMessageRaw(w http.ResponseWriter, r *http.Request) {
 
 	// Fallback to S3 if not in cache
 	if bodyData == nil {
+		// Validate S3 key components before attempting fetch
+		if message.S3Domain == "" || message.S3Localpart == "" || message.ContentHash == "" {
+			logger.Warn("HTTP Mail API: Message missing S3 key information (may be pending upload)",
+				"name", s.name, "message_id", messageID,
+				"has_domain", message.S3Domain != "",
+				"has_localpart", message.S3Localpart != "",
+				"has_hash", message.ContentHash != "")
+			s.writeError(w, http.StatusServiceUnavailable, "Message not yet available")
+			return
+		}
+
 		s3Key := helpers.NewS3Key(message.S3Domain, message.S3Localpart, message.ContentHash)
 		reader, err := s.storage.Get(s3Key)
 		if err != nil {
