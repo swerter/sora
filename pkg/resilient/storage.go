@@ -102,14 +102,14 @@ func (rs *ResilientS3Storage) isRetryableError(err error) bool {
 	return rs.classifyRetryable(err, false)
 }
 
-// isRetryableGetError is like isRetryableError but also treats HTTP 404
-// (NoSuchKey) as retryable.  Some S3-compatible providers (notably Backblaze
-// B2) return 404 during partial outages instead of a proper 5xx status.
-// For GET operations the caller expects the object to exist, so a 404 is
-// anomalous and worth retrying.  This should NOT be used for HEAD/stat
-// operations where 404 legitimately means "object does not exist".
+// isRetryableGetError determines which errors are worth retrying for S3 GET
+// operations.  HTTP 404 (NoSuchKey) is treated as a permanent error and is
+// NOT retried — the object genuinely does not exist and retrying wastes time
+// (up to 5 attempts with exponential backoff).  The circuit breaker's
+// IsSuccessful function already excludes 4xx from tripping the breaker, so
+// 404s during a real outage won't cause a cascade either.
 func (rs *ResilientS3Storage) isRetryableGetError(err error) bool {
-	return rs.classifyRetryable(err, true)
+	return rs.classifyRetryable(err, false)
 }
 
 func (rs *ResilientS3Storage) classifyRetryable(err error, retry404 bool) bool {
@@ -330,8 +330,8 @@ func (rs *ResilientS3Storage) StatObjectWithRetry(ctx context.Context, key strin
 
 // executeS3OperationWithRetry provides a generic wrapper for executing an S3 operation
 // with retries and a circuit breaker.  The isRetryable function determines which errors
-// are worth retrying — GET operations use isRetryableGetError (which retries 404s from
-// providers that return NoSuchKey during outages), while other operations use isRetryableError.
+// are worth retrying.  Only transient errors (5xx, timeouts, connection issues) are
+// retried; client errors like 404 NoSuchKey fail immediately.
 func (rs *ResilientS3Storage) executeS3OperationWithRetry(ctx context.Context, breaker *circuitbreaker.CircuitBreaker, config retry.BackoffConfig, isRetryable func(error) bool, op func() (any, error), key string) (any, error) {
 	var result any
 	err := retry.WithRetryAdvanced(ctx, func() error {
