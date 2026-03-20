@@ -460,7 +460,7 @@ func (s *IMAPSession) ensureBodyDataLoaded(msg *db.Message, bodyData *[]byte, bo
 
 func (s *IMAPSession) handleBinarySections(w *imapserver.FetchResponseWriter, bodyData *[]byte, bodyDataFetched *bool, options *imap.FetchOptions, msg *db.Message) error {
 	if err := s.ensureBodyDataLoaded(msg, bodyData, bodyDataFetched); err != nil {
-		// Logged in ensureBodyDataLoaded. If bodyData is nil or error occurred, subsequent ops will handle it.
+		return s.internalError("failed to load message body: %v", err)
 	}
 
 	for _, section := range options.BinarySection {
@@ -483,7 +483,7 @@ func (s *IMAPSession) handleBinarySections(w *imapserver.FetchResponseWriter, bo
 
 func (s *IMAPSession) handleBinarySectionSize(w *imapserver.FetchResponseWriter, bodyData *[]byte, bodyDataFetched *bool, options *imap.FetchOptions, msg *db.Message) error {
 	if err := s.ensureBodyDataLoaded(msg, bodyData, bodyDataFetched); err != nil {
-		// Logged in ensureBodyDataLoaded.
+		return s.internalError("failed to load message body: %v", err)
 	}
 
 	for _, section := range options.BinarySectionSize {
@@ -570,8 +570,7 @@ func (s *IMAPSession) handleBodySections(w *imapserver.FetchResponseWriter, body
 		// or if it's a complex section type that always requires full body.
 		if !satisfiedFromDB || extractionErr != nil {
 			if loadErr := s.ensureBodyDataLoaded(msg, bodyData, bodyDataFetched); loadErr != nil {
-				s.DebugLog("error ensuring body data loaded", "uid", msg.UID, "error", loadErr)
-				// sectionContent will be nil, handled below
+				return s.internalError("failed to load message body: %v", loadErr)
 			}
 
 			if *bodyData != nil { // Only extract if bodyData was successfully loaded
@@ -606,14 +605,21 @@ func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 		// Try cache first (nil-safe: cache is optional and not configured in tests).
 		if s.server.cache != nil {
 			if cacheData, cacheErr := s.server.cache.Get(msg.ContentHash); cacheErr == nil && cacheData != nil {
-				s.DebugLog("cache hit", "uid", msg.UID)
-				if s.memTracker != nil {
-					if allocErr := s.memTracker.Allocate(int64(len(cacheData))); allocErr != nil {
-						metrics.SessionMemoryLimitExceeded.WithLabelValues("imap", s.server.name, s.server.hostname).Inc()
-						return nil, fmt.Errorf("session memory limit exceeded: %v", allocErr)
+				// Validate cached data is not empty — a 0-byte cache file would
+				// otherwise be served as a "hit", returning an empty body to the
+				// client.  Fall through to S3 so the real content can be fetched.
+				if len(cacheData) == 0 {
+					s.WarnLog("cache contains empty body, falling through to S3", "uid", msg.UID, "content_hash", msg.ContentHash)
+				} else {
+					s.DebugLog("cache hit", "uid", msg.UID)
+					if s.memTracker != nil {
+						if allocErr := s.memTracker.Allocate(int64(len(cacheData))); allocErr != nil {
+							metrics.SessionMemoryLimitExceeded.WithLabelValues("imap", s.server.name, s.server.hostname).Inc()
+							return nil, fmt.Errorf("session memory limit exceeded: %v", allocErr)
+						}
 					}
+					return cacheData, nil
 				}
-				return cacheData, nil
 			}
 		}
 

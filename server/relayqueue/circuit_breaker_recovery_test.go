@@ -100,7 +100,7 @@ func TestCircuitBreakerAutoRecovery(t *testing.T) {
 
 	handler := &mockRelayHandlerWithRealCB{
 		cb:            cb,
-		failUntilCall: 7, // Fail first 7 attempts (5 to open CB + 2 in HALF-OPEN), then succeed on 8th
+		failUntilCall: 5, // Fail first 5 attempts to open CB, then succeed on 6th (first HALF-OPEN attempt)
 	}
 
 	// Create worker with 6-second ticker interval (longer than CB timeout)

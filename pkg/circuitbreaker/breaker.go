@@ -275,8 +275,18 @@ func (cb *CircuitBreaker) onSuccess(state State, now time.Time) {
 func (cb *CircuitBreaker) onFailure(state State, now time.Time) {
 	cb.counts.onFailure()
 
-	if cb.readyToTrip(cb.counts) {
+	switch state {
+	case StateHalfOpen:
+		// Any failure in half-open immediately reopens the circuit.
+		// This restarts the timeout so the breaker will try again later.
+		// Without this, the breaker gets stuck: MaxRequests are exhausted,
+		// readyToTrip may never fire (it can require more requests than
+		// MaxRequests allows), and half-open has no expiry — permanent deadlock.
 		cb.setState(StateOpen, now)
+	default: // StateClosed
+		if cb.readyToTrip(cb.counts) {
+			cb.setState(StateOpen, now)
+		}
 	}
 }
 

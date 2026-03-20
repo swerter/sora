@@ -460,73 +460,64 @@ func TestCircuitBreakerMixedErrors(t *testing.T) {
 // 5. Circuit couldn't transition to OPEN (3 < 5)
 // 6. Circuit stuck in HALF_OPEN forever
 func TestCircuitBreakerHalfOpenDeadlock(t *testing.T) {
-	t.Run("OldBehavior_WithBusinessLogicErrors", func(t *testing.T) {
-		// Simulate OLD behavior (before fix):
-		// - MaxRequests = 3
-		// - ReadyToTrip requires >= 5 requests
-		// This would cause DEADLOCK
+	t.Run("HalfOpenFailure_TransitionsToOpen", func(t *testing.T) {
+		// Verify the fix: any failure in HALF-OPEN immediately transitions back to OPEN.
+		// Previously, onFailure used readyToTrip (requires >= 5 requests) even in HALF-OPEN,
+		// but MaxRequests=3 only allowed 3 — so the breaker got permanently stuck.
+		// Now, any failure in HALF-OPEN immediately reopens the circuit (with a fresh timeout),
+		// ensuring the recovery cycle OPEN → HALF-OPEN → (retry) continues.
 
-		settings := circuitbreaker.DefaultSettings("test_deadlock_old")
-		settings.MaxRequests = 3 // OLD: Only 3 requests in half-open
+		settings := circuitbreaker.DefaultSettings("test_halfopen_reopen")
+		settings.MaxRequests = 3
 		settings.Interval = 0
-		settings.Timeout = 100 * time.Millisecond // Short timeout for testing
+		settings.Timeout = 100 * time.Millisecond
 		settings.ReadyToTrip = func(counts circuitbreaker.Counts) bool {
-			// OLD: Required >= 5 requests
-			// This creates deadlock: can't get 5 when only 3 allowed!
+			// Even with a high threshold that could never fire in HALF-OPEN,
+			// the breaker must still reopen on HALF-OPEN failures.
 			return counts.Requests >= 5 && float64(counts.TotalFailures)/float64(counts.Requests) >= 0.5
 		}
-
-		// Treat business logic errors as FAILURES (old buggy behavior)
 		settings.IsSuccessful = func(err error) bool {
 			return err == nil
 		}
 
 		breaker := circuitbreaker.NewCircuitBreaker(settings)
 
-		// Force circuit to OPEN by causing failures
+		// Force circuit to OPEN
 		for i := 0; i < 5; i++ {
 			breaker.Execute(func() (any, error) {
 				return nil, errors.New("system failure")
 			})
 		}
-
 		if breaker.State() != circuitbreaker.StateOpen {
 			t.Fatalf("Expected OPEN state, got %s", breaker.State())
 		}
 
-		// Wait for timeout to transition to HALF_OPEN
+		// Wait for timeout → HALF-OPEN
 		time.Sleep(150 * time.Millisecond)
 
-		// Trigger state check by attempting a request
+		// First failing request in HALF-OPEN must immediately reopen the circuit
 		breaker.Execute(func() (any, error) {
-			return nil, consts.ErrUserNotFound // Business logic error
+			return nil, errors.New("still broken")
 		})
 
 		state := breaker.State()
-		if state != circuitbreaker.StateHalfOpen {
-			t.Fatalf("Expected HALF_OPEN state after timeout, got %s", state)
+		if state != circuitbreaker.StateOpen {
+			t.Fatalf("Expected OPEN after failure in HALF-OPEN (prevents deadlock), got %s", state)
 		}
+		t.Logf("SUCCESS: Failure in HALF-OPEN correctly reopened circuit (no deadlock)")
 
-		// Now simulate 3 business logic errors (which are counted as failures in old behavior)
-		for i := 0; i < 2; i++ { // 2 more (we already did 1)
-			breaker.Execute(func() (any, error) {
-				return nil, consts.ErrUserNotFound
-			})
-		}
+		// Wait again → HALF-OPEN → now succeed → should close
+		time.Sleep(150 * time.Millisecond)
 
-		// OLD BEHAVIOR: Circuit breaker stays in HALF_OPEN
-		// Because: 3 requests, all failed, but ReadyToTrip needs >= 5
-		counts := breaker.Counts()
+		breaker.Execute(func() (any, error) {
+			return nil, nil // success
+		})
+
 		state = breaker.State()
-
-		t.Logf("After 3 failures in half-open: state=%s, requests=%d, failures=%d",
-			state, counts.Requests, counts.TotalFailures)
-
-		// This demonstrates the deadlock: circuit is HALF_OPEN but can't transition
-		if state == circuitbreaker.StateHalfOpen && counts.Requests >= settings.MaxRequests {
-			t.Logf("DEADLOCK SCENARIO: Circuit stuck in HALF_OPEN (requests=%d < required=5 for ReadyToTrip)", counts.Requests)
-			// In production, this state would persist forever, rejecting all requests
+		if state != circuitbreaker.StateClosed {
+			t.Fatalf("Expected CLOSED after success in HALF-OPEN, got %s", state)
 		}
+		t.Logf("SUCCESS: Circuit fully recovered: OPEN → HALF-OPEN → (success) → CLOSED")
 	})
 
 	t.Run("NewBehavior_WithBusinessLogicErrors", func(t *testing.T) {
@@ -601,8 +592,9 @@ func TestCircuitBreakerHalfOpenDeadlock(t *testing.T) {
 	})
 
 	t.Run("NewBehavior_WithSystemFailures", func(t *testing.T) {
-		// Test that NEW behavior correctly handles actual system failures in half-open
-		// Circuit should transition to OPEN when half-open requests are exhausted
+		// Test that system failures in HALF-OPEN immediately reopen the circuit.
+		// This prevents the breaker from wasting all MaxRequests on a still-broken service;
+		// instead it backs off immediately with a fresh OPEN timeout.
 
 		settings := circuitbreaker.DefaultSettings("test_system_halfopen")
 		settings.MaxRequests = 10
@@ -610,12 +602,6 @@ func TestCircuitBreakerHalfOpenDeadlock(t *testing.T) {
 		settings.Timeout = 100 * time.Millisecond
 		settings.ReadyToTrip = func(counts circuitbreaker.Counts) bool {
 			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-
-			// Check if half-open exhausted
-			if counts.Requests >= settings.MaxRequests && failureRatio >= 0.5 {
-				return true
-			}
-
 			return counts.Requests >= 5 && failureRatio >= 0.5
 		}
 		settings.IsSuccessful = func(err error) bool {
@@ -631,38 +617,32 @@ func TestCircuitBreakerHalfOpenDeadlock(t *testing.T) {
 			})
 		}
 
-		// Wait for timeout
+		// Wait for timeout → HALF-OPEN
 		time.Sleep(150 * time.Millisecond)
 
-		// Trigger HALF_OPEN with one failing request
+		// First failing request in HALF-OPEN must immediately reopen
 		breaker.Execute(func() (any, error) {
 			return nil, errors.New("still broken")
 		})
 
-		if breaker.State() != circuitbreaker.StateHalfOpen {
-			t.Fatalf("Expected HALF_OPEN, got %s", breaker.State())
-		}
-
-		// Send 9 more failing requests (total 10)
-		// After MaxRequests (10) with all failures, circuit should trip to OPEN
-		for i := 0; i < 9; i++ {
-			breaker.Execute(func() (any, error) {
-				return nil, errors.New("still broken")
-			})
-			// Check if circuit has tripped to OPEN
-			if breaker.State() == circuitbreaker.StateOpen {
-				t.Logf("Circuit tripped to OPEN after %d requests in half-open (as expected)", i+2)
-				break
-			}
-		}
-
 		state := breaker.State()
-
-		// Circuit should transition back to OPEN (all requests failed)
 		if state != circuitbreaker.StateOpen {
-			t.Errorf("Expected OPEN state after system failures in half-open, got %s", state)
+			t.Fatalf("Expected OPEN after first failure in HALF-OPEN, got %s", state)
+		}
+		t.Logf("SUCCESS: First system failure in HALF-OPEN immediately reopened circuit")
+
+		// Verify the recovery cycle works: wait → HALF-OPEN → succeed → CLOSED
+		time.Sleep(150 * time.Millisecond)
+
+		breaker.Execute(func() (any, error) {
+			return nil, nil // service recovered
+		})
+
+		state = breaker.State()
+		if state != circuitbreaker.StateClosed {
+			t.Errorf("Expected CLOSED after recovery, got %s", state)
 		} else {
-			t.Logf("SUCCESS: Circuit correctly transitioned to OPEN after half-open exhausted with failures")
+			t.Logf("SUCCESS: Full recovery cycle completed: OPEN → HALF-OPEN → (success) → CLOSED")
 		}
 	})
 }

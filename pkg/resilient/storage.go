@@ -33,7 +33,41 @@ func NewResilientS3Storage(s3storage *storage.S3Storage) *ResilientS3Storage {
 		logger.Info("S3 GET circuit breaker changed", "name", name, "from", from, "to", to)
 	}
 
+	// isSuccessfulFunc prevents non-system errors from tripping the circuit breaker.
+	// Only actual S3 infrastructure failures (5xx, timeouts, connection errors) should
+	// count as failures. Client disconnects and S3 client errors (4xx) are not S3 outages.
+	isSuccessfulFunc := func(err error) bool {
+		if err == nil {
+			return true
+		}
+
+		// Client disconnected (not an S3 failure).
+		// Note: context.DeadlineExceeded is NOT excluded — if S3 is consistently
+		// timing out, that IS a system health issue and should trip the breaker.
+		if errors.Is(err, context.Canceled) {
+			return true
+		}
+
+		// Use proper AWS SDK error typing for S3 client errors (4xx).
+		// These are data/config issues, not S3 infrastructure failures.
+		var httpErr *awshttp.ResponseError
+		if errors.As(err, &httpErr) {
+			code := httpErr.HTTPStatusCode()
+			// 4xx errors are client errors (not found, access denied, etc.)
+			// 5xx errors are server errors — should trip the breaker
+			if code >= 400 && code < 500 {
+				return true
+			}
+		}
+
+		// Otherwise, it's considered a system failure (connection errors, 5xx, etc.)
+		return false
+	}
+
+	getSettings.IsSuccessful = isSuccessfulFunc
+
 	putSettings := circuitbreaker.DefaultSettings("s3_put")
+	putSettings.IsSuccessful = isSuccessfulFunc
 	putSettings.ReadyToTrip = func(counts circuitbreaker.Counts) bool {
 		failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
 		return counts.Requests >= 3 && failureRatio >= 0.5
@@ -50,6 +84,7 @@ func NewResilientS3Storage(s3storage *storage.S3Storage) *ResilientS3Storage {
 	deleteSettings.OnStateChange = func(name string, from circuitbreaker.State, to circuitbreaker.State) {
 		logger.Info("S3 DELETE circuit breaker changed", "name", name, "from", from, "to", to)
 	}
+	deleteSettings.IsSuccessful = isSuccessfulFunc
 
 	return &ResilientS3Storage{
 		storage:       s3storage,
@@ -261,13 +296,22 @@ func (rs *ResilientS3Storage) StatObjectWithRetry(ctx context.Context, key strin
 // executeS3OperationWithRetry provides a generic wrapper for executing an S3 operation with retries and a circuit breaker.
 func (rs *ResilientS3Storage) executeS3OperationWithRetry(ctx context.Context, breaker *circuitbreaker.CircuitBreaker, config retry.BackoffConfig, op func() (any, error)) (any, error) {
 	var result any
-	err := retry.WithRetry(ctx, func() error {
+	err := retry.WithRetryAdvanced(ctx, func() error {
 		res, cbErr := breaker.Execute(op)
 		if cbErr != nil {
+			// Log every S3 failure so we can diagnose what triggers circuit breaker trips.
+			// Without this, tripped breakers are invisible until users report empty bodies.
+			logger.Warn("S3 operation failed",
+				"breaker", breaker.Name(),
+				"error", cbErr,
+				"breaker_state", breaker.State(),
+				"retryable", rs.isRetryableError(cbErr))
+
 			if rs.isRetryableError(cbErr) {
 				return cbErr // Signal to retry
 			}
-			// Use retry.Stop for non-retryable errors to stop the loop immediately.
+			// Use retry.Stop for non-retryable errors (e.g. circuit breaker open)
+			// to stop the loop immediately. WithRetryAdvanced respects StopError.
 			return retry.Stop(cbErr)
 		}
 		result = res
