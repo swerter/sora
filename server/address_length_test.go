@@ -28,21 +28,21 @@ func TestAddressLengthValidation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "local part at max length (128 chars)",
-			input:   strings.Repeat("a", 128) + "@example.com",
+			name:    "local part at max length (256 chars)",
+			input:   strings.Repeat("a", 256) + "@example.com",
 			wantErr: false,
 		},
 		{
-			name:      "local part exceeds max length (129 chars)",
-			input:     strings.Repeat("a", 129) + "@example.com",
+			name:      "local part exceeds max length (257 chars)",
+			input:     strings.Repeat("a", 257) + "@example.com",
 			wantErr:   true,
-			errString: "local part exceeds maximum length of 128 characters",
+			errString: "local part exceeds maximum length of 256 characters",
 		},
 		{
 			name:      "local part way over max (1000 chars)",
 			input:     strings.Repeat("a", 1000) + "@example.com",
 			wantErr:   true,
-			errString: "local part exceeds maximum length of 128 characters",
+			errString: "local part exceeds maximum length of 256 characters",
 		},
 		{
 			name:    "real-world SRS address",
@@ -67,13 +67,13 @@ func TestAddressLengthValidation(t *testing.T) {
 			errString: "domain exceeds maximum length of 255 characters",
 		},
 		{
-			name:    "total at max length (384 chars: 128+1+255)",
-			input:   strings.Repeat("a", 128) + "@" + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 63) + "." + strings.Repeat("e", 59) + ".abc",
+			name:    "total at max length (512 chars: 256+1+255)",
+			input:   strings.Repeat("a", 256) + "@" + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 63) + "." + strings.Repeat("e", 59) + ".abc",
 			wantErr: false,
 		},
 		{
 			name:      "total exceeds max length - domain limit hit first",
-			input:     strings.Repeat("a", 128) + "@" + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 63) + "." + strings.Repeat("e", 60) + ".abc",
+			input:     strings.Repeat("a", 256) + "@" + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 63) + "." + strings.Repeat("e", 60) + ".abc",
 			wantErr:   true,
 			errString: "domain exceeds maximum length of 255 characters",
 		},
@@ -84,9 +84,9 @@ func TestAddressLengthValidation(t *testing.T) {
 		},
 		{
 			name:      "address with plus detail exceeding local part limit",
-			input:     strings.Repeat("a", 124) + "+detail@example.com",
+			input:     strings.Repeat("a", 252) + "+detail@example.com",
 			wantErr:   true,
-			errString: "local part exceeds maximum length of 128 characters",
+			errString: "local part exceeds maximum length of 256 characters",
 		},
 		{
 			name:    "empty address",
@@ -124,13 +124,13 @@ func TestAddressLengthValidation(t *testing.T) {
 
 func TestAddressLengthConstants(t *testing.T) {
 	// Verify constants: extended local part limit to accommodate SRS addresses
-	if MaxLocalPartLength != 128 {
-		t.Errorf("MaxLocalPartLength = %d, want 128", MaxLocalPartLength)
+	if MaxLocalPartLength != 256 {
+		t.Errorf("MaxLocalPartLength = %d, want 256", MaxLocalPartLength)
 	}
 	if MaxDomainLength != 255 {
 		t.Errorf("MaxDomainLength = %d, want 255", MaxDomainLength)
 	}
-	if MaxAddressLength != 384 {
-		t.Errorf("MaxAddressLength = %d, want 384", MaxAddressLength)
+	if MaxAddressLength != 512 {
+		t.Errorf("MaxAddressLength = %d, want 512", MaxAddressLength)
 	}
 }

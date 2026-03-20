@@ -15,7 +15,7 @@ import (
 var testRunID = fmt.Sprintf("%d", time.Now().UnixNano()%1000000)
 
 // TestCreateAccountWithLengthLimits verifies that account creation enforces email length limits.
-// Note: local part limit is 128 (not RFC 5321's 64) to accommodate SRS-rewritten addresses.
+// Note: local part limit is 256 (not RFC 5321's 64) to accommodate SRS-rewritten addresses.
 func TestCreateAccountWithLengthLimits(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration test in short mode")
@@ -48,15 +48,15 @@ func TestCreateAccountWithLengthLimits(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "local part at max length (128 chars)",
-			email:   strings.Repeat("c", 128-len(testRunID)) + testRunID + "@example.com",
+			name:    "local part at max length (256 chars)",
+			email:   strings.Repeat("c", 256-len(testRunID)) + testRunID + "@example.com",
 			wantErr: false,
 		},
 		{
-			name:    "local part exceeds max (129 chars)",
-			email:   strings.Repeat("a", 129) + "@example.com",
+			name:    "local part exceeds max (257 chars)",
+			email:   strings.Repeat("a", 257) + "@example.com",
 			wantErr: true,
-			errMsg:  "local part exceeds maximum length of 128 characters",
+			errMsg:  "local part exceeds maximum length of 256 characters",
 		},
 		{
 			name:    "domain at max length (255 chars)",
@@ -70,15 +70,15 @@ func TestCreateAccountWithLengthLimits(t *testing.T) {
 			errMsg:  "domain exceeds maximum length of 255 characters",
 		},
 		{
-			name:    "total at max length (384 chars)",
-			email:   strings.Repeat("e", 128-len(testRunID)) + testRunID + "@" + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 63) + "." + strings.Repeat("e", 59) + ".abc",
+			name:    "total at max length (512 chars)",
+			email:   strings.Repeat("e", 256-len(testRunID)) + testRunID + "@" + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 63) + "." + strings.Repeat("e", 59) + ".abc",
 			wantErr: false,
 		},
 		{
 			name:    "local part way over limit (1000 chars)",
 			email:   strings.Repeat("x", 1000) + "@example.com",
 			wantErr: true,
-			errMsg:  "local part exceeds maximum length of 128 characters",
+			errMsg:  "local part exceeds maximum length of 256 characters",
 		},
 	}
 
@@ -162,9 +162,9 @@ func TestAddCredentialWithLengthLimits(t *testing.T) {
 		},
 		{
 			name:    "alias with local part exceeding max",
-			email:   strings.Repeat("a", 129) + "@example.com",
+			email:   strings.Repeat("a", 257) + "@example.com",
 			wantErr: true,
-			errMsg:  "local part exceeds maximum length of 128 characters",
+			errMsg:  "local part exceeds maximum length of 256 characters",
 		},
 		{
 			name:    "alias with domain exceeding max",

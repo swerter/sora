@@ -14,11 +14,11 @@ const DomainNameRegex = `^(?i)(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[
 // Length limits for email addresses
 // Note: RFC 5321 specifies 64 for local part, but SRS (Sender Rewriting Scheme)
 // and other address rewriting mechanisms routinely produce longer local parts.
-// We use 128 to accommodate these real-world addresses while still providing a bound.
+// We use 256 to accommodate these real-world addresses while still providing a bound.
 const (
-	MaxLocalPartLength = 128 // Maximum length for local part (before @)
+	MaxLocalPartLength = 256 // Maximum length for local part (before @)
 	MaxDomainLength    = 255 // Maximum length for domain part (after @)
-	MaxAddressLength   = 384 // Maximum total length (128 + 1 + 255)
+	MaxAddressLength   = 512 // Maximum total length (256 + 1 + 255)
 )
 
 // Separator constant for master authentication
