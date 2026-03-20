@@ -140,7 +140,10 @@ func (s *IMAPSession) internalError(format string, a ...any) *imap.Error {
 		strings.Contains(errLower, "too many clients") ||
 		strings.Contains(errLower, "connection pool") ||
 		strings.Contains(errLower, "max_client_conn") ||
-		strings.Contains(errLower, "operation failed after") {
+		strings.Contains(errLower, "operation failed after") ||
+		strings.Contains(errLower, "circuit breaker") ||
+		strings.Contains(errLower, "failed to retrieve message") ||
+		strings.Contains(errLower, "s3 returned empty data") {
 		return &imap.Error{
 			Type: imap.StatusResponseTypeNo,
 			Code: imap.ResponseCodeUnavailable,

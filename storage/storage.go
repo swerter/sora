@@ -81,6 +81,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/migadu/sora/logger"
 	"github.com/migadu/sora/pkg/metrics"
 )
@@ -390,6 +391,17 @@ func (s *S3Storage) Delete(key string) error {
 
 	_, err = s.Client.DeleteObject(ctx, input)
 	if err != nil {
+		// Race condition: object was deleted between our Exists check and DeleteObject.
+		// B2 returns 400 "InvalidRequest: File not present" in this case.
+		// Since Delete is idempotent (object is gone), treat this as success.
+		// Use smithy.APIError to check the structured error code, not string matching.
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidRequest" {
+			logger.Info("STORAGE: Object already deleted (race condition)", "key", key)
+			metrics.S3OperationsTotal.WithLabelValues("DELETE", "already_deleted").Inc()
+			metrics.S3OperationDuration.WithLabelValues("DELETE").Observe(time.Since(start).Seconds())
+			return nil
+		}
 		metrics.S3OperationsTotal.WithLabelValues("DELETE", "error").Inc()
 	} else {
 		metrics.S3OperationsTotal.WithLabelValues("DELETE", "success").Inc()

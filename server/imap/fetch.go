@@ -668,7 +668,8 @@ func (s *IMAPSession) getMessageBody(msg *db.Message) ([]byte, error) {
 
 		// Validate we got data
 		if len(data) == 0 {
-			s.WarnLog("S3 returned empty data", "uid", msg.UID, "s3_key", s3Key, "expected_size", msg.Size)
+			s.WarnLog("S3 returned empty data", "uid", msg.UID, "s3_key", s3Key, "expected_size", msg.Size,
+				"get_breaker_state", s.server.s3.GetGetBreakerState())
 			return nil, fmt.Errorf("S3 returned empty data for message UID %d (expected %d bytes)", msg.UID, msg.Size)
 		}
 
