@@ -99,10 +99,45 @@ func (rs *ResilientS3Storage) GetStorage() *storage.S3Storage {
 }
 
 func (rs *ResilientS3Storage) isRetryableError(err error) bool {
+	return rs.classifyRetryable(err, false)
+}
+
+// isRetryableGetError is like isRetryableError but also treats HTTP 404
+// (NoSuchKey) as retryable.  Some S3-compatible providers (notably Backblaze
+// B2) return 404 during partial outages instead of a proper 5xx status.
+// For GET operations the caller expects the object to exist, so a 404 is
+// anomalous and worth retrying.  This should NOT be used for HEAD/stat
+// operations where 404 legitimately means "object does not exist".
+func (rs *ResilientS3Storage) isRetryableGetError(err error) bool {
+	return rs.classifyRetryable(err, true)
+}
+
+func (rs *ResilientS3Storage) classifyRetryable(err error, retry404 bool) bool {
 	if err == nil {
 		return false
 	}
 
+	// Check AWS SDK HTTP status codes — more reliable than string matching.
+	var httpErr *awshttp.ResponseError
+	if errors.As(err, &httpErr) {
+		code := httpErr.HTTPStatusCode()
+		// 5xx errors are always retryable (server-side issues).
+		if code >= 500 {
+			return true
+		}
+		// 429 Too Many Requests — back off and retry.
+		if code == 429 {
+			return true
+		}
+		// 404 during a GET is anomalous if the object is expected to exist.
+		// Some providers (B2) return 404 during outages instead of 5xx.
+		if retry404 && code == 404 {
+			return true
+		}
+	}
+
+	// Fallback to string matching for errors from external libraries
+	// (network stack, DNS, TLS) that don't expose HTTP status codes.
 	errStr := strings.ToLower(err.Error())
 
 	retryableErrors := []string{
@@ -145,7 +180,7 @@ func (rs *ResilientS3Storage) GetWithRetry(ctx context.Context, key string) (io.
 	op := func() (any, error) {
 		return rs.storage.Get(key)
 	}
-	result, err := rs.executeS3OperationWithRetry(ctx, rs.getBreaker, config, op, key)
+	result, err := rs.executeS3OperationWithRetry(ctx, rs.getBreaker, config, rs.isRetryableGetError, op, key)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +203,7 @@ func (rs *ResilientS3Storage) PutWithRetry(ctx context.Context, key string, body
 	op := func() (any, error) {
 		return nil, rs.storage.Put(key, body, size)
 	}
-	_, err := rs.executeS3OperationWithRetry(ctx, rs.putBreaker, config, op, key)
+	_, err := rs.executeS3OperationWithRetry(ctx, rs.putBreaker, config, rs.isRetryableError, op, key)
 	return err
 }
 
@@ -192,7 +227,7 @@ func (rs *ResilientS3Storage) DeleteWithRetry(ctx context.Context, key string) e
 	op := func() (any, error) {
 		return nil, rs.storage.Delete(key)
 	}
-	_, err := rs.executeS3OperationWithRetry(ctx, rs.deleteBreaker, config, op, key)
+	_, err := rs.executeS3OperationWithRetry(ctx, rs.deleteBreaker, config, rs.isRetryableError, op, key)
 	return err
 }
 
@@ -214,7 +249,7 @@ func (rs *ResilientS3Storage) PutObjectWithRetry(ctx context.Context, key string
 		}
 		return rs.storage.Client.PutObject(ctx, input)
 	}
-	result, err := rs.executeS3OperationWithRetry(ctx, rs.putBreaker, config, op, key)
+	result, err := rs.executeS3OperationWithRetry(ctx, rs.putBreaker, config, rs.isRetryableError, op, key)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +274,7 @@ func (rs *ResilientS3Storage) GetObjectWithRetry(ctx context.Context, key string
 		}
 		return rs.storage.Client.GetObject(ctx, input)
 	}
-	result, err := rs.executeS3OperationWithRetry(ctx, rs.getBreaker, config, op, key)
+	result, err := rs.executeS3OperationWithRetry(ctx, rs.getBreaker, config, rs.isRetryableGetError, op, key)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +320,7 @@ func (rs *ResilientS3Storage) StatObjectWithRetry(ctx context.Context, key strin
 		}
 		return rs.storage.Client.HeadObject(ctx, input)
 	}
-	result, err := rs.executeS3OperationWithRetry(ctx, rs.getBreaker, config, op, key)
+	result, err := rs.executeS3OperationWithRetry(ctx, rs.getBreaker, config, rs.isRetryableError, op, key)
 	if err != nil {
 		return nil, err
 	}
@@ -293,12 +328,16 @@ func (rs *ResilientS3Storage) StatObjectWithRetry(ctx context.Context, key strin
 	return output, err
 }
 
-// executeS3OperationWithRetry provides a generic wrapper for executing an S3 operation with retries and a circuit breaker.
-func (rs *ResilientS3Storage) executeS3OperationWithRetry(ctx context.Context, breaker *circuitbreaker.CircuitBreaker, config retry.BackoffConfig, op func() (any, error), key string) (any, error) {
+// executeS3OperationWithRetry provides a generic wrapper for executing an S3 operation
+// with retries and a circuit breaker.  The isRetryable function determines which errors
+// are worth retrying — GET operations use isRetryableGetError (which retries 404s from
+// providers that return NoSuchKey during outages), while other operations use isRetryableError.
+func (rs *ResilientS3Storage) executeS3OperationWithRetry(ctx context.Context, breaker *circuitbreaker.CircuitBreaker, config retry.BackoffConfig, isRetryable func(error) bool, op func() (any, error), key string) (any, error) {
 	var result any
 	err := retry.WithRetryAdvanced(ctx, func() error {
 		res, cbErr := breaker.Execute(op)
 		if cbErr != nil {
+			retryable := isRetryable(cbErr)
 			// Log every S3 failure so we can diagnose what triggers circuit breaker trips.
 			// Without this, tripped breakers are invisible until users report empty bodies.
 			logger.Warn("S3 operation failed",
@@ -306,9 +345,9 @@ func (rs *ResilientS3Storage) executeS3OperationWithRetry(ctx context.Context, b
 				"key", key,
 				"error", cbErr,
 				"breaker_state", breaker.State(),
-				"retryable", rs.isRetryableError(cbErr))
+				"retryable", retryable)
 
-			if rs.isRetryableError(cbErr) {
+			if retryable {
 				return cbErr // Signal to retry
 			}
 			// Use retry.Stop for non-retryable errors (e.g. circuit breaker open)
