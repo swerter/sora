@@ -461,7 +461,10 @@ func (s *IMAPSession) ensureBodyDataLoaded(msg *db.Message, bodyData *[]byte, bo
 
 func (s *IMAPSession) handleBinarySections(w *imapserver.FetchResponseWriter, bodyData *[]byte, bodyDataFetched *bool, options *imap.FetchOptions, msg *db.Message) error {
 	if err := s.ensureBodyDataLoaded(msg, bodyData, bodyDataFetched); err != nil {
-		return s.internalError("failed to load message body: %v", err)
+		// Graceful degradation: return empty binary sections instead of failing the
+		// entire multi-message FETCH. This prevents one broken message (missing S3
+		// content, etc.) from making the whole mailbox listing fail for webmail clients.
+		s.WarnLog("failed to load message body, returning empty binary sections", "uid", msg.UID, "error", err)
 	}
 
 	for _, section := range options.BinarySection {
@@ -484,7 +487,8 @@ func (s *IMAPSession) handleBinarySections(w *imapserver.FetchResponseWriter, bo
 
 func (s *IMAPSession) handleBinarySectionSize(w *imapserver.FetchResponseWriter, bodyData *[]byte, bodyDataFetched *bool, options *imap.FetchOptions, msg *db.Message) error {
 	if err := s.ensureBodyDataLoaded(msg, bodyData, bodyDataFetched); err != nil {
-		return s.internalError("failed to load message body: %v", err)
+		// Graceful degradation: return zero sizes instead of failing the entire FETCH.
+		s.WarnLog("failed to load message body, returning zero binary section sizes", "uid", msg.UID, "error", err)
 	}
 
 	for _, section := range options.BinarySectionSize {
@@ -571,7 +575,11 @@ func (s *IMAPSession) handleBodySections(w *imapserver.FetchResponseWriter, body
 		// or if it's a complex section type that always requires full body.
 		if !satisfiedFromDB || extractionErr != nil {
 			if loadErr := s.ensureBodyDataLoaded(msg, bodyData, bodyDataFetched); loadErr != nil {
-				return s.internalError("failed to load message body: %v", loadErr)
+				// Graceful degradation: return empty body sections instead of failing
+				// the entire multi-message FETCH. This prevents one broken message
+				// (missing S3 content, 0-byte message, etc.) from making the whole
+				// mailbox listing fail for webmail clients like Roundcube/SOGo.
+				s.WarnLog("failed to load message body, returning empty body section", "uid", msg.UID, "error", loadErr)
 			}
 
 			if *bodyData != nil { // Only extract if bodyData was successfully loaded

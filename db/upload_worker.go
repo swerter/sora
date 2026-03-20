@@ -124,12 +124,18 @@ func (db *Database) CompleteS3Upload(ctx context.Context, tx pgx.Tx, contentHash
 	return nil
 }
 
-// IsContentHashUploaded checks if any message with the given content hash is already marked as uploaded.
-// This is used by workers to avoid redundant S3 uploads.
+// IsContentHashUploaded checks if any non-expunged message with the given content hash
+// is already marked as uploaded.  This is used by the upload worker to avoid redundant
+// S3 uploads.
+//
+// IMPORTANT: Only considers non-expunged messages.  Expunged messages may be pending
+// S3 cleanup by the cleaner.  If we consider them "uploaded", the worker skips the
+// upload, then the cleaner deletes the S3 object, leaving new messages that reference
+// a non-existent object (404 NoSuchKey on fetch).
 func (db *Database) IsContentHashUploaded(ctx context.Context, contentHash string, accountID int64) (bool, error) {
 	var uploaded bool
 	err := db.GetReadPool().QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM messages WHERE content_hash = $1 AND account_id = $2 AND uploaded = TRUE)
+		SELECT EXISTS (SELECT 1 FROM messages WHERE content_hash = $1 AND account_id = $2 AND uploaded = TRUE AND expunged_at IS NULL)
 	`, contentHash, accountID).Scan(&uploaded)
 	if err != nil {
 		return false, fmt.Errorf("failed to check if content hash %s for account %d is uploaded: %w", contentHash, accountID, err)

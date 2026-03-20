@@ -509,17 +509,18 @@ func TestCleanupLock_NoDeadlockWithUserQueries(t *testing.T) {
 		defer txUser.Rollback(ctx)
 
 		// Simulate user query reading the content
-		var body string
+		// Note: text_body is always NULL after trigger, so we read headers instead
+		var headers string
 		err = txUser.QueryRow(ctx,
-			"SELECT text_body FROM message_contents WHERE content_hash = $1",
-			contentHash).Scan(&body)
+			"SELECT headers FROM message_contents WHERE content_hash = $1",
+			contentHash).Scan(&headers)
 		if err != nil {
 			t.Logf("User query: SELECT failed: %v", err)
 			userQueryDone <- false
 			return
 		}
 
-		t.Logf("User query: successfully read content (%d bytes)", len(body))
+		t.Logf("User query: successfully read content (%d bytes)", len(headers))
 		txUser.Commit(ctx)
 		userQueryDone <- true
 	}()

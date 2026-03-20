@@ -493,6 +493,11 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 
 	// Check if content is already uploaded for this account (content deduplication).
 	// If so, mark this message as uploaded immediately without creating a pending_upload.
+	//
+	// IMPORTANT: Only consider non-expunged messages. Expunged messages may be pending
+	// S3 cleanup — if we dedup against them, the new message gets marked uploaded=TRUE
+	// without any S3 upload, and the cleaner then deletes the S3 object, leaving the
+	// new message referencing a non-existent object (404 NoSuchKey on fetch).
 	var alreadyUploaded bool
 	err = tx.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -500,6 +505,7 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 			WHERE content_hash = $1
 			  AND account_id = $2
 			  AND uploaded = TRUE
+			  AND expunged_at IS NULL
 			LIMIT 1
 		)
 	`, options.ContentHash, upload.AccountID).Scan(&alreadyUploaded)

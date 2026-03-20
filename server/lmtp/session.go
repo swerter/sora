@@ -336,6 +336,18 @@ func (s *LMTPSession) Data(r io.Reader) error {
 	// Use the full message bytes as received for hashing, size, and header extraction.
 	fullMessageBytes := buf.Bytes()
 
+	// Reject empty messages — a valid RFC 5322 message always has headers.
+	// A 0-byte DATA can occur from buggy MTAs or truncated connections.
+	if len(fullMessageBytes) == 0 {
+		s.WarnLog("rejecting empty message delivery (0 bytes)")
+		recordMetrics("failure")
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 6, 0},
+			Message:      "empty message rejected: a message must contain at least headers",
+		}
+	}
+
 	// Prometheus metrics
 	metrics.MessageSizeBytes.WithLabelValues("lmtp").Observe(float64(len(fullMessageBytes)))
 	metrics.BytesThroughput.WithLabelValues("lmtp", "in").Add(float64(len(fullMessageBytes)))

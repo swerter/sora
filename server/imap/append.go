@@ -120,6 +120,18 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 	// Use the full message bytes as received for hashing, size, and header extraction.
 	fullMessageBytes := buf.Bytes()
 
+	// Reject empty messages — a valid RFC 5322 message always has headers.
+	// A 0-byte literal can occur from buggy clients or truncated connections
+	// where io.Copy returns nil error but reads no data.
+	if len(fullMessageBytes) == 0 {
+		s.WarnLog("rejecting empty message APPEND (0 bytes)")
+		recordMetrics("failure")
+		return nil, &imap.Error{
+			Type: imap.StatusResponseTypeNo,
+			Text: "empty message rejected: a message must contain at least headers",
+		}
+	}
+
 	// Check if the message exceeds the configured APPENDLIMIT
 	if s.server.appendLimit > 0 && int64(len(fullMessageBytes)) > s.server.appendLimit {
 		s.DebugLog("message size exceeds APPENDLIMIT", "size", len(fullMessageBytes), "limit", s.server.appendLimit)
