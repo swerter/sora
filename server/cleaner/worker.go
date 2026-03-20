@@ -192,7 +192,7 @@ func (w *CleanupWorker) Stop() {
 func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	locked, err := w.rdb.AcquireCleanupLockWithRetry(ctx)
 	if err != nil {
-		logger.Error("Cleanup: failed to acquire advisory lock:", err)
+		logger.Error("Cleanup: failed to acquire advisory lock", "err", err)
 		return fmt.Errorf("failed to acquire advisory lock: %w", err)
 	}
 	if !locked {
