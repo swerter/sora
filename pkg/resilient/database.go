@@ -156,8 +156,26 @@ type ResilientDatabase struct {
 	// Database configuration for timeouts
 	config *config.DatabaseConfig
 
+	// Persistent authentication cache (optional, nil if disabled)
+	authCache authCacheInterface
+
 	// Close synchronization to prevent race with health checker
 	closeOnce sync.Once
+}
+
+// authCacheInterface defines the interface for the persistent auth cache.
+// This avoids a direct import cycle with the authcache package.
+type authCacheInterface interface {
+	Get(ctx context.Context, address string) (accountID int64, hashedPassword string, err error)
+	Put(ctx context.Context, address string, accountID int64, hashedPassword string) error
+	Invalidate(ctx context.Context, address string) error
+	InvalidateAccount(ctx context.Context, accountID int64) error
+}
+
+// SetAuthCache sets the persistent authentication cache on the resilient database.
+// This should be called after creating the ResilientDatabase if auth cache is enabled.
+func (rd *ResilientDatabase) SetAuthCache(cache authCacheInterface) {
+	rd.authCache = cache
 }
 
 func NewResilientDatabase(ctx context.Context, config *config.DatabaseConfig, enableHealthCheck bool, runMigrations bool) (*ResilientDatabase, error) {

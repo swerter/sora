@@ -60,6 +60,7 @@ type Server struct {
 	connectionTrackers map[string]*server.ConnectionTracker // protocol -> tracker
 	proxyServers       map[string]ProxyServer               // proxy name -> proxy server
 	proxyReader        *server.ProxyProtocolReader          // PROXY protocol support
+	authCache          AuthCacheStats                       // persistent auth cache (optional)
 }
 
 // ServerOptions holds configuration options for the HTTP API server
@@ -83,6 +84,7 @@ type ServerOptions struct {
 	ValidBackends      map[string][]string                  // Map of protocol -> valid backend addresses
 	ConnectionTrackers map[string]*server.ConnectionTracker // protocol -> tracker (for gossip-based kick)
 	ProxyServers       map[string]ProxyServer               // proxy name -> proxy server (for backend health)
+	AuthCache          AuthCacheStats                       // persistent auth cache (optional)
 
 	// PROXY protocol for incoming connections (from HAProxy, nginx, etc.)
 	ProxyProtocol               bool     // Enable PROXY protocol support for incoming connections
@@ -101,6 +103,11 @@ type AffinityManager interface {
 // ProxyServer interface for accessing proxy backend health information
 type ProxyServer interface {
 	GetConnectionManager() *proxy.ConnectionManager
+}
+
+// AuthCacheStats interface for accessing auth cache statistics
+type AuthCacheStats interface {
+	Stats(ctx context.Context) (totalEntries, lifetimeHits int64, hits, misses int64, hitRate float64, err error)
 }
 
 // BackendHealthInfo represents backend health status (mirrors proxy.BackendHealthInfo)
@@ -181,9 +188,15 @@ func New(rdb *resilient.ResilientDatabase, options ServerOptions) (*Server, erro
 		connectionTrackers: options.ConnectionTrackers,
 		proxyServers:       options.ProxyServers,
 		proxyReader:        proxyReader,
+		authCache:          options.AuthCache,
 	}
 
 	return s, nil
+}
+
+// SetAuthCache sets the persistent authentication cache for stats reporting.
+func (s *Server) SetAuthCache(ac AuthCacheStats) {
+	s.authCache = ac
 }
 
 // Start starts the HTTP API server
@@ -322,7 +335,9 @@ func (s *Server) setupRoutes() http.Handler {
 	mux.HandleFunc("/admin/uploader/failed", routeHandler("GET", s.handleFailedUploads))
 
 	// Authentication statistics routes
+	mux.HandleFunc("/admin/auth/stats", routeHandler("GET", s.handleAuthStats))
 	mux.HandleFunc("/admin/auth/blocked", routeHandler("GET", s.handleAuthBlocked))
+	mux.HandleFunc("/admin/auth-cache/stats", routeHandler("GET", s.handleAuthCacheStats))
 
 	// Health monitoring routes
 	mux.HandleFunc("/admin/health/overview", routeHandler("GET", s.handleHealthOverview))
@@ -1653,6 +1668,48 @@ func (s *Server) handleFailedUploads(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleAuthStats(w http.ResponseWriter, r *http.Request) {
+	// Auth statistics are tracked in-memory via the rate limiter.
+	// The window parameter is accepted for backwards compatibility but ignored.
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"implementation": "in-memory",
+		"tracking_mode":  "per-address rate limiting with automatic expiry",
+		"available_stats": map[string]string{
+			"blocked_entries": "GET /admin/auth/blocked",
+		},
+		"access_methods": map[string]string{
+			"blocked_list": "GET /admin/auth/blocked - list currently blocked addresses",
+		},
+	})
+}
+
+func (s *Server) handleAuthCacheStats(w http.ResponseWriter, r *http.Request) {
+	if s.authCache == nil {
+		s.writeJSON(w, http.StatusOK, map[string]any{
+			"enabled": false,
+			"note":    "Auth cache is not enabled. Enable it in [auth_cache] config section.",
+		})
+		return
+	}
+
+	ctx := r.Context()
+	totalEntries, lifetimeHits, hits, misses, hitRate, err := s.authCache.Stats(ctx)
+	if err != nil {
+		logger.Warn("HTTP API: Error getting auth cache stats", "name", s.name, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to get auth cache stats")
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":            true,
+		"total_entries":      totalEntries,
+		"session_hits":       hits,
+		"session_misses":     misses,
+		"hit_rate_percent":   hitRate,
+		"lifetime_hit_count": lifetimeHits,
+	})
+}
+
 func (s *Server) handleAuthBlocked(w http.ResponseWriter, r *http.Request) {
 	// Get optional protocol filter from query parameter
 	protocol := r.URL.Query().Get("protocol")
@@ -1899,8 +1956,11 @@ func (s *Server) handleConfigInfo(w http.ResponseWriter, r *http.Request) {
 				"GET /admin/uploader/status",
 				"GET /admin/uploader/failed",
 			},
-			"system_information": {
+			"auth_statistics": {
+				"GET /admin/auth/stats",
 				"GET /admin/auth/blocked",
+			},
+			"system_information": {
 				"GET /admin/config",
 			},
 		},

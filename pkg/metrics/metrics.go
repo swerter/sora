@@ -472,6 +472,24 @@ var (
 	// Note: Old auth cache metrics (CacheSize, CacheHitRatio) removed - replaced by LookupCacheEntriesTotal and LookupCacheHitRate
 )
 
+// Auth cache metrics (persistent SQLite-backed credential cache)
+var (
+	AuthCacheOperations = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "sora_auth_cache_operations_total",
+			Help: "Total auth cache operations by result (hit, miss, error)",
+		},
+		[]string{"result"},
+	)
+
+	AuthCacheEntries = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "sora_auth_cache_entries_total",
+			Help: "Current number of entries in the persistent auth cache",
+		},
+	)
+)
+
 // Cache warmup metrics
 var (
 	WarmupOperationsTotal = promauto.NewCounterVec(

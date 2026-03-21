@@ -1424,6 +1424,41 @@ type SieveConfig struct {
 	EnabledExtensions []string `toml:"enabled_extensions"` // List of enabled Sieve extensions (empty = all extensions enabled)
 }
 
+// AuthCacheConfig holds persistent authentication cache configuration.
+// The auth cache stores credential lookups in a local SQLite database to survive
+// restarts and prevent thundering herd on the PostgreSQL database.
+type AuthCacheConfig struct {
+	Enabled         bool   `toml:"enabled"`          // Enable persistent auth cache (default: false)
+	Path            string `toml:"path"`             // SQLite database path (default: "/tmp/sora/auth_cache.db")
+	MaxAge          string `toml:"max_age"`          // Max age for cached entries (default: "168h" = 7 days)
+	CleanupInterval string `toml:"cleanup_interval"` // How often to purge old entries (default: "1h")
+	PurgeUnused     string `toml:"purge_unused"`     // Purge entries unused for this duration (default: "720h" = 30 days)
+}
+
+// GetMaxAge parses the max age duration
+func (a *AuthCacheConfig) GetMaxAge() (time.Duration, error) {
+	if a.MaxAge == "" {
+		return 24 * time.Hour, nil // Default: 7 days
+	}
+	return helpers.ParseDuration(a.MaxAge)
+}
+
+// GetCleanupInterval parses the cleanup interval duration
+func (a *AuthCacheConfig) GetCleanupInterval() (time.Duration, error) {
+	if a.CleanupInterval == "" {
+		return time.Hour, nil // Default: 1 hour
+	}
+	return helpers.ParseDuration(a.CleanupInterval)
+}
+
+// GetPurgeUnused parses the purge unused duration
+func (a *AuthCacheConfig) GetPurgeUnused() (time.Duration, error) {
+	if a.PurgeUnused == "" {
+		return 168 * time.Hour, nil // Default: 30 days
+	}
+	return helpers.ParseDuration(a.PurgeUnused)
+}
+
 // Config holds all configuration for the application.
 type Config struct {
 	Logging          LoggingConfig          `toml:"logging"`
@@ -1432,6 +1467,7 @@ type Config struct {
 	TLS              TLSConfig              `toml:"tls"`
 	Cluster          ClusterConfig          `toml:"cluster"`
 	LocalCache       LocalCacheConfig       `toml:"local_cache"`
+	AuthCache        AuthCacheConfig        `toml:"auth_cache"` // Persistent auth cache configuration
 	Cleanup          CleanupConfig          `toml:"cleanup"`
 	Servers          ServersConfig          `toml:"servers"`
 	Uploader         UploaderConfig         `toml:"uploader"`

@@ -194,6 +194,8 @@ func main() {
 		handleMailboxCommand(ctx)
 	case "cache":
 		handleCacheCommand(ctx)
+	case "auth-cache":
+		handleAuthCacheCommand(ctx)
 	case "stats":
 		handleStatsCommand(ctx)
 	case "connections":
@@ -246,6 +248,7 @@ Commands:
   credentials   Manage account credentials
   mailbox       Manage mailboxes (create, delete, rename, subscribe)
   cache         Cache management operations
+  auth-cache    Auth cache management (persistent auth credential cache)
   stats         System statistics and analytics
   connections   Connection management
   affinity      User-to-backend affinity management

@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/migadu/sora/authcache"
 	"github.com/migadu/sora/cache"
 	"github.com/migadu/sora/cluster"
 	"github.com/migadu/sora/config"
@@ -92,6 +94,7 @@ type serverDependencies struct {
 	serverManager         *serverManager
 	connectionTrackers    map[string]*server.ConnectionTracker // protocol -> tracker (for admin API kick)
 	connectionTrackersMux sync.Mutex                           // protects connectionTrackers map
+	authCacheInstance     adminapi.AuthCacheStats              // persistent auth cache (for admin API stats)
 	proxyServers          map[string]adminapi.ProxyServer      // proxy name -> proxy server interface (for backend health)
 	proxyServersMux       sync.Mutex                           // protects proxyServers map
 	runningServers        map[string]ConfigReloader            // server name -> reloadable server
@@ -553,6 +556,54 @@ func initializeServices(ctx context.Context, cfg config.Config, errorHandler *er
 		deps.resilientDB.StartPoolMetrics(ctx)
 		deps.resilientDB.StartPoolHealthMonitoring(ctx)
 		logger.Info("Database resilience features initialized: failover, circuit breakers, pool monitoring")
+	}
+
+	// Initialize persistent auth cache if enabled (survives restarts, prevents thundering herd)
+	if cfg.AuthCache.Enabled {
+		acPath := cfg.AuthCache.Path
+		if acPath == "" {
+			acPath = "/tmp/sora/auth_cache.db"
+		}
+		acMaxAge, err := cfg.AuthCache.GetMaxAge()
+		if err != nil {
+			logger.Warn("AuthCache: Invalid max_age - using default (168h)", "error", err)
+			acMaxAge = 168 * time.Hour
+		}
+		acPurgeUnused, err := cfg.AuthCache.GetPurgeUnused()
+		if err != nil {
+			logger.Warn("AuthCache: Invalid purge_unused - using default (720h)", "error", err)
+			acPurgeUnused = 720 * time.Hour
+		}
+		acCleanupInterval, err := cfg.AuthCache.GetCleanupInterval()
+		if err != nil {
+			logger.Warn("AuthCache: Invalid cleanup_interval - using default (1h)", "error", err)
+			acCleanupInterval = time.Hour
+		}
+
+		// Ensure parent directory exists
+		if dir := filepath.Dir(acPath); dir != "" && dir != "." {
+			os.MkdirAll(dir, 0755)
+		}
+
+		ac, err := authcache.New(acPath, acMaxAge, acPurgeUnused, acCleanupInterval)
+		if err != nil {
+			logger.Error("AuthCache: Failed to initialize - continuing without auth cache", "error", err)
+		} else {
+			deps.authCacheInstance = ac
+			if deps.resilientDB != nil {
+				deps.resilientDB.SetAuthCache(ac)
+			}
+			ac.StartCleanupLoop(ctx)
+			logger.Info("AuthCache: Initialized persistent authentication cache", "path", acPath, "max_age", acMaxAge, "purge_unused", acPurgeUnused, "cleanup_interval", acCleanupInterval)
+
+			// Ensure cache is closed on shutdown
+			go func() {
+				<-ctx.Done()
+				if err := ac.Close(); err != nil {
+					logger.Warn("AuthCache: Error closing auth cache", "error", err)
+				}
+			}()
+		}
 	}
 
 	// Initialize health monitoring
@@ -2021,6 +2072,7 @@ func startDynamicHTTPAdminAPIServer(ctx context.Context, deps *serverDependencie
 		ValidBackends:      validBackends,
 		ConnectionTrackers: deps.connectionTrackers,
 		ProxyServers:       deps.proxyServers,
+		AuthCache:          deps.authCacheInstance,
 	}
 
 	srv := adminapi.Start(ctx, deps.resilientDB, options, errChan)

@@ -17,7 +17,8 @@ var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 )
 
-// GetCredentialForAuthWithRetry retrieves credentials for authentication with retry logic
+// GetCredentialForAuthWithRetry retrieves credentials for authentication with retry logic.
+// Used by backend servers (IMAP, POP3, ManageSieve) which have direct database access.
 func (rd *ResilientDatabase) GetCredentialForAuthWithRetry(ctx context.Context, address string) (accountID int64, hashedPassword string, err error) {
 	config := retry.BackoffConfig{
 		InitialInterval: 250 * time.Millisecond,
@@ -51,10 +52,48 @@ func (rd *ResilientDatabase) GetCredentialForAuthWithRetry(ctx context.Context, 
 }
 
 // AuthenticateWithRetry handles the full authentication flow with resilience.
-// It fetches credentials, verifies the password, and triggers a rehash if necessary.
-// NOTE: This method is used by proxy servers which manage their own caches.
-// Backend servers (IMAP, POP3, ManageSieve) should use their own Authenticate() methods instead.
+// It fetches credentials from PostgreSQL, verifies the password, and triggers
+// a rehash if necessary.
+//
+// SCOPE: This method is ONLY for PostgreSQL database lookups. It is NOT used
+// for remote lookup authentication (which is handled by the proxy's connection
+// manager). Proxy servers call this method only in the "fallback to main DB"
+// code path — either when remote lookup is not configured, or when remote
+// lookup returns "user not found" and lookup_local_users is enabled.
+//
+// AUTH RATE LIMITING: This method does not perform any rate limiting. Rate
+// limiting is handled by the proxy server layer (authLimiter) which records
+// success/failure AFTER this method returns. The auth cache is transparent
+// to the rate limiter.
+//
+// AUTH CACHE BEHAVIOR (when enabled via SetAuthCache):
+//  1. Check the local SQLite cache first (~0.1ms)
+//  2. On cache hit + password matches: return success (no DB round-trip)
+//  3. On cache hit + password mismatch: invalidate stale entry, fall through to DB
+//  4. On cache miss: fall through to DB
+//  5. On successful DB auth: cache the credentials for future use
+//
+// This eliminates the "thundering herd" problem on proxy restart where thousands
+// of clients reconnect simultaneously.
 func (rd *ResilientDatabase) AuthenticateWithRetry(ctx context.Context, address, password string) (accountID int64, err error) {
+	// --- Step 1: Try persistent auth cache (if enabled) ---
+	// The cache is ONLY populated from successful DB lookups, never from remote lookups.
+	if rd.authCache != nil {
+		cachedAccountID, cachedHash, cacheErr := rd.authCache.Get(ctx, address)
+		if cacheErr == nil {
+			// Cache hit — verify password locally using the cached hash
+			if verifyErr := db.VerifyPassword(cachedHash, password); verifyErr == nil {
+				// Password matches cached hash — no database round-trip needed
+				return cachedAccountID, nil
+			}
+			// Password mismatch — the password may have changed since caching.
+			// Invalidate the stale entry and fall through to the authoritative DB.
+			rd.authCache.Invalidate(ctx, address)
+		}
+		// Cache miss or cache error — proceed to PostgreSQL
+	}
+
+	// --- Step 2: Fetch credentials from PostgreSQL ---
 	config := retry.BackoffConfig{
 		InitialInterval: 250 * time.Millisecond,
 		MaxInterval:     2 * time.Second,
@@ -87,7 +126,7 @@ func (rd *ResilientDatabase) AuthenticateWithRetry(ctx context.Context, address,
 	accountID = cred.ID
 	hashedPassword := cred.Hash
 
-	// Verify password
+	// --- Step 3: Verify password ---
 	if err := db.VerifyPassword(hashedPassword, password); err != nil {
 		// NOTE: No logging here - let the calling server log with proper context
 		// (protocol, server name, cached status, etc)
@@ -97,7 +136,18 @@ func (rd *ResilientDatabase) AuthenticateWithRetry(ctx context.Context, address,
 	// NOTE: No logging here - let the calling server log with proper context
 	// Backend servers log with cache=hit/miss, proxy servers log with method and cached status
 
-	// Asynchronously rehash if needed
+	// --- Step 4: Cache successful authentication (async, non-blocking) ---
+	if rd.authCache != nil {
+		go func() {
+			cacheCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if putErr := rd.authCache.Put(cacheCtx, address, accountID, hashedPassword); putErr != nil {
+				logger.Warn("AuthCache: Failed to cache credentials", "address", address, "error", putErr)
+			}
+		}()
+	}
+
+	// --- Step 5: Asynchronously rehash if needed ---
 	if db.NeedsRehash(hashedPassword) {
 		go func() {
 			newHash, hashErr := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -124,6 +174,13 @@ func (rd *ResilientDatabase) AuthenticateWithRetry(ctx context.Context, address,
 				logger.Error("Rehash: Failed to update password", "address", address, "error", err)
 			} else {
 				logger.Info("Rehash: Successfully rehashed and updated password", "address", address)
+
+				// Update the auth cache with the new hash
+				if rd.authCache != nil {
+					cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cacheCancel()
+					rd.authCache.Put(cacheCtx, address, accountID, newHashedPassword)
+				}
 			}
 		}()
 	}
