@@ -465,6 +465,7 @@ func (c *HTTPRemoteLookupClient) LookupUserRouteWithClientIP(ctx context.Context
 		ServerAddress:          normalizedServer,
 		AccountID:              lookupResp.AccountID,
 		IsRemoteLookupAccount:  true,
+		AuthOnlyMode:           lookupResp.AuthOnlyMode,
 		ActualEmail:            actualEmail,
 		RemoteTLS:              c.remoteTLS,
 		RemoteTLSUseStartTLS:   c.remoteTLSUseStartTLS,
@@ -479,7 +480,7 @@ func (c *HTTPRemoteLookupClient) LookupUserRouteWithClientIP(ctx context.Context
 	if routeOnly {
 		source = "api-route-only"
 	}
-	logger.Debug("remotelookup: SUCCESS", "user", authEmail, "source", source, "hash_prefix", hashPrefix)
+	logger.Debug("remotelookup: SUCCESS", "user", authEmail, "source", source, "hash_prefix", hashPrefix, "auth_only_mode", lookupResp.AuthOnlyMode, "server", normalizedServer)
 
 	return info, AuthSuccess, nil
 }

@@ -142,6 +142,118 @@ func TestIMAPProxyAuthOnlyMode(t *testing.T) {
 	})
 }
 
+// TestIMAPProxyAuthOnlyModeFormats tests all three valid auth-only response formats:
+// 1. "server": null
+// 2. "server": ""
+// 3. "server" field omitted entirely
+func TestIMAPProxyAuthOnlyModeFormats(t *testing.T) {
+	common.SkipIfDatabaseUnavailable(t)
+
+	// Create backend IMAP server
+	backendServer, _ := common.SetupIMAPServerWithPROXY(t)
+	defer backendServer.Close()
+
+	// Create test accounts for each format
+	timestamp := time.Now().UnixNano()
+	nullAccount := common.CreateTestAccountWithEmail(t, backendServer.ResilientDB, fmt.Sprintf("null-%d@example.com", timestamp), "test123")
+	emptyAccount := common.CreateTestAccountWithEmail(t, backendServer.ResilientDB, fmt.Sprintf("empty-%d@example.com", timestamp), "test456")
+	omittedAccount := common.CreateTestAccountWithEmail(t, backendServer.ResilientDB, fmt.Sprintf("omitted-%d@example.com", timestamp), "test789")
+
+	// Generate password hashes
+	nullHash, _ := bcrypt.GenerateFromPassword([]byte(nullAccount.Password), bcrypt.DefaultCost)
+	emptyHash, _ := bcrypt.GenerateFromPassword([]byte(emptyAccount.Password), bcrypt.DefaultCost)
+	omittedHash, _ := bcrypt.GenerateFromPassword([]byte(omittedAccount.Password), bcrypt.DefaultCost)
+
+	// Create remotelookup server that returns different formats
+	remotelookupServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		email := strings.TrimPrefix(r.URL.Path, "/")
+		t.Logf("RemoteLookup request for: %s", email)
+
+		var response map[string]interface{}
+		if strings.Contains(email, "null") {
+			// Format 1: "server": null
+			response = map[string]interface{}{
+				"address":       nullAccount.Email,
+				"password_hash": string(nullHash),
+				"server":        nil,
+			}
+			t.Logf("Returning auth-only response with server=null for %s", email)
+		} else if strings.Contains(email, "empty") {
+			// Format 2: "server": ""
+			response = map[string]interface{}{
+				"address":       emptyAccount.Email,
+				"password_hash": string(emptyHash),
+				"server":        "",
+			}
+			t.Logf("Returning auth-only response with server=\"\" for %s", email)
+		} else if strings.Contains(email, "omitted") {
+			// Format 3: server field omitted
+			response = map[string]interface{}{
+				"address":       omittedAccount.Email,
+				"password_hash": string(omittedHash),
+				// No "server" field
+			}
+			t.Logf("Returning auth-only response with server field omitted for %s", email)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer remotelookupServer.Close()
+
+	// Set up IMAP proxy
+	proxyAddress := common.GetRandomAddress(t)
+	proxy := setupIMAPProxyWithAuthOnly(t, backendServer.ResilientDB, proxyAddress,
+		[]string{backendServer.Address}, remotelookupServer.URL+"/$email")
+	defer proxy.Close()
+
+	// Test Format 1: "server": null
+	t.Run("ServerNull", func(t *testing.T) {
+		c, err := imapclient.DialInsecure(proxyAddress, nil)
+		if err != nil {
+			t.Fatalf("Failed to dial IMAP proxy: %v", err)
+		}
+		defer c.Logout()
+
+		if err := c.Login(nullAccount.Email, nullAccount.Password).Wait(); err != nil {
+			t.Fatalf("Login failed with server=null: %v", err)
+		}
+		t.Log("✓ Auth-only mode works with server=null")
+	})
+
+	// Test Format 2: "server": ""
+	t.Run("ServerEmptyString", func(t *testing.T) {
+		c, err := imapclient.DialInsecure(proxyAddress, nil)
+		if err != nil {
+			t.Fatalf("Failed to dial IMAP proxy: %v", err)
+		}
+		defer c.Logout()
+
+		if err := c.Login(emptyAccount.Email, emptyAccount.Password).Wait(); err != nil {
+			t.Fatalf("Login failed with server=\"\": %v", err)
+		}
+		t.Log("✓ Auth-only mode works with server=\"\"")
+	})
+
+	// Test Format 3: server field omitted
+	t.Run("ServerOmitted", func(t *testing.T) {
+		c, err := imapclient.DialInsecure(proxyAddress, nil)
+		if err != nil {
+			t.Fatalf("Failed to dial IMAP proxy: %v", err)
+		}
+		defer c.Logout()
+
+		if err := c.Login(omittedAccount.Email, omittedAccount.Password).Wait(); err != nil {
+			t.Fatalf("Login failed with server field omitted: %v", err)
+		}
+		t.Log("✓ Auth-only mode works with server field omitted")
+	})
+}
+
 // TestIMAPProxyMixedMode tests that remotelookup can handle both modes:
 // - Some users with explicit backend routing (server field present)
 // - Some users with auth-only mode (server field omitted)

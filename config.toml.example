@@ -1279,6 +1279,34 @@ timeouts.min_bytes_per_minute = 0           # Minimum throughput (bytes/min, 0 =
 # - Response: {"address": "realuser@domain.com", ...}
 # - Proxy connects to backend and authenticates as "realuser@domain.com"
 #
+# AUTH-ONLY MODE (Backend Selection by Proxy):
+# The remote_lookup service can authenticate users but delegate backend selection to Sora's proxy.
+# This is useful when you have:
+# - Centralized authentication (user database, passwords) managed externally
+# - Distributed backends where remote API shouldn't dictate routing
+# - Dynamic backend pool where consistent-hash/affinity should handle routing
+#
+# To enable auth-only mode, return "server": null, "server": "", or omit the "server" field entirely:
+#
+# Example JSON Response (auth-only mode):
+# {
+#   "address": "user@domain.com",
+#   "password_hash": "$2a$12$abcdef...",
+#   "server": null,           # or "" or omit entirely
+#   "account_id": 12345
+# }
+#
+# BACKEND SELECTION IN AUTH-ONLY MODE:
+# When server is null/empty, the proxy uses normal backend selection logic:
+# 1. Affinity (if enabled and exists) - route to same backend as previous sessions
+# 2. Consistent Hash - deterministic routing based on username (sticky sessions)
+# 3. Round-robin - load balance across healthy backends
+#
+# This allows you to:
+# - Keep authentication logic centralized (passwords, user database)
+# - Let Sora handle backend routing and failover automatically
+# - Use affinity and consistent-hash for connection stickiness
+#
 [server.remote_lookup]
 enabled = false                             # Enable/disable HTTP-based user routing.
 url = "http://localhost:8080/lookup?email=$email"  # HTTP endpoint URL with $email placeholder (required if enabled)

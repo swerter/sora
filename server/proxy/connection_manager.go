@@ -641,7 +641,11 @@ func (cm *ConnectionManager) ConnectWithProxy(ctx context.Context, preferredAddr
 // It returns the connection, address, and an error if it fails.
 // The 'shouldFallback' boolean indicates if the caller should attempt round-robin.
 func (cm *ConnectionManager) tryPreferredAddress(ctx context.Context, preferredAddr, clientIP string, clientPort int, serverIP string, serverPort int, routingInfo *UserRoutingInfo) (conn net.Conn, addr string, err error, shouldFallback bool) {
-	isRemoteLookupRoute := routingInfo != nil && routingInfo.IsRemoteLookupAccount && routingInfo.ServerAddress == preferredAddr
+	// Determine if this is a remote lookup route with explicit server designation
+	// Auth-only mode (AuthOnlyMode=true) means remote API authenticated but didn't specify backend,
+	// so we should treat it like a normal DB user (allow fallback to round-robin/affinity/consistent-hash)
+	isRemoteLookupRoute := routingInfo != nil && routingInfo.IsRemoteLookupAccount &&
+		routingInfo.ServerAddress == preferredAddr && !routingInfo.AuthOnlyMode
 
 	cm.healthMu.RLock()
 	isInList := false

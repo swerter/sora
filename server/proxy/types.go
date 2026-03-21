@@ -58,9 +58,10 @@ type UserRoutingLookup interface {
 
 // UserRoutingInfo contains backend routing information for a user
 type UserRoutingInfo struct {
-	ServerAddress          string   // Backend server to connect to
+	ServerAddress          string   // Backend server to connect to (empty in auth-only mode)
 	AccountID              int64    // Account ID for tracking/metrics
 	IsRemoteLookupAccount  bool     // Whether this came from remotelookup
+	AuthOnlyMode           bool     // Remote API authenticated but didn't specify backend (use local selection)
 	ActualEmail            string   // Actual email address for backend impersonation
 	FromCache              bool     // Whether this result came from remotelookup cache
 	RemoteTLS              bool     // Use TLS for backend connection
