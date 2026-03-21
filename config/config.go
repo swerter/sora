@@ -152,6 +152,7 @@ type ClusterAffinityConfig struct {
 	Enabled         bool   `toml:"enabled"`          // Enable cluster-wide affinity (default: false)
 	TTL             string `toml:"ttl"`              // How long affinity persists (default: "24h")
 	CleanupInterval string `toml:"cleanup_interval"` // How often to clean up expired affinities (default: "1h")
+	CachePath       string `toml:"cache_path"`       // SQLite path for persistent affinity (default: "" = disabled)
 }
 
 // ClusterConfig holds cluster coordination configuration using gossip protocol

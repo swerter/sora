@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/migadu/sora/affinitycache"
 	"github.com/migadu/sora/cluster"
 	"github.com/migadu/sora/logger"
 	"github.com/migadu/sora/pkg/metrics"
@@ -48,12 +49,23 @@ type AffinityInfo struct {
 	NodeID     string // Which node assigned this affinity
 }
 
+// AffinityPersistStore defines the interface for persistent affinity storage.
+// This is implemented by affinitycache.Store.
+type AffinityPersistStore interface {
+	LoadAll(ctx context.Context) ([]affinitycache.AffinityEntry, error)
+	Set(ctx context.Context, entry affinitycache.AffinityEntry) error
+	Delete(ctx context.Context, username, protocol string) error
+	Cleanup(ctx context.Context) (int64, error)
+	Close() error
+}
+
 // AffinityManager manages user-to-backend affinity mappings with cluster synchronization
 type AffinityManager struct {
 	affinityMap map[string]*AffinityInfo // key: "username:protocol" → backend
 	mu          sync.RWMutex
 
 	clusterManager *cluster.Manager
+	persistStore   AffinityPersistStore // Optional SQLite persistence (nil = in-memory only)
 
 	// Configuration
 	enabled         bool
@@ -67,6 +79,7 @@ type AffinityManager struct {
 	// Shutdown
 	stopCleanup   chan struct{}
 	stopBroadcast chan struct{}
+	wg            sync.WaitGroup // Tracks pending async goroutines
 
 	// Cleanup counter for periodic memory reporting
 	cleanupCounter uint64
@@ -108,6 +121,90 @@ func NewAffinityManager(clusterMgr *cluster.Manager, enabled bool, ttl, cleanupI
 	logger.Debug("Affinity: Initialized gossip affinity", "ttl", ttl, "cleanup", cleanupInterval)
 
 	return am
+}
+
+// SetPersistStore attaches a persistent storage backend to the affinity manager.
+// If set, affinity mappings are written through to SQLite on every set/update/delete
+// and loaded from disk on startup via LoadPersistedAffinities.
+func (am *AffinityManager) SetPersistStore(store AffinityPersistStore) {
+	if am == nil {
+		return
+	}
+	am.persistStore = store
+}
+
+// LoadPersistedAffinities loads affinity entries from the persistent store into
+// the in-memory map. Called once on startup, before gossip sync begins, to
+// pre-populate the map so users are immediately routed to their previous backends.
+func (am *AffinityManager) LoadPersistedAffinities(ctx context.Context) {
+	if am == nil || am.persistStore == nil {
+		return
+	}
+
+	entries, err := am.persistStore.LoadAll(ctx)
+	if err != nil {
+		logger.Error("Affinity: Failed to load persisted affinities", "error", err)
+		return
+	}
+
+	am.mu.Lock()
+	loaded := 0
+	for _, e := range entries {
+		key := fmt.Sprintf("%s:%s", e.Username, e.Protocol)
+		// Only load if no existing entry (gossip may have already provided fresher data)
+		if _, exists := am.affinityMap[key]; !exists {
+			am.affinityMap[key] = &AffinityInfo{
+				Backend:    e.Backend,
+				Protocol:   e.Protocol,
+				AssignedAt: e.AssignedAt,
+				ExpiresAt:  e.ExpiresAt,
+				NodeID:     e.NodeID,
+			}
+			loaded++
+		}
+	}
+	am.mu.Unlock()
+
+	logger.Info("Affinity: Loaded persisted affinities", "loaded", loaded, "total_on_disk", len(entries))
+}
+
+// persistSetAsync writes an affinity entry to the persistent store in a fire-and-forget goroutine.
+func (am *AffinityManager) persistSetAsync(username, protocol, backend, nodeID string, assignedAt, expiresAt time.Time) {
+	if am.persistStore == nil {
+		return
+	}
+	am.wg.Add(1)
+	go func() {
+		defer am.wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := am.persistStore.Set(ctx, affinitycache.AffinityEntry{
+			Username:   username,
+			Protocol:   protocol,
+			Backend:    backend,
+			AssignedAt: assignedAt,
+			ExpiresAt:  expiresAt,
+			NodeID:     nodeID,
+		}); err != nil {
+			logger.Warn("Affinity: Failed to persist set", "user", username, "error", err)
+		}
+	}()
+}
+
+// persistDeleteAsync removes an affinity entry from the persistent store in a fire-and-forget goroutine.
+func (am *AffinityManager) persistDeleteAsync(username, protocol string) {
+	if am.persistStore == nil {
+		return
+	}
+	am.wg.Add(1)
+	go func() {
+		defer am.wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := am.persistStore.Delete(ctx, username, protocol); err != nil {
+			logger.Warn("Affinity: Failed to persist delete", "user", username, "error", err)
+		}
+	}()
 }
 
 // GetBackend returns the backend affinity for a user, if any
@@ -203,6 +300,9 @@ func (am *AffinityManager) SetBackend(username, backend, protocol string) {
 		NodeID:    am.clusterManager.GetNodeID(),
 		TTL:       am.defaultTTL,
 	})
+
+	// Persist to disk (async, non-blocking)
+	am.persistSetAsync(username, protocol, backend, am.clusterManager.GetNodeID(), now, now.Add(am.defaultTTL))
 }
 
 // UpdateBackend reassigns a user from one backend to another (atomic update)
@@ -238,6 +338,9 @@ func (am *AffinityManager) UpdateBackend(username, oldBackend, newBackend, proto
 		NodeID:     am.clusterManager.GetNodeID(),
 		TTL:        am.defaultTTL,
 	})
+
+	// Persist to disk (async, non-blocking)
+	am.persistSetAsync(username, protocol, newBackend, am.clusterManager.GetNodeID(), now, now.Add(am.defaultTTL))
 }
 
 // DeleteBackend removes a user's affinity
@@ -264,6 +367,9 @@ func (am *AffinityManager) DeleteBackend(username, protocol string) {
 		Timestamp: time.Now(),
 		NodeID:    am.clusterManager.GetNodeID(),
 	})
+
+	// Persist deletion to disk (async, non-blocking)
+	am.persistDeleteAsync(username, protocol)
 }
 
 // queueEvent adds an event to the broadcast queue
@@ -387,6 +493,9 @@ func (am *AffinityManager) handleAffinitySet(event AffinityEvent) {
 
 	logger.Info("Affinity: Applied cluster affinity", "user", event.Username,
 		"backend", event.Backend, "node", event.NodeID)
+
+	// Persist cluster event to disk
+	am.persistSetAsync(event.Username, event.Protocol, event.Backend, event.NodeID, event.Timestamp, event.Timestamp.Add(event.TTL))
 }
 
 // handleAffinityUpdate applies an affinity update from another node
@@ -420,6 +529,9 @@ func (am *AffinityManager) handleAffinityUpdate(event AffinityEvent) {
 		ExpiresAt:  event.Timestamp.Add(event.TTL),
 		NodeID:     event.NodeID,
 	}
+
+	// Persist cluster event to disk
+	am.persistSetAsync(event.Username, event.Protocol, event.Backend, event.NodeID, event.Timestamp, event.Timestamp.Add(event.TTL))
 }
 
 // handleAffinityDelete removes an affinity from another node
@@ -432,6 +544,9 @@ func (am *AffinityManager) handleAffinityDelete(event AffinityEvent) {
 	if _, exists := am.affinityMap[key]; exists {
 		delete(am.affinityMap, key)
 		logger.Debug("Affinity: Applied cluster delete", "user", event.Username, "protocol", event.Protocol, "from_node", event.NodeID)
+
+		// Persist deletion to disk
+		am.persistDeleteAsync(event.Username, event.Protocol)
 	}
 }
 
@@ -467,6 +582,19 @@ func (am *AffinityManager) cleanup() {
 
 	if removed > 0 {
 		logger.Debug("Affinity: Cleaned up expired affinities", "count", removed)
+	}
+
+	// Cleanup expired entries from persistent store
+	if am.persistStore != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if cleaned, err := am.persistStore.Cleanup(ctx); err != nil {
+				logger.Warn("Affinity: Failed to cleanup persistent store", "error", err)
+			} else if cleaned > 0 {
+				logger.Debug("Affinity: Cleaned up persisted expired entries", "count", cleaned)
+			}
+		}()
 	}
 
 	// Get broadcast queue size for memory reporting and metrics
@@ -519,13 +647,22 @@ func (am *AffinityManager) broadcastRoutine() {
 	}
 }
 
-// Stop stops the affinity manager
+// Stop stops the affinity manager and closes the persistent store
 func (am *AffinityManager) Stop() {
 	if am == nil {
 		return
 	}
 	close(am.stopCleanup)
 	close(am.stopBroadcast)
+
+	// Wait for any pending async writes to finish
+	am.wg.Wait()
+
+	if am.persistStore != nil {
+		if err := am.persistStore.Close(); err != nil {
+			logger.Warn("Affinity: Failed to close persist store", "error", err)
+		}
+	}
 }
 
 // GetStats returns affinity statistics

@@ -95,9 +95,10 @@ type ServerOptions struct {
 
 // AffinityManager interface for managing user-to-backend affinity
 type AffinityManager interface {
-	GetBackend(username, protocol string) (string, bool)
 	SetBackend(username, backend, protocol string)
+	GetBackend(username, protocol string) (string, bool)
 	DeleteBackend(username, protocol string)
+	GetStats(ctx context.Context) map[string]any
 }
 
 // ProxyServer interface for accessing proxy backend health information
@@ -364,6 +365,7 @@ func (s *Server) setupRoutes() http.Handler {
 		"DELETE": s.handleAffinityDelete,
 	}))
 	mux.HandleFunc("/admin/affinity/list", routeHandler("GET", s.handleAffinityList))
+	mux.HandleFunc("/admin/affinity/stats", routeHandler("GET", s.handleAffinityStats))
 
 	// Wrap with middleware (in reverse order - last applied is outermost)
 	handler := s.loggingMiddleware(mux)

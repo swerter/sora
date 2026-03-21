@@ -159,3 +159,21 @@ func (s *Server) handleAffinityList(w http.ResponseWriter, r *http.Request) {
 	// or extend the AffinityManager interface to support listing
 	http.Error(w, `{"error": "List operation not yet implemented - affinities are distributed via gossip. Use GET with specific user/protocol to check affinity."}`, http.StatusNotImplemented)
 }
+
+// handleAffinityStats handles GET /admin/affinity/stats - returns affinity statistics
+func (s *Server) handleAffinityStats(w http.ResponseWriter, r *http.Request) {
+	if s.affinityManager == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "Affinity manager not enabled on this server")
+		return
+	}
+
+	stats := s.affinityManager.GetStats(r.Context())
+	if stats == nil {
+		s.writeError(w, http.StatusInternalServerError, "Failed to get affinity stats")
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"stats": stats,
+	})
+}

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/migadu/sora/affinitycache"
 	"github.com/migadu/sora/authcache"
 	"github.com/migadu/sora/cache"
 	"github.com/migadu/sora/cluster"
@@ -94,7 +95,7 @@ type serverDependencies struct {
 	serverManager         *serverManager
 	connectionTrackers    map[string]*server.ConnectionTracker // protocol -> tracker (for admin API kick)
 	connectionTrackersMux sync.Mutex                           // protects connectionTrackers map
-	authCacheInstance     adminapi.AuthCacheStats              // persistent auth cache (for admin API stats)
+	authCacheInstance     *authcache.Cache                     // persistent auth cache
 	proxyServers          map[string]adminapi.ProxyServer      // proxy name -> proxy server interface (for backend health)
 	proxyServersMux       sync.Mutex                           // protects proxyServers map
 	runningServers        map[string]ConfigReloader            // server name -> reloadable server
@@ -197,6 +198,12 @@ func main() {
 	// Clean up resources on exit
 	if deps.resilientDB != nil {
 		defer deps.resilientDB.Close()
+	}
+	if deps.authCacheInstance != nil {
+		defer deps.authCacheInstance.Close()
+	}
+	if deps.affinityManager != nil {
+		defer deps.affinityManager.Stop()
 	}
 	if deps.cacheInstance != nil {
 		defer deps.cacheInstance.Close()
@@ -595,14 +602,6 @@ func initializeServices(ctx context.Context, cfg config.Config, errorHandler *er
 			}
 			ac.StartCleanupLoop(ctx)
 			logger.Info("AuthCache: Initialized persistent authentication cache", "path", acPath, "max_age", acMaxAge, "purge_unused", acPurgeUnused, "cleanup_interval", acCleanupInterval)
-
-			// Ensure cache is closed on shutdown
-			go func() {
-				<-ctx.Done()
-				if err := ac.Close(); err != nil {
-					logger.Warn("AuthCache: Error closing auth cache", "error", err)
-				}
-			}()
 		}
 	}
 
@@ -931,6 +930,18 @@ func initializeServices(ctx context.Context, cfg config.Config, errorHandler *er
 		// Default TTL: 1 hour, Cleanup interval: 10 minutes
 		deps.affinityManager = server.NewAffinityManager(deps.clusterManager, true, 1*time.Hour, 10*time.Minute)
 		logger.Info("Affinity manager initialized for cluster-wide user routing")
+
+		// Attach persistent affinity store if configured
+		if cfg.Cluster.Affinity.CachePath != "" && deps.affinityManager != nil {
+			affinityStore, err := affinitycache.New(cfg.Cluster.Affinity.CachePath)
+			if err != nil {
+				logger.Error("Failed to initialize affinity cache - continuing without persistence", "path", cfg.Cluster.Affinity.CachePath, "error", err)
+			} else {
+				deps.affinityManager.SetPersistStore(affinityStore)
+				deps.affinityManager.LoadPersistedAffinities(ctx)
+				logger.Info("Affinity cache initialized", "path", cfg.Cluster.Affinity.CachePath)
+			}
+		}
 	}
 
 	// Initialize TLS manager if TLS is enabled

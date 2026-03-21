@@ -391,6 +391,7 @@ sync_failure_counts = true                      # Synchronize progressive delay 
 enabled = false                                 # Enable cluster-wide server affinity (default: false)
 ttl = "24h"                                     # How long affinity persists (default: "24h")
 cleanup_interval = "1h"                         # How often to clean up expired affinities (default: "1h")
+# cache_path = "/sora/affinity_cache.db"        # SQLite path for persistent affinity (survives restarts)
 
 # EXAMPLE USAGE (Multi-instance deployment):
 # [cluster]

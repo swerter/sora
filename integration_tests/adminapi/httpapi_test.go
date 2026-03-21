@@ -2175,6 +2175,15 @@ func (m *mockAffinityManager) DeleteBackend(username, protocol string) {
 	delete(m.affinity, key)
 }
 
+func (m *mockAffinityManager) GetStats(ctx context.Context) map[string]any {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return map[string]any{
+		"enabled":       true,
+		"total_entries": len(m.affinity),
+	}
+}
+
 // TestAffinityManagement tests the affinity management endpoints
 func TestAffinityManagement(t *testing.T) {
 	common.SkipIfDatabaseUnavailable(t)
