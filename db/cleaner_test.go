@@ -830,3 +830,366 @@ func TestDeleteMessageByHashAndMailbox(t *testing.T) {
 
 	t.Logf("Successfully tested DeleteMessageByHashAndMailbox with email: %s", testEmail)
 }
+
+// TestGetUserScopedObjectsForCleanup_LiveMessagePreventsCleanup tests the critical safety
+// guarantee: S3 objects should NEVER be marked for cleanup if ANY live (non-expunged)
+// message references the same content_hash, even when other messages with that hash are expunged.
+// This ensures we never delete S3 objects that are still in use after operations like IMAP MOVE.
+func TestGetUserScopedObjectsForCleanup_LiveMessagePreventsCleanup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration test in short mode")
+	}
+
+	db, testEmail, accountID, _ := setupCleanerTestDatabase(t)
+	defer db.Close()
+
+	ctx := context.Background()
+	testTimestamp := time.Now().UnixNano()
+
+	// Create two mailboxes: INBOX and Archive
+	tx, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+
+	err = db.CreateMailbox(ctx, tx, accountID, "Archive", nil)
+	require.NoError(t, err)
+
+	err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	// Get both mailbox IDs
+	inboxMailbox, err := db.GetMailboxByName(ctx, accountID, "INBOX")
+	require.NoError(t, err)
+	inboxID := inboxMailbox.ID
+
+	archiveMailbox, err := db.GetMailboxByName(ctx, accountID, "Archive")
+	require.NoError(t, err)
+	archiveID := archiveMailbox.ID
+
+	// Setup test scenario: Simulate IMAP MOVE operation
+	// 1. Message originally in INBOX (now expunged, past grace period)
+	// 2. Same message moved to Archive (live, still exists)
+	// Both share the same content_hash (same S3 object)
+
+	tx2, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx2.Rollback(ctx)
+
+	sharedContentHash := fmt.Sprintf("shared_content_%d", testTimestamp)
+
+	// Create message content (shared by both messages)
+	_, err = tx2.Exec(ctx, `
+		INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers)
+		VALUES ($1, 'shared message body', to_tsvector('english', 'shared message body'), '')
+	`, sharedContentHash)
+	require.NoError(t, err)
+
+	// Create EXPUNGED message in INBOX (old, past grace period)
+	expungedAt := time.Now().Add(-25 * time.Hour) // 25 hours ago (past 24h grace)
+	_, err = tx2.Exec(ctx, `
+		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq, expunged_at)
+		VALUES ($1, $2, 1, $3, $4, $4, 100, 0, TRUE, 'test-domain', 'test-localpart', 'msgid-inbox', 'body', '[]', 1, $5)
+	`, accountID, inboxID, sharedContentHash, time.Now().Add(-26*time.Hour), expungedAt)
+	require.NoError(t, err)
+
+	// Create LIVE message in Archive (same content_hash, but NOT expunged)
+	_, err = tx2.Exec(ctx, `
+		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq, expunged_at)
+		VALUES ($1, $2, 1, $3, $4, $4, 100, 0, TRUE, 'test-domain', 'test-localpart', 'msgid-archive', 'body', '[]', 2, NULL)
+	`, accountID, archiveID, sharedContentHash, time.Now().Add(-26*time.Hour))
+	require.NoError(t, err)
+
+	err = tx2.Commit(ctx)
+	require.NoError(t, err)
+
+	// TEST: Get objects for cleanup (older than 24 hours)
+	candidates, err := db.GetUserScopedObjectsForCleanup(ctx, 24*time.Hour, 100)
+	require.NoError(t, err)
+
+	// VERIFY: The shared content_hash should NOT appear in cleanup candidates
+	// because a live message (in Archive) still references it
+	for _, candidate := range candidates {
+		if candidate.ContentHash == sharedContentHash && candidate.AccountID == accountID {
+			t.Fatalf("SAFETY VIOLATION: Found content_hash %s in cleanup list, but live message exists in Archive mailbox! This would incorrectly delete S3 object still in use.", sharedContentHash)
+		}
+	}
+
+	// Additional verification: confirm both messages exist in database
+	var inboxCount, archiveCount int
+	err = db.GetReadPool().QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE account_id = $1 AND mailbox_id = $2 AND content_hash = $3", accountID, inboxID, sharedContentHash).Scan(&inboxCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, inboxCount, "Expunged message should still exist in INBOX")
+
+	err = db.GetReadPool().QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE account_id = $1 AND mailbox_id = $2 AND content_hash = $3", accountID, archiveID, sharedContentHash).Scan(&archiveCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, archiveCount, "Live message should exist in Archive")
+
+	t.Logf("✓ SAFETY VERIFIED: S3 object with hash %s correctly NOT marked for cleanup despite expunged INBOX message (live Archive message prevents deletion)", sharedContentHash)
+	t.Logf("Successfully tested live message safety with email: %s", testEmail)
+}
+
+// TestGetUserScopedObjectsForCleanup_AllExpungedAllowsCleanup is the counterpart to the
+// live message test: verifies that when ALL messages with a content_hash are expunged
+// (past grace period), the S3 object IS correctly marked for cleanup.
+func TestGetUserScopedObjectsForCleanup_AllExpungedAllowsCleanup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration test in short mode")
+	}
+
+	db, testEmail, accountID, _ := setupCleanerTestDatabase(t)
+	defer db.Close()
+
+	ctx := context.Background()
+	testTimestamp := time.Now().UnixNano()
+
+	// Create Archive mailbox
+	tx, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+
+	err = db.CreateMailbox(ctx, tx, accountID, "Archive", nil)
+	require.NoError(t, err)
+
+	err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	// Get both mailbox IDs
+	inboxMailbox, err := db.GetMailboxByName(ctx, accountID, "INBOX")
+	require.NoError(t, err)
+	inboxID := inboxMailbox.ID
+
+	archiveMailbox, err := db.GetMailboxByName(ctx, accountID, "Archive")
+	require.NoError(t, err)
+	archiveID := archiveMailbox.ID
+
+	// Setup: Create same message in two mailboxes, BOTH expunged past grace period
+	tx2, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx2.Rollback(ctx)
+
+	allExpungedHash := fmt.Sprintf("all_expunged_%d", testTimestamp)
+
+	// Create message content
+	_, err = tx2.Exec(ctx, `
+		INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers)
+		VALUES ($1, 'all expunged content', to_tsvector('english', 'all expunged content'), '')
+	`, allExpungedHash)
+	require.NoError(t, err)
+
+	expungedAt := time.Now().Add(-25 * time.Hour) // 25 hours ago
+
+	// Create EXPUNGED message in INBOX
+	_, err = tx2.Exec(ctx, `
+		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq, expunged_at)
+		VALUES ($1, $2, 2, $3, $4, $4, 100, 0, TRUE, 'all-domain', 'all-part', 'msgid-inbox-exp', 'body', '[]', 3, $5)
+	`, accountID, inboxID, allExpungedHash, time.Now().Add(-26*time.Hour), expungedAt)
+	require.NoError(t, err)
+
+	// Create EXPUNGED message in Archive (same content_hash, also expunged)
+	_, err = tx2.Exec(ctx, `
+		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq, expunged_at)
+		VALUES ($1, $2, 2, $3, $4, $4, 100, 0, TRUE, 'all-domain', 'all-part', 'msgid-archive-exp', 'body', '[]', 4, $5)
+	`, accountID, archiveID, allExpungedHash, time.Now().Add(-26*time.Hour), expungedAt)
+	require.NoError(t, err)
+
+	err = tx2.Commit(ctx)
+	require.NoError(t, err)
+
+	// TEST: Get objects for cleanup
+	candidates, err := db.GetUserScopedObjectsForCleanup(ctx, 24*time.Hour, 100)
+	require.NoError(t, err)
+
+	// VERIFY: The content_hash SHOULD appear in cleanup candidates
+	// because ALL messages are expunged past grace period
+	var found bool
+	for _, candidate := range candidates {
+		if candidate.ContentHash == allExpungedHash && candidate.AccountID == accountID {
+			found = true
+			assert.Equal(t, "all-domain", candidate.S3Domain)
+			assert.Equal(t, "all-part", candidate.S3Localpart)
+			break
+		}
+	}
+	assert.True(t, found, "Content hash should be marked for cleanup when ALL messages are expunged")
+
+	t.Logf("✓ VERIFIED: S3 object with hash %s correctly marked for cleanup (all messages expunged past grace period)", allExpungedHash)
+	t.Logf("Successfully tested all-expunged cleanup with email: %s", testEmail)
+}
+
+// TestCleanerWorkflow_MovedMessageS3Preservation tests the complete cleaner workflow:
+// 1. Message is moved from INBOX to Archive (IMAP MOVE)
+// 2. Time passes beyond grace period
+// 3. Cleaner runs and removes expunged database row
+// 4. S3 object is preserved because live message still references it
+// 5. Live message in Archive continues to work correctly
+//
+// This is the most realistic end-to-end test of the safety guarantee.
+func TestCleanerWorkflow_MovedMessageS3Preservation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration test in short mode")
+	}
+
+	db, testEmail, accountID, _ := setupCleanerTestDatabase(t)
+	defer db.Close()
+
+	ctx := context.Background()
+	testTimestamp := time.Now().UnixNano()
+
+	// Step 1: Create Archive mailbox
+	tx, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+
+	err = db.CreateMailbox(ctx, tx, accountID, "Archive", nil)
+	require.NoError(t, err)
+
+	err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	inboxMailbox, err := db.GetMailboxByName(ctx, accountID, "INBOX")
+	require.NoError(t, err)
+	inboxID := inboxMailbox.ID
+
+	archiveMailbox, err := db.GetMailboxByName(ctx, accountID, "Archive")
+	require.NoError(t, err)
+	archiveID := archiveMailbox.ID
+
+	// Step 2: Create original message in INBOX
+	tx2, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx2.Rollback(ctx)
+
+	contentHash := fmt.Sprintf("moved_msg_%d", testTimestamp)
+	messageBody := "This is the message body that will be moved"
+
+	// Insert message content
+	_, err = tx2.Exec(ctx, `
+		INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers)
+		VALUES ($1, $2, to_tsvector('english', $2), 'Subject: Test Message')
+	`, contentHash, messageBody)
+	require.NoError(t, err)
+
+	// Insert message in INBOX (will be moved later)
+	oldCreatedAt := time.Now().Add(-48 * time.Hour) // Created 48 hours ago
+	_, err = tx2.Exec(ctx, `
+		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq, created_at)
+		VALUES ($1, $2, 1, $3, $4, $4, $5, 0, TRUE, 'move-domain', 'move-part', 'moved-msg-id', 'body', '[]', 1, $6)
+	`, accountID, inboxID, contentHash, time.Now().Add(-48*time.Hour), len(messageBody), oldCreatedAt)
+	require.NoError(t, err)
+
+	err = tx2.Commit(ctx)
+	require.NoError(t, err)
+
+	// Verify message exists in INBOX
+	var inboxCountBefore int
+	err = db.GetReadPool().QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE account_id = $1 AND mailbox_id = $2 AND content_hash = $3 AND expunged_at IS NULL", accountID, inboxID, contentHash).Scan(&inboxCountBefore)
+	require.NoError(t, err)
+	assert.Equal(t, 1, inboxCountBefore, "Message should exist in INBOX before MOVE")
+
+	// Step 3: Simulate IMAP MOVE - mark original as expunged and create copy in Archive
+	tx3, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx3.Rollback(ctx)
+
+	// Mark INBOX message as expunged (25 hours ago - past grace period)
+	expungedAt := time.Now().Add(-25 * time.Hour)
+	_, err = tx3.Exec(ctx, `
+		UPDATE messages
+		SET expunged_at = $1
+		WHERE account_id = $2 AND mailbox_id = $3 AND content_hash = $4
+	`, expungedAt, accountID, inboxID, contentHash)
+	require.NoError(t, err)
+
+	// Create new message in Archive (same content_hash - shared S3 object)
+	_, err = tx3.Exec(ctx, `
+		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq, created_at)
+		VALUES ($1, $2, 1, $3, $4, $4, $5, 0, TRUE, 'move-domain', 'move-part', 'moved-msg-id', 'body', '[]', 2, NOW())
+	`, accountID, archiveID, contentHash, time.Now().Add(-48*time.Hour), len(messageBody))
+	require.NoError(t, err)
+
+	err = tx3.Commit(ctx)
+	require.NoError(t, err)
+
+	// Verify state after MOVE
+	var inboxExpungedCount, archiveLiveCount int
+	err = db.GetReadPool().QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE account_id = $1 AND mailbox_id = $2 AND content_hash = $3 AND expunged_at IS NOT NULL", accountID, inboxID, contentHash).Scan(&inboxExpungedCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, inboxExpungedCount, "INBOX message should be expunged")
+
+	err = db.GetReadPool().QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE account_id = $1 AND mailbox_id = $2 AND content_hash = $3 AND expunged_at IS NULL", accountID, archiveID, contentHash).Scan(&archiveLiveCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, archiveLiveCount, "Archive message should be live")
+
+	// Step 4: Run GetUserScopedObjectsForCleanup - should NOT mark S3 for deletion
+	candidates, err := db.GetUserScopedObjectsForCleanup(ctx, 24*time.Hour, 100)
+	require.NoError(t, err)
+
+	for _, candidate := range candidates {
+		if candidate.ContentHash == contentHash && candidate.AccountID == accountID {
+			t.Fatalf("WORKFLOW VIOLATION: S3 object marked for deletion despite live Archive message! content_hash=%s", contentHash)
+		}
+	}
+	t.Logf("✓ Step 4 PASSED: S3 object correctly NOT marked for deletion")
+
+	// Step 5: Run DeleteExpungedMessagesByS3KeyPartsBatch to clean up database rows
+	// Even though S3 is not marked for cleanup, we should still be able to delete
+	// the expunged database row (this is safe because another row references the S3 object)
+	tx4, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx4.Rollback(ctx)
+
+	// Manually create a candidate for the expunged INBOX message (simulating what would happen
+	// if we incorrectly marked it for cleanup - but we're just testing DB deletion here)
+	fakeCandidate := []UserScopedObjectForCleanup{
+		{
+			AccountID:   accountID,
+			ContentHash: contentHash,
+			S3Domain:    "move-domain",
+			S3Localpart: "move-part",
+		},
+	}
+
+	deleted, err := db.DeleteExpungedMessagesByS3KeyPartsBatch(ctx, tx4, fakeCandidate)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted, "Should delete the expunged INBOX message row")
+
+	err = tx4.Commit(ctx)
+	require.NoError(t, err)
+
+	t.Logf("✓ Step 5 PASSED: Expunged database row deleted (%d rows)", deleted)
+
+	// Step 6: Verify final state
+	// - INBOX message should be gone from database
+	var inboxFinalCount int
+	err = db.GetReadPool().QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE account_id = $1 AND mailbox_id = $2 AND content_hash = $3", accountID, inboxID, contentHash).Scan(&inboxFinalCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, inboxFinalCount, "INBOX message should be deleted from database")
+
+	// - Archive message should still exist
+	var archiveFinalCount int
+	err = db.GetReadPool().QueryRow(ctx, "SELECT COUNT(*) FROM messages WHERE account_id = $1 AND mailbox_id = $2 AND content_hash = $3", accountID, archiveID, contentHash).Scan(&archiveFinalCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, archiveFinalCount, "Archive message should still exist")
+
+	// - Message content should still exist (not cleaned up)
+	var contentExists int
+	err = db.GetReadPool().QueryRow(ctx, "SELECT COUNT(*) FROM message_contents WHERE content_hash = $1", contentHash).Scan(&contentExists)
+	require.NoError(t, err)
+	assert.Equal(t, 1, contentExists, "Message content should still exist")
+
+	// - Verify we can still read the message body (S3 object would still be accessible)
+	var bodyText *string
+	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM message_contents WHERE content_hash = $1", contentHash).Scan(&bodyText)
+	require.NoError(t, err)
+	require.NotNil(t, bodyText, "Message body should be accessible")
+	assert.Equal(t, messageBody, *bodyText, "Message body content should match")
+
+	t.Logf("✓ Step 6 PASSED: Final state verified")
+	t.Logf("  - INBOX expunged row: DELETED ✓")
+	t.Logf("  - Archive live message: EXISTS ✓")
+	t.Logf("  - S3 object (content_hash): PRESERVED ✓")
+	t.Logf("  - Message body accessible: YES ✓")
+	t.Logf("")
+	t.Logf("✅ COMPLETE WORKFLOW VERIFIED: Moved message cleanup is safe!")
+	t.Logf("Successfully tested with email: %s", testEmail)
+}
