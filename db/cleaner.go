@@ -68,14 +68,25 @@ func (d *Database) ExpungeOldMessages(ctx context.Context, tx pgx.Tx, olderThan 
 
 // GetUserScopedObjectsForCleanup identifies (AccountID, ContentHash) pairs where all messages
 // for that user with that hash have been expunged for longer than the grace period.
+//
+// The WHERE clause filters to only expunged+uploaded rows for index efficiency.
+// The NOT EXISTS anti-join in HAVING ensures no live (non-expunged) messages
+// reference the same content_hash — preventing deletion of S3 objects still in use
+// (e.g., after IMAP MOVE which creates a new row sharing the same content_hash).
 func (d *Database) GetUserScopedObjectsForCleanup(ctx context.Context, olderThan time.Duration, limit int) ([]UserScopedObjectForCleanup, error) {
 	threshold := time.Now().Add(-olderThan).UTC()
 	rows, err := d.GetReadPool().Query(ctx, `
-		SELECT account_id, s3_domain, s3_localpart, content_hash
-		FROM messages
-		WHERE uploaded = TRUE
-		GROUP BY account_id, s3_domain, s3_localpart, content_hash
-		HAVING bool_and(expunged_at IS NOT NULL AND expunged_at < $1)
+		SELECT m.account_id, m.s3_domain, m.s3_localpart, m.content_hash
+		FROM messages m
+		WHERE m.uploaded = TRUE AND m.expunged_at IS NOT NULL
+		GROUP BY m.account_id, m.s3_domain, m.s3_localpart, m.content_hash
+		HAVING bool_and(m.expunged_at < $1)
+		   AND NOT EXISTS (
+		     SELECT 1 FROM messages m2
+		     WHERE m2.account_id = m.account_id
+		       AND m2.content_hash = m.content_hash
+		       AND m2.expunged_at IS NULL
+		   )
 		LIMIT $2;
 	`, threshold, limit)
 	if err != nil {
