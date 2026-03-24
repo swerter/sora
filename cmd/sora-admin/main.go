@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/migadu/sora/config"
+	"github.com/migadu/sora/helpers"
 	"github.com/migadu/sora/logger"
 	"github.com/migadu/sora/pkg/resilient"
 )
@@ -35,12 +36,34 @@ type AdminConfig struct {
 	Cleanup                   config.CleanupConfig         `toml:"cleanup"`
 	SharedMailboxes           config.SharedMailboxesConfig `toml:"shared_mailboxes"`
 	TLS                       config.TLSConfig             `toml:"tls"` // TLS configuration for accessing Let's Encrypt S3 bucket
+	AdminCLI                  config.AdminCLIConfig        `toml:"admin_cli"`
+	Servers                   config.ServersConfig         // Server configs for fallback (e.g., IMAP append_limit)
 	DynamicServers            []config.ServerConfig        // Populated from full config
 	Server                    []map[string]any             `toml:"server"`                        // Ignore server config array, not needed for admin commands
 	HTTPAPIAddr               string                       `toml:"http_api_addr"`                 // HTTP API address for kick operations (e.g., "http://localhost:8080")
 	HTTPAPIKey                string                       `toml:"http_api_key"`                  // HTTP API key for authentication
 	HTTPAPIInsecureSkipVerify bool                         `toml:"http_api_insecure_skip_verify"` // Skip TLS certificate verification (default: true for localhost)
-	AppendLimit               int64                        // IMAP append limit from config (populated from full config)
+}
+
+// GetImportMessageLimit returns the import message size limit with proper fallback logic
+func (c *AdminConfig) GetImportMessageLimit() int64 {
+	// Priority 1: Use admin_cli.import_message_limit if configured
+	if c.AdminCLI.ImportMessageLimit != "" {
+		limit, err := helpers.ParseSize(c.AdminCLI.ImportMessageLimit)
+		if err != nil {
+			logger.Warn("Failed to parse admin_cli.import_message_limit, using fallback", "value", c.AdminCLI.ImportMessageLimit, "error", err)
+		} else {
+			return limit
+		}
+	}
+
+	// Priority 2: Fall back to IMAP append_limit (for backward compatibility)
+	if appendLimit, err := c.Servers.GetAppendLimit(); err == nil && appendLimit > 0 {
+		return appendLimit
+	}
+
+	// Priority 3: Use default (50MB - larger than IMAP default since imports are batch operations)
+	return 50 * 1024 * 1024
 }
 
 // newAdminDatabase creates a resilient database for admin CLI operations.
@@ -88,6 +111,8 @@ func loadAdminConfig(configPath string, cfg *AdminConfig) error {
 	cfg.Cleanup = fullCfg.Cleanup
 	cfg.SharedMailboxes = fullCfg.SharedMailboxes
 	cfg.TLS = fullCfg.TLS
+	cfg.AdminCLI = fullCfg.AdminCLI
+	cfg.Servers = fullCfg.Servers
 	cfg.DynamicServers = fullCfg.DynamicServers
 	cfg.HTTPAPIAddr = fullCfg.AdminCLI.Addr
 	cfg.HTTPAPIKey = fullCfg.AdminCLI.APIKey
@@ -97,14 +122,6 @@ func loadAdminConfig(configPath string, cfg *AdminConfig) error {
 	if fullCfg.AdminCLI.InsecureSkipVerify != nil {
 		cfg.HTTPAPIInsecureSkipVerify = *fullCfg.AdminCLI.InsecureSkipVerify
 	}
-
-	// Extract append limit from IMAP server config (used by importer)
-	appendLimit, err := fullCfg.Servers.GetAppendLimit()
-	if err != nil {
-		// Use default if parsing fails
-		appendLimit = 25 * 1024 * 1024 // 25MB default
-	}
-	cfg.AppendLimit = appendLimit
 
 	return nil
 }

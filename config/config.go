@@ -1418,6 +1418,7 @@ type AdminCLIConfig struct {
 	Addr               string `toml:"addr"`                 // HTTP Admin API endpoint address
 	APIKey             string `toml:"api_key"`              // API key for authentication
 	InsecureSkipVerify *bool  `toml:"insecure_skip_verify"` // Skip TLS verification (default: true)
+	ImportMessageLimit string `toml:"import_message_limit"` // Maximum message size for import operations (e.g., "50mb")
 }
 
 // SieveConfig holds Sieve script engine configuration

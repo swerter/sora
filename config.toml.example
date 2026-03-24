@@ -27,6 +27,12 @@ addr = "http://localhost:8080"              # HTTP Admin API endpoint address (u
 api_key = "your-api-key-here"               # API key matching the http_admin_api server configuration
 insecure_skip_verify = true                 # Skip TLS certificate verification (default: true). Set to false for production with valid certs.
 
+# Maximum message size for maildir import operations
+# Messages larger than this will be skipped during import
+# Default: 50mb (larger than IMAP append_limit since imports are batch operations)
+# This setting is independent of IMAP server configuration
+import_message_limit = "50mb"
+
 
 # LOGGING CONFIGURATION
 # =============================================================================
