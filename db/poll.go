@@ -32,7 +32,8 @@ func (db *Database) PollMailbox(ctx context.Context, mailboxID int64, sinceModSe
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	// Use background context for rollback to ensure it always completes
+	defer tx.Rollback(context.Background())
 
 	// OPTIMIZATION: Early exit if modseq hasn't changed
 	// This avoids expensive window functions when mailbox is idle

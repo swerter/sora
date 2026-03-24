@@ -354,7 +354,14 @@ func (rd *ResilientDatabase) executeWriteInTxWithRetry(ctx context.Context, conf
 			}
 			return retry.Stop(err)
 		}
-		defer tx.Rollback(ctx)
+		// Use background context for rollback to ensure it always completes, even if the
+		// request context has expired. If we use the request context and it's canceled/expired,
+		// pgx will fail to send ROLLBACK to PostgreSQL, leaving an uncommitted transaction that
+		// may later be auto-committed when the connection is returned to the pool or closed.
+		// This caused data loss where INSERT operations succeeded on the PostgreSQL side but
+		// the client timed out, then rollback failed silently, leaving orphaned database rows
+		// while the application deleted the local files (believing the transaction failed).
+		defer tx.Rollback(context.Background())
 
 		opCtx, cancel := rd.withTimeout(ctx, opType)
 		defer cancel()

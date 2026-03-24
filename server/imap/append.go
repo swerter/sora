@@ -305,9 +305,14 @@ func (s *IMAPSession) Append(mboxName string, r imap.LiteralReader, options *ima
 				UIDValidity: mailbox.UIDValidity,
 			}, nil
 		}
-		// For other errors, cleanup and return error
+		// Never delete the local file on error. The uploader's
+		// cleanupOrphanedFiles job (runs every 5 min, 1h grace period)
+		// already checks PendingUploadExists before removing any file.
+		// Deleting here is dangerous: if the transaction silently
+		// committed (e.g. commit ambiguity on timeout), the upload
+		// worker still needs this file to complete the S3 upload.
 		if filePath != nil {
-			_ = os.Remove(*filePath)
+			s.DebugLog("keeping file for cleanup job after error", "content_hash", contentHash)
 		}
 		recordMetrics("failure")
 		return nil, s.internalError("failed to insert message metadata: %v", err)

@@ -455,7 +455,7 @@ func (db *Database) UpdateMessageFlags(ctx context.Context, accountID int64, mes
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.Background())
 
 	// Get current flags
 	var currentFlags int
@@ -520,7 +520,7 @@ func (db *Database) CreateMailboxForUser(ctx context.Context, accountID int64, m
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.Background())
 
 	err = db.CreateMailbox(ctx, tx, accountID, mailboxPath, nil)
 	if err != nil {
@@ -546,7 +546,7 @@ func (db *Database) DeleteMailboxForUser(ctx context.Context, accountID int64, m
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.Background())
 
 	err = db.DeleteMailbox(ctx, tx, mailbox.ID, accountID)
 	if err != nil {
@@ -567,7 +567,7 @@ func (db *Database) SubscribeToMailbox(ctx context.Context, accountID int64, mai
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.Background())
 
 	err = db.SetMailboxSubscribed(ctx, tx, mailbox.ID, accountID, true)
 	if err != nil {
@@ -588,7 +588,7 @@ func (db *Database) UnsubscribeFromMailbox(ctx context.Context, accountID int64,
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.Background())
 
 	err = db.SetMailboxSubscribed(ctx, tx, mailbox.ID, accountID, false)
 	if err != nil {
