@@ -257,13 +257,19 @@ Examples:
 
 		// Initialize S3 storage
 		useSSL := !globalConfig.S3.DisableTLS
+		s3Timeout, err := globalConfig.S3.GetTimeout()
+		if err != nil {
+			fmt.Printf("Invalid S3 timeout configuration: %v\n", err)
+			os.Exit(1)
+		}
 		s3Storage, err := storage.New(
 			globalConfig.S3.Endpoint,
 			globalConfig.S3.AccessKey,
 			globalConfig.S3.SecretKey,
 			globalConfig.S3.Bucket,
 			useSSL,
-			false, // debug mode
+			false,     // debug mode
+			s3Timeout, // timeout
 		)
 		if err != nil {
 			fmt.Printf("Failed to initialize S3 storage: %v\n", err)

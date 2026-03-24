@@ -188,7 +188,11 @@ Examples:
 		logger.Info("S3 disabled via SORA_ADMIN_SKIP_S3=1")
 		s3 = nil
 	} else {
-		s3, err = storage.New(globalConfig.S3.Endpoint, globalConfig.S3.AccessKey, globalConfig.S3.SecretKey, globalConfig.S3.Bucket, !globalConfig.S3.DisableTLS, globalConfig.S3.GetDebug())
+		s3Timeout, err := globalConfig.S3.GetTimeout()
+		if err != nil {
+			logger.Fatalf("Failed to parse S3 timeout: %v", err)
+		}
+		s3, err = storage.New(globalConfig.S3.Endpoint, globalConfig.S3.AccessKey, globalConfig.S3.SecretKey, globalConfig.S3.Bucket, !globalConfig.S3.DisableTLS, globalConfig.S3.GetDebug(), s3Timeout)
 		if err != nil {
 			logger.Fatalf("Failed to connect to S3: %v", err)
 		}
@@ -273,7 +277,11 @@ func handleImportS3(ctx context.Context) {
 	defer rdb.Close()
 
 	// Connect to S3
-	s3, err := storage.New(globalConfig.S3.Endpoint, globalConfig.S3.AccessKey, globalConfig.S3.SecretKey, globalConfig.S3.Bucket, !globalConfig.S3.DisableTLS, globalConfig.S3.GetDebug())
+	s3Timeout, err := globalConfig.S3.GetTimeout()
+	if err != nil {
+		logger.Fatalf("Failed to parse S3 timeout: %v", err)
+	}
+	s3, err := storage.New(globalConfig.S3.Endpoint, globalConfig.S3.AccessKey, globalConfig.S3.SecretKey, globalConfig.S3.Bucket, !globalConfig.S3.DisableTLS, globalConfig.S3.GetDebug(), s3Timeout)
 	if err != nil {
 		logger.Fatalf("Failed to connect to S3: %v", err)
 	}
@@ -443,7 +451,11 @@ Examples:
 	defer rdb.Close()
 
 	// Connect to S3
-	s3, err := storage.New(globalConfig.S3.Endpoint, globalConfig.S3.AccessKey, globalConfig.S3.SecretKey, globalConfig.S3.Bucket, !globalConfig.S3.DisableTLS, globalConfig.S3.GetDebug())
+	s3Timeout, err := globalConfig.S3.GetTimeout()
+	if err != nil {
+		logger.Fatalf("Failed to parse S3 timeout: %v", err)
+	}
+	s3, err := storage.New(globalConfig.S3.Endpoint, globalConfig.S3.AccessKey, globalConfig.S3.SecretKey, globalConfig.S3.Bucket, !globalConfig.S3.DisableTLS, globalConfig.S3.GetDebug(), s3Timeout)
 	if err != nil {
 		logger.Fatalf("Failed to connect to S3: %v", err)
 	}

@@ -617,12 +617,13 @@ func setupTestS3Storage(t *testing.T) *storage.S3Storage {
 	// In test mode, S3 operations are skipped, so we can return nil
 	// However, the importer still expects a non-nil pointer, so create a dummy instance
 	mockStorage, err := storage.New(
-		"localhost:0", // Non-existent endpoint (won't be used in test mode)
-		"test",        // Access key
-		"test",        // Secret key
-		"test-bucket", // Bucket name
-		false,         // Use SSL
-		false,         // Debug
+		"localhost:0",  // Non-existent endpoint (won't be used in test mode)
+		"test",         // Access key
+		"test",         // Secret key
+		"test-bucket",  // Bucket name
+		false,          // Use SSL
+		false,          // Debug
+		30*time.Second, // Timeout
 	)
 	if err != nil {
 		// This is expected to fail since we're not actually connecting

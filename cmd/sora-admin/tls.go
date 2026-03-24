@@ -323,6 +323,9 @@ func listTLSCertificates(ctx context.Context, cfg AdminConfig, cacheDir string, 
 		endpoint = "s3.amazonaws.com"
 	}
 
+	// Use default timeout for TLS certificate operations (30 seconds)
+	s3Timeout := 30 * time.Second
+
 	s3store, err := storage.New(
 		endpoint,
 		s3cfg.AccessKey,
@@ -330,6 +333,7 @@ func listTLSCertificates(ctx context.Context, cfg AdminConfig, cacheDir string, 
 		s3cfg.Bucket,
 		!s3cfg.DisableTLS,
 		s3cfg.Debug,
+		s3Timeout,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize S3 storage: %w", err)
@@ -705,6 +709,9 @@ func deleteTLSCertificate(ctx context.Context, cfg AdminConfig, cacheDir string,
 		endpoint = "s3.amazonaws.com"
 	}
 
+	// Use default timeout for TLS certificate operations (30 seconds)
+	s3Timeout := 30 * time.Second
+
 	s3store, err := storage.New(
 		endpoint,
 		s3cfg.AccessKey,
@@ -712,6 +719,7 @@ func deleteTLSCertificate(ctx context.Context, cfg AdminConfig, cacheDir string,
 		s3cfg.Bucket,
 		!s3cfg.DisableTLS,
 		s3cfg.Debug,
+		s3Timeout,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize S3 storage: %w", err)
@@ -851,6 +859,9 @@ func cleanTLSCertificates(ctx context.Context, cfg AdminConfig, cacheDir string,
 		endpoint = "s3.amazonaws.com"
 	}
 
+	// Use default timeout for TLS certificate operations (30 seconds)
+	s3Timeout := 30 * time.Second
+
 	s3store, err := storage.New(
 		endpoint,
 		s3cfg.AccessKey,
@@ -858,6 +869,7 @@ func cleanTLSCertificates(ctx context.Context, cfg AdminConfig, cacheDir string,
 		s3cfg.Bucket,
 		!s3cfg.DisableTLS,
 		s3cfg.Debug,
+		s3Timeout,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize S3 storage: %w", err)
@@ -999,6 +1011,9 @@ func cacheTLSCertificates(ctx context.Context, cfg AdminConfig, cacheDir string,
 		endpoint = "s3.amazonaws.com"
 	}
 
+	// Use default timeout for TLS certificate operations (30 seconds)
+	s3Timeout := 30 * time.Second
+
 	s3store, err := storage.New(
 		endpoint,
 		s3cfg.AccessKey,
@@ -1006,6 +1021,7 @@ func cacheTLSCertificates(ctx context.Context, cfg AdminConfig, cacheDir string,
 		s3cfg.Bucket,
 		!s3cfg.DisableTLS,
 		s3cfg.Debug,
+		s3Timeout,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize S3 storage: %w", err)

@@ -528,9 +528,13 @@ func initializeServices(ctx context.Context, cfg config.Config, errorHandler *er
 			errorHandler.ValidationError("S3 endpoint", fmt.Errorf("S3 endpoint not specified"))
 			os.Exit(errorHandler.WaitForExit())
 		}
-		logger.Info("Connecting to S3", "endpoint", s3EndpointToUse, "bucket", cfg.S3.Bucket)
-		var err error
-		deps.storage, err = storage.New(s3EndpointToUse, cfg.S3.AccessKey, cfg.S3.SecretKey, cfg.S3.Bucket, !cfg.S3.DisableTLS, cfg.S3.GetDebug())
+		s3Timeout, err := cfg.S3.GetTimeout()
+		if err != nil {
+			errorHandler.ValidationError("S3 timeout", err)
+			os.Exit(errorHandler.WaitForExit())
+		}
+		logger.Info("Connecting to S3", "endpoint", s3EndpointToUse, "bucket", cfg.S3.Bucket, "timeout", s3Timeout)
+		deps.storage, err = storage.New(s3EndpointToUse, cfg.S3.AccessKey, cfg.S3.SecretKey, cfg.S3.Bucket, !cfg.S3.DisableTLS, cfg.S3.GetDebug(), s3Timeout)
 		if err != nil {
 			errorHandler.FatalError(fmt.Sprintf("initialize S3 storage at endpoint '%s'", s3EndpointToUse), err)
 			os.Exit(errorHandler.WaitForExit())

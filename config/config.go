@@ -130,7 +130,8 @@ type S3Config struct {
 	AccessKey     string `toml:"access_key"`
 	SecretKey     string `toml:"secret_key"`
 	Bucket        string `toml:"bucket"`
-	Debug         bool   `toml:"debug"` // Enable detailed S3 request/response tracing
+	Debug         bool   `toml:"debug"`   // Enable detailed S3 request/response tracing
+	Timeout       string `toml:"timeout"` // Timeout for individual S3 operations (default: 30s)
 	Encrypt       bool   `toml:"encrypt"`
 	EncryptionKey string `toml:"encryption_key"`
 }
@@ -138,6 +139,14 @@ type S3Config struct {
 // GetDebug returns the debug flag
 func (s *S3Config) GetDebug() bool {
 	return s.Debug
+}
+
+// GetTimeout parses the S3 operation timeout duration
+func (s *S3Config) GetTimeout() (time.Duration, error) {
+	if s.Timeout == "" {
+		return 30 * time.Second, nil // Default 30 second timeout for S3 operations
+	}
+	return helpers.ParseDuration(s.Timeout)
 }
 
 // ClusterRateLimitSyncConfig holds configuration for cluster-wide auth rate limiting

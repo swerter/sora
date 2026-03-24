@@ -33,7 +33,7 @@ func TestImportExportCycle(t *testing.T) {
 	createCacheTestAccount(t, rdb, testEmail, testPassword)
 
 	// Setup S3 storage (use test mode to skip actual S3)
-	mockS3, err := storage.New("mock:9000", "test", "test", "test", false, false)
+	mockS3, err := storage.New("mock:9000", "test", "test", "test", false, false, 30*time.Second)
 	if err != nil {
 		t.Skipf("Cannot create mock S3 storage: %v", err)
 	}

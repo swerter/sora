@@ -125,6 +125,11 @@ func resolveFailedUploads(ctx context.Context, cfg AdminConfig, dryRun bool, lim
 	}
 	defer rdb.Close()
 
+	s3Timeout, err := cfg.S3.GetTimeout()
+	if err != nil {
+		return fmt.Errorf("invalid S3 timeout configuration: %w", err)
+	}
+
 	s3Storage, err := storage.New(
 		cfg.S3.Endpoint,
 		cfg.S3.AccessKey,
@@ -132,6 +137,7 @@ func resolveFailedUploads(ctx context.Context, cfg AdminConfig, dryRun bool, lim
 		cfg.S3.Bucket,
 		!cfg.S3.DisableTLS,
 		false,
+		s3Timeout,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize S3: %w", err)
@@ -291,18 +297,28 @@ func showUploaderStatus(ctx context.Context, cfg AdminConfig, showFailed bool, f
 	// Show failed uploads if requested
 	if showFailed && stats.FailedUploads > 0 {
 		// Initialize S3 storage for checking existence
-		s3Storage, err := storage.New(
-			cfg.S3.Endpoint,
-			cfg.S3.AccessKey,
-			cfg.S3.SecretKey,
-			cfg.S3.Bucket,
-			!cfg.S3.DisableTLS,
-			false,
-		)
+		s3Timeout, err := cfg.S3.GetTimeout()
 		if err != nil {
-			logger.Warn("Failed to initialize S3 (S3 Status column will show 'N/A')", "error", err)
-			s3Storage = nil
-		} else if cfg.S3.Encrypt {
+			logger.Warn("Invalid S3 timeout configuration (S3 Status column will show 'N/A')", "error", err)
+		}
+
+		var s3Storage *storage.S3Storage
+		if err == nil {
+			s3Storage, err = storage.New(
+				cfg.S3.Endpoint,
+				cfg.S3.AccessKey,
+				cfg.S3.SecretKey,
+				cfg.S3.Bucket,
+				!cfg.S3.DisableTLS,
+				false,
+				s3Timeout,
+			)
+			if err != nil {
+				logger.Warn("Failed to initialize S3 (S3 Status column will show 'N/A')", "error", err)
+				s3Storage = nil
+			}
+		}
+		if s3Storage != nil && cfg.S3.Encrypt {
 			if err := s3Storage.EnableEncryption(cfg.S3.EncryptionKey); err != nil {
 				logger.Warn("Failed to enable S3 encryption (S3 Status column will show 'N/A')", "error", err)
 				s3Storage = nil

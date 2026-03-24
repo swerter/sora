@@ -91,9 +91,10 @@ type S3Storage struct {
 	BucketName    string
 	Encrypt       bool
 	EncryptionKey []byte
+	Timeout       time.Duration // Timeout for individual S3 operations
 }
 
-func New(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool, debug bool) (*S3Storage, error) {
+func New(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool, debug bool, timeout time.Duration) (*S3Storage, error) {
 	// Build endpoint URL - accept either with or without protocol
 	var endpointURL string
 	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
@@ -125,6 +126,7 @@ func New(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool,
 		Credentials:                 creds,
 		Region:                      "us-east-1", // Default region, can be overridden
 		EndpointResolverWithOptions: customResolver,
+		RetryMaxAttempts:            1, // Disable SDK-level retries; the resilient layer (pkg/resilient) handles retries with circuit breaker and proper error classification
 	}
 
 	// Add debug logging if requested
@@ -137,13 +139,19 @@ func New(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool,
 		o.UsePathStyle = true
 	})
 
-	logger.Info("STORAGE: Initialized AWS S3 client", "endpoint", endpoint, "bucket", bucketName, "ssl", useSSL)
+	// Default timeout if not provided
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+
+	logger.Info("STORAGE: Initialized AWS S3 client", "endpoint", endpoint, "bucket", bucketName, "ssl", useSSL, "timeout", timeout)
 
 	// Return the initialized storage client
 	return &S3Storage{
 		Client:     client,
 		BucketName: bucketName,
 		Encrypt:    false,
+		Timeout:    timeout,
 	}, nil
 }
 
@@ -173,7 +181,9 @@ func (s *S3Storage) EnableEncryption(encryptionKey string) error {
 
 // Exists checks if an object with the given key exists in the bucket.
 func (s *S3Storage) Exists(key string) (bool, string, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	defer cancel()
+
 	input := &s3.HeadObjectInput{
 		Bucket: aws.String(s.BucketName),
 		Key:    aws.String(key),
@@ -202,7 +212,8 @@ func (s *S3Storage) Exists(key string) (bool, string, error) {
 
 func (s *S3Storage) Put(key string, body io.Reader, size int64) error {
 	start := time.Now()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	defer cancel()
 
 	// If encryption is enabled, encrypt the data before uploading
 	if s.Encrypt {
@@ -304,7 +315,7 @@ func (s *S3Storage) decryptData(ciphertext []byte) ([]byte, error) {
 
 func (s *S3Storage) Get(key string) (io.ReadCloser, error) {
 	start := time.Now()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
 
 	input := &s3.GetObjectInput{
 		Bucket: aws.String(s.BucketName),
@@ -313,6 +324,7 @@ func (s *S3Storage) Get(key string) (io.ReadCloser, error) {
 
 	result, err := s.Client.GetObject(ctx, input)
 	if err != nil {
+		cancel() // cancel immediately on error
 		metrics.S3OperationsTotal.WithLabelValues("GET", "error").Inc()
 		metrics.S3OperationDuration.WithLabelValues("GET").Observe(time.Since(start).Seconds())
 		return nil, err
@@ -320,7 +332,9 @@ func (s *S3Storage) Get(key string) (io.ReadCloser, error) {
 
 	// If encryption is enabled, decrypt the data after downloading
 	if s.Encrypt {
+		// Encrypted path: read entire body within the timeout, then cancel
 		encryptedData, err := io.ReadAll(result.Body)
+		cancel() // done with the HTTP connection
 		if err != nil {
 			metrics.S3OperationsTotal.WithLabelValues("GET", "error").Inc()
 			metrics.S3OperationDuration.WithLabelValues("GET").Observe(time.Since(start).Seconds())
@@ -355,59 +369,68 @@ func (s *S3Storage) Get(key string) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(decryptedData)), nil
 	}
 
+	// Non-encrypted path: body streams from the HTTP connection.
+	// The timeout context must stay alive until the caller finishes reading,
+	// so we wrap the body to cancel the context on Close().
 	metrics.S3OperationsTotal.WithLabelValues("GET", "success").Inc()
 	metrics.S3OperationDuration.WithLabelValues("GET").Observe(time.Since(start).Seconds())
-	return result.Body, nil
+	return &cancelOnCloseReader{ReadCloser: result.Body, cancel: cancel}, nil
+}
+
+// cancelOnCloseReader wraps an io.ReadCloser and calls a cancel function on Close.
+// This keeps a context alive while the body is being streamed, ensuring the
+// timeout applies to the full body read, not just the initial HTTP response.
+type cancelOnCloseReader struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r *cancelOnCloseReader) Close() error {
+	err := r.ReadCloser.Close()
+	r.cancel()
+	return err
 }
 
 func (s *S3Storage) Delete(key string) error {
 	start := time.Now()
-	ctx := context.Background()
-
-	// Check if the object exists before attempting to delete.
-	// This makes DeleteMessage idempotent.
-	exists, versionId, err := s.Exists(key)
-	if err != nil {
-		logger.Error("STORAGE: Error checking existence of object", "key", key, "error", err)
-		metrics.S3OperationsTotal.WithLabelValues("DELETE", "error").Inc()
-		metrics.S3OperationDuration.WithLabelValues("DELETE").Observe(time.Since(start).Seconds())
-		return err
-	}
-	if !exists {
-		// Object does not exist, consider it successfully "deleted"
-		logger.Info("STORAGE: Object does not exist in S3 - skipping deletion", "key", key)
-		metrics.S3OperationsTotal.WithLabelValues("DELETE", "skipped").Inc()
-		metrics.S3OperationDuration.WithLabelValues("DELETE").Observe(time.Since(start).Seconds())
-		return nil
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	defer cancel()
 
 	input := &s3.DeleteObjectInput{
 		Bucket: aws.String(s.BucketName),
 		Key:    aws.String(key),
 	}
-	if versionId != "" {
-		input.VersionId = aws.String(versionId)
-	}
 
-	_, err = s.Client.DeleteObject(ctx, input)
+	_, err := s.Client.DeleteObject(ctx, input)
 	if err != nil {
-		// Race condition: object was deleted between our Exists check and DeleteObject.
-		// B2 returns 400 "InvalidRequest: File not present" in this case.
-		// Since Delete is idempotent (object is gone), treat this as success.
-		// Use smithy.APIError to check the structured error code, not string matching.
+		// S3: DeleteObject on non-existent keys returns 204 (success), so this
+		// branch only fires on real errors. B2 returns 400 "InvalidRequest: File
+		// not present" for non-existent keys — treat as success (idempotent delete).
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidRequest" {
-			logger.Info("STORAGE: Object already deleted (race condition)", "key", key)
-			metrics.S3OperationsTotal.WithLabelValues("DELETE", "already_deleted").Inc()
+			logger.Debug("STORAGE: Object does not exist in S3 - delete is no-op", "key", key)
+			metrics.S3OperationsTotal.WithLabelValues("DELETE", "success").Inc()
 			metrics.S3OperationDuration.WithLabelValues("DELETE").Observe(time.Since(start).Seconds())
 			return nil
 		}
+
+		// Also handle 404 Not Found from other S3-compatible providers
+		var httpErr *awshttp.ResponseError
+		if errors.As(err, &httpErr) && httpErr.HTTPStatusCode() == http.StatusNotFound {
+			logger.Debug("STORAGE: Object does not exist in S3 - delete is no-op", "key", key)
+			metrics.S3OperationsTotal.WithLabelValues("DELETE", "success").Inc()
+			metrics.S3OperationDuration.WithLabelValues("DELETE").Observe(time.Since(start).Seconds())
+			return nil
+		}
+
 		metrics.S3OperationsTotal.WithLabelValues("DELETE", "error").Inc()
-	} else {
-		metrics.S3OperationsTotal.WithLabelValues("DELETE", "success").Inc()
+		metrics.S3OperationDuration.WithLabelValues("DELETE").Observe(time.Since(start).Seconds())
+		return err
 	}
+
+	metrics.S3OperationsTotal.WithLabelValues("DELETE", "success").Inc()
 	metrics.S3OperationDuration.WithLabelValues("DELETE").Observe(time.Since(start).Seconds())
-	return err
+	return nil
 }
 
 // DeleteBulk deletes multiple objects in a single S3 API call (up to 1000 objects)
@@ -415,7 +438,8 @@ func (s *S3Storage) Delete(key string) error {
 // S3's DeleteObjects API is idempotent - deleting non-existent objects succeeds
 func (s *S3Storage) DeleteBulk(keys []string) map[string]error {
 	start := time.Now()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	defer cancel()
 
 	if len(keys) == 0 {
 		return nil
@@ -510,7 +534,8 @@ func contains(s, substr string) bool {
 }
 
 func (s *S3Storage) Copy(sourcePath, destPath string) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	defer cancel()
 
 	// If encryption is enabled, we need to download, decrypt, and re-upload
 	if s.Encrypt {

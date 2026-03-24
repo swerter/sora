@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/migadu/sora/config"
 	"github.com/migadu/sora/db"
@@ -54,7 +55,7 @@ func TestImporter_DovecotUIDPreservation_Simple(t *testing.T) {
 		originalUIDList.UIDValidity, originalUIDList.NextUID, len(originalUIDList.UIDMappings))
 
 	// Create a mock S3 storage that will just skip uploads
-	mockS3, err := storage.New("mock:9000", "test", "test", "test", false, false)
+	mockS3, err := storage.New("mock:9000", "test", "test", "test", false, false, 30*time.Second)
 	if err != nil {
 		t.Skipf("Cannot create mock S3 storage: %v", err)
 	}

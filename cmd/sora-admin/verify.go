@@ -140,6 +140,11 @@ func verifyS3Storage(ctx context.Context, cfg AdminConfig, email string, showMis
 	defer rdb.Close()
 
 	// Initialize S3 storage
+	s3Timeout, err := cfg.S3.GetTimeout()
+	if err != nil {
+		return fmt.Errorf("invalid S3 timeout configuration: %w", err)
+	}
+
 	s3Storage, err := storage.New(
 		cfg.S3.Endpoint,
 		cfg.S3.AccessKey,
@@ -147,6 +152,7 @@ func verifyS3Storage(ctx context.Context, cfg AdminConfig, email string, showMis
 		cfg.S3.Bucket,
 		!cfg.S3.DisableTLS, // useSSL = !DisableTLS
 		false,              // no debug
+		s3Timeout,          // timeout
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize S3 storage: %w", err)
@@ -466,6 +472,11 @@ func verifyContentHash(ctx context.Context, cfg AdminConfig, hash, email string,
 	defer rdb.Close()
 
 	// Initialize S3 storage
+	s3Timeout, err := cfg.S3.GetTimeout()
+	if err != nil {
+		return fmt.Errorf("invalid S3 timeout configuration: %w", err)
+	}
+
 	s3Storage, err := storage.New(
 		cfg.S3.Endpoint,
 		cfg.S3.AccessKey,
@@ -473,6 +484,7 @@ func verifyContentHash(ctx context.Context, cfg AdminConfig, hash, email string,
 		cfg.S3.Bucket,
 		!cfg.S3.DisableTLS,
 		false,
+		s3Timeout,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize S3 storage: %w", err)

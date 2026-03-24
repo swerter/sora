@@ -106,6 +106,10 @@ func purgeAccountWithStorage(ctx context.Context, cfg AdminConfig, rdb *resilien
 	// Initialize S3 storage if not provided
 	if s3Storage == nil {
 		useSSL := !cfg.S3.DisableTLS
+		s3Timeout, err := cfg.S3.GetTimeout()
+		if err != nil {
+			return fmt.Errorf("failed to parse S3 timeout: %w", err)
+		}
 		realS3, err := storage.New(
 			cfg.S3.Endpoint,
 			cfg.S3.AccessKey,
@@ -113,6 +117,7 @@ func purgeAccountWithStorage(ctx context.Context, cfg AdminConfig, rdb *resilien
 			cfg.S3.Bucket,
 			useSSL,
 			false, // debug mode
+			s3Timeout,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to initialize S3 storage: %w", err)

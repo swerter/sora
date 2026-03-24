@@ -79,7 +79,7 @@ func TestImporter_SynchronousUploadFlow(t *testing.T) {
 			bucketName = "sora-test"
 		}
 
-		s3Storage, err := storage.New(endpoint, accessKeyID, secretAccessKey, bucketName, false, false)
+		s3Storage, err := storage.New(endpoint, accessKeyID, secretAccessKey, bucketName, false, false, 30*time.Second)
 		if err != nil {
 			t.Logf("S3 not available, using TestMode (no S3 upload): %v", err)
 			s3Storage = nil

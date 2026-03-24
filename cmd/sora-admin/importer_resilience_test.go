@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/migadu/sora/storage"
 )
@@ -61,7 +62,7 @@ func TestImporter_Resilience(t *testing.T) {
 	}
 
 	// Create mock S3 storage
-	mockS3, err := storage.New("mock:9000", "test", "test", "test", false, false)
+	mockS3, err := storage.New("mock:9000", "test", "test", "test", false, false, 30*time.Second)
 	if err != nil {
 		t.Skipf("Cannot create mock S3 storage: %v", err)
 	}
