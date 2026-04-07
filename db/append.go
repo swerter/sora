@@ -469,26 +469,36 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		}
 	}
 
-	// For old messages, textBodyArg/headersArg are NULL, but the raw values are used for TSV generation.
-	_, err = tx.Exec(ctx, `
-		INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, headers_tsv)
-		VALUES ($1, $2, to_tsvector('simple', $3), $4, to_tsvector('simple', $5))
-		ON CONFLICT (content_hash) DO NOTHING
-	`, options.ContentHash, textBodyArg, sanePlaintextBodyForFTS, headersArg, saneRawHeadersForFTS)
+	// Quick check if the content already exists to avoid heavy FTS parsing in concurrent deliveries.
+	var contentExists bool
+	err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash=$1)", options.ContentHash).Scan(&contentExists)
 	if err != nil {
-		// Log the actual error details for debugging
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) {
-			logger.Error("Database: failed to insert message content",
-				"content_hash", options.ContentHash,
-				"err", err,
-				"pg_code", pgErr.Code,
-				"pg_message", pgErr.Message,
-				"pg_detail", pgErr.Detail)
-		} else {
-			logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+		logger.Error("Database: failed to check message content existence", "content_hash", options.ContentHash, "err", err)
+		return 0, 0, consts.ErrDBQueryFailed
+	}
+
+	if !contentExists {
+		// For old messages, textBodyArg/headersArg are NULL, but the raw values are used for TSV generation.
+		_, err = tx.Exec(ctx, `
+			INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, headers_tsv)
+			VALUES ($1, $2, to_tsvector('simple', $3), $4, to_tsvector('simple', $5))
+			ON CONFLICT (content_hash) DO NOTHING
+		`, options.ContentHash, textBodyArg, sanePlaintextBodyForFTS, headersArg, saneRawHeadersForFTS)
+		if err != nil {
+			// Log the actual error details for debugging
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) {
+				logger.Error("Database: failed to insert message content",
+					"content_hash", options.ContentHash,
+					"err", err,
+					"pg_code", pgErr.Code,
+					"pg_message", pgErr.Message,
+					"pg_detail", pgErr.Detail)
+			} else {
+				logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+			}
+			return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 		}
-		return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 	}
 
 	// Check if content is already uploaded for this account (content deduplication).
@@ -865,26 +875,36 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 		}
 	}
 
-	// For old messages, textBodyArg/headersArg are NULL, but the raw values are used for TSV generation.
-	_, err = tx.Exec(ctx, `
-		INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, headers_tsv)
-		VALUES ($1, $2, to_tsvector('simple', $3), $4, to_tsvector('simple', $5))
-		ON CONFLICT (content_hash) DO NOTHING
-	`, options.ContentHash, textBodyArg, sanePlaintextBodyForFTS, headersArg, saneRawHeadersForFTS)
+	// Quick check if the content already exists to avoid heavy FTS parsing in concurrent deliveries.
+	var contentExists bool
+	err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash=$1)", options.ContentHash).Scan(&contentExists)
 	if err != nil {
-		// Log the actual error details for debugging
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) {
-			logger.Error("Database: failed to insert message content",
-				"content_hash", options.ContentHash,
-				"err", err,
-				"pg_code", pgErr.Code,
-				"pg_message", pgErr.Message,
-				"pg_detail", pgErr.Detail)
-		} else {
-			logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+		logger.Error("Database: failed to check message content existence", "content_hash", options.ContentHash, "err", err)
+		return 0, 0, consts.ErrDBQueryFailed
+	}
+
+	if !contentExists {
+		// For old messages, textBodyArg/headersArg are NULL, but the raw values are used for TSV generation.
+		_, err = tx.Exec(ctx, `
+			INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, headers_tsv)
+			VALUES ($1, $2, to_tsvector('simple', $3), $4, to_tsvector('simple', $5))
+			ON CONFLICT (content_hash) DO NOTHING
+		`, options.ContentHash, textBodyArg, sanePlaintextBodyForFTS, headersArg, saneRawHeadersForFTS)
+		if err != nil {
+			// Log the actual error details for debugging
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) {
+				logger.Error("Database: failed to insert message content",
+					"content_hash", options.ContentHash,
+					"err", err,
+					"pg_code", pgErr.Code,
+					"pg_message", pgErr.Message,
+					"pg_detail", pgErr.Detail)
+			} else {
+				logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+			}
+			return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 		}
-		return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 	}
 
 	return messageRowId, uidToUse, nil
