@@ -69,40 +69,110 @@ func (d *Database) ExpungeOldMessages(ctx context.Context, tx pgx.Tx, olderThan 
 // GetUserScopedObjectsForCleanup identifies (AccountID, ContentHash) pairs where all messages
 // for that user with that hash have been expunged for longer than the grace period.
 //
-// The WHERE clause filters to only expunged+uploaded rows for index efficiency.
-// The NOT EXISTS anti-join in HAVING ensures no live (non-expunged) messages
-// reference the same content_hash — preventing deletion of S3 objects still in use
-// (e.g., after IMAP MOVE which creates a new row sharing the same content_hash).
+// Uses a bounded scan-window approach: each batch scans a fixed number of rows from
+// idx_messages_cleanup_grouping. This ensures predictable execution time and avoids
+// timeout errors when there are many expunged rows but few matching the NOT EXISTS criteria.
 func (d *Database) GetUserScopedObjectsForCleanup(ctx context.Context, olderThan time.Duration, limit int) ([]UserScopedObjectForCleanup, error) {
-	threshold := time.Now().Add(-olderThan).UTC()
-	rows, err := d.GetReadPool().Query(ctx, `
-		SELECT m.account_id, m.s3_domain, m.s3_localpart, m.content_hash
-		FROM messages m
-		WHERE m.uploaded = TRUE AND m.expunged_at IS NOT NULL
-		GROUP BY m.account_id, m.s3_domain, m.s3_localpart, m.content_hash
-		HAVING bool_and(m.expunged_at < $1)
-		   AND NOT EXISTS (
-		     SELECT 1 FROM messages m2
-		     WHERE m2.account_id = m.account_id
-		       AND m2.content_hash = m.content_hash
-		       AND m2.expunged_at IS NULL
-		   )
-		LIMIT $2;
-	`, threshold, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query for user-scoped objects for cleanup: %w", err)
-	}
-	defer rows.Close()
+	const scanWindowSize = 5000
+	const maxBatches = 200                  // Upper bound: scan up to 1M groups total
+	const maxRunDuration = 25 * time.Second // Wall-clock cap
 
-	var result []UserScopedObjectForCleanup
-	for rows.Next() {
-		var candidate UserScopedObjectForCleanup
-		if err := rows.Scan(&candidate.AccountID, &candidate.S3Domain, &candidate.S3Localpart, &candidate.ContentHash); err != nil {
-			return nil, fmt.Errorf("failed to scan user-scoped object for cleanup: %w", err)
+	var allCandidates []UserScopedObjectForCleanup
+
+	// Tuple cursor for pagination through the index
+	var lastAccountID int64 = -1
+	var lastDomain string = ""
+	var lastLocalpart string = ""
+	var lastHash string = ""
+
+	runDeadline := time.Now().Add(maxRunDuration)
+	threshold := time.Now().Add(-olderThan).UTC()
+
+	for batch := 0; batch < maxBatches && len(allCandidates) < limit; batch++ {
+		// Respect the per-run time cap
+		if time.Now().After(runDeadline) {
+			logger.Info("GetUserScopedObjectsForCleanup: reached time limit, returning partial results",
+				"found", len(allCandidates), "requested", limit, "batches", batch)
+			break
 		}
-		result = append(result, candidate)
+
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		query := `
+			WITH scan_window AS (
+				SELECT m.account_id, m.s3_domain, m.s3_localpart, m.content_hash
+				FROM messages m
+				WHERE m.uploaded = TRUE AND m.expunged_at IS NOT NULL
+				  AND (m.account_id, m.s3_domain, m.s3_localpart, m.content_hash) > ($1, $2, $3, $4)
+				GROUP BY m.account_id, m.s3_domain, m.s3_localpart, m.content_hash
+				ORDER BY m.account_id, m.s3_domain, m.s3_localpart, m.content_hash
+				LIMIT $5
+			)
+			SELECT 
+				sw.account_id, sw.s3_domain, sw.s3_localpart, sw.content_hash,
+				NOT EXISTS (
+					SELECT 1 FROM messages m2
+					WHERE m2.account_id = sw.account_id
+					  AND m2.content_hash = sw.content_hash
+					  AND (m2.expunged_at IS NULL OR m2.expunged_at >= $6)
+				) as is_orphan
+			FROM scan_window sw
+			ORDER BY sw.account_id, sw.s3_domain, sw.s3_localpart, sw.content_hash
+		`
+
+		rows, err := d.GetReadPool().Query(ctx, query, lastAccountID, lastDomain, lastLocalpart, lastHash, scanWindowSize, threshold)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query user-scoped objects for cleanup: %w", err)
+		}
+
+		var batchCandidates []UserScopedObjectForCleanup
+		var rowsProcessed int
+
+		for rows.Next() {
+			rowsProcessed++
+			var candidate UserScopedObjectForCleanup
+			var isOrphan bool
+			if err := rows.Scan(&candidate.AccountID, &candidate.S3Domain, &candidate.S3Localpart, &candidate.ContentHash, &isOrphan); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("failed to scan user-scoped object for cleanup: %w", err)
+			}
+
+			// Update cursor
+			lastAccountID = candidate.AccountID
+			lastDomain = candidate.S3Domain
+			lastLocalpart = candidate.S3Localpart
+			lastHash = candidate.ContentHash
+
+			if isOrphan {
+				batchCandidates = append(batchCandidates, candidate)
+			}
+		}
+		rows.Close()
+
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating user-scoped objects: %w", err)
+		}
+
+		// If we processed fewer rows than scanWindowSize, we have reached the end
+		if rowsProcessed == 0 {
+			break
+		}
+
+		if len(batchCandidates) > 0 {
+			remaining := limit - len(allCandidates)
+			if len(batchCandidates) > remaining {
+				batchCandidates = batchCandidates[:remaining]
+			}
+			allCandidates = append(allCandidates, batchCandidates...)
+		}
+
+		// Short sleep between batches to reduce DB pressure
+		time.Sleep(10 * time.Millisecond)
 	}
-	return result, rows.Err()
+
+	return allCandidates, nil
 }
 
 // DeleteExpungedMessagesByS3KeyPartsBatch deletes all expunged message rows
