@@ -3,6 +3,7 @@ package resilient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -201,6 +202,11 @@ func (rs *ResilientS3Storage) PutWithRetry(ctx context.Context, key string, body
 	}
 
 	op := func() (any, error) {
+		if seeker, ok := body.(io.Seeker); ok {
+			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+				return nil, fmt.Errorf("failed to rewind reader for S3 put retry: %w", err)
+			}
+		}
 		return nil, rs.storage.Put(key, body, size)
 	}
 	_, err := rs.executeS3OperationWithRetry(ctx, rs.putBreaker, config, rs.isRetryableError, op, key)
@@ -242,6 +248,11 @@ func (rs *ResilientS3Storage) PutObjectWithRetry(ctx context.Context, key string
 	}
 
 	op := func() (any, error) {
+		if seeker, ok := reader.(io.Seeker); ok {
+			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+				return nil, fmt.Errorf("failed to rewind reader for S3 put object retry: %w", err)
+			}
+		}
 		input := &s3.PutObjectInput{
 			Bucket: aws.String(rs.storage.BucketName),
 			Key:    aws.String(key),
