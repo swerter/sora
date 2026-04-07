@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/migadu/sora/cache"
@@ -632,7 +633,9 @@ func (w *UploadWorker) isTransientS3Error(err error) bool {
 	if errors.Is(err, circuitbreaker.ErrCircuitBreakerOpen) ||
 		errors.Is(err, circuitbreaker.ErrTooManyRequests) ||
 		errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled) {
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, os.ErrDeadlineExceeded) ||
+		errors.Is(err, syscall.ECONNRESET) {
 		return true
 	}
 
@@ -644,7 +647,7 @@ func (w *UploadWorker) isTransientS3Error(err error) bool {
 		"i/o timeout", "network unreachable", "no such host",
 		"temporary failure", "service unavailable", "internal server error",
 		"bad gateway", "gateway timeout", "timeout", "slowdown",
-		"throttling", "rate limit",
+		"throttling", "rate limit", "closed network connection",
 	}
 	for _, pattern := range transientPatterns {
 		if strings.Contains(errStr, pattern) {

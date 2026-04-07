@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -118,6 +120,10 @@ func (rs *ResilientS3Storage) classifyRetryable(err error, retry404 bool) bool {
 		return false
 	}
 
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+
 	// Check AWS SDK HTTP status codes — more reliable than string matching.
 	var httpErr *awshttp.ResponseError
 	if errors.As(err, &httpErr) {
@@ -157,6 +163,7 @@ func (rs *ResilientS3Storage) classifyRetryable(err error, retry404 bool) bool {
 		"slowdown",
 		"throttling",
 		"rate limit",
+		"closed network connection",
 	}
 
 	for _, retryable := range retryableErrors {
