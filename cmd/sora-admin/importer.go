@@ -530,6 +530,12 @@ func (i *Importer) processSubscriptions() error {
 
 	// Process each subscribed folder
 	for _, folderName := range folders {
+		// Decode Modified UTF-7 encoding used by Dovecot for non-ASCII folder names
+		if decoded, decErr := helpers.DecodeModifiedUTF7(folderName); decErr != nil {
+			logger.Warn("Failed to decode Modified UTF-7 subscription folder name, using raw name", "name", folderName, "error", decErr)
+		} else {
+			folderName = decoded
+		}
 
 		// Check if mailbox exists, create if needed
 		mailbox, err := i.rdb.GetMailboxByNameWithRetry(i.ctx, user.AccountID(), folderName)
@@ -944,6 +950,13 @@ func (i *Importer) resolveMailboxName(path string) (string, error) {
 		// Replace maildir separator (.) with IMAP separator (/)
 		mailboxName = strings.ReplaceAll(cleanName, ".", "/")
 
+		// Decode Modified UTF-7 encoding used by Dovecot/IMAP for non-ASCII folder names
+		if decoded, err := helpers.DecodeModifiedUTF7(mailboxName); err != nil {
+			logger.Warn("Failed to decode Modified UTF-7 mailbox name, using raw name", "name", mailboxName, "error", err)
+		} else {
+			mailboxName = decoded
+		}
+
 		// Validate characters
 		if strings.ContainsAny(mailboxName, "\t\r\n") {
 			return "", fmt.Errorf("invalid characters in mailbox name")
@@ -1201,11 +1214,17 @@ func (i *Importer) scanMaildir() error {
 			cleanName := strings.TrimPrefix(relPath, ".")
 
 			// Replace maildir separator (.) with IMAP separator (/)
-			// But avoid creating names that will cause UTF-7 encoding issues
 			mailboxName = strings.ReplaceAll(cleanName, ".", "/")
 
+			// Decode Modified UTF-7 encoding used by Dovecot/IMAP for non-ASCII folder names
+			// e.g. "R&AOk-pertoire" -> "Répertoire"
+			if decoded, decErr := helpers.DecodeModifiedUTF7(mailboxName); decErr != nil {
+				logger.Warn("Failed to decode Modified UTF-7 mailbox name, using raw name", "name", mailboxName, "error", decErr)
+			} else {
+				mailboxName = decoded
+			}
+
 			// Validate the mailbox name doesn't contain problematic characters
-			// that will cause UTF-7 encoding issues when sent to IMAP clients
 			if strings.ContainsAny(mailboxName, "\t\r\n") {
 				logger.Info("Warning: Skipping mailbox with invalid characters", "mailbox", mailboxName)
 				return nil
