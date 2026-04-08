@@ -43,7 +43,7 @@ type DatabaseManager interface {
 	GetUserScopedObjectsForCleanupWithRetry(ctx context.Context, gracePeriod time.Duration, limit int) ([]db.UserScopedObjectForCleanup, error)
 	DeleteExpungedMessagesByS3KeyPartsBatchWithRetry(ctx context.Context, objects []db.UserScopedObjectForCleanup) (int64, error)
 	PruneOldMessageVectorsWithRetry(ctx context.Context, retention time.Duration) (int64, error)
-	NullifyLegacyTextBodiesWithRetry(ctx context.Context) (int64, error)
+	NullifyLegacyTextBodiesWithRetry(ctx context.Context, lastHash string) (int64, string, error)
 	GetUnusedContentHashesWithRetry(ctx context.Context, limit int) ([]string, error)
 	DeleteMessageContentsByHashBatchWithRetry(ctx context.Context, hashes []string) (int64, error)
 	GetDanglingAccountsForFinalDeletionWithRetry(ctx context.Context, limit int) ([]int64, error)
@@ -70,6 +70,7 @@ type CleanupWorker struct {
 	maxAgeRestriction     time.Duration
 	ftsRetention          time.Duration // How long to keep FTS vectors (text_body_tsv, headers_tsv)
 	healthStatusRetention time.Duration
+	lastNullifyHash       string // Cursor for O(1) Key-Set Pagination of legacy records
 	stopCh                chan struct{}
 	errCh                 chan<- error
 	wg                    sync.WaitGroup
@@ -348,16 +349,15 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 		}
 	}
 
-	// --- Phase 2a-bis: Legacy Text Body Sweeping ---
-	// Clean up legacy `text_body` stored prior to migration 000016.
-	// We loop up to 10 times per worker run (processing batches of 1000)
-	// so the total throughput is high without ever hitting transaction timeouts.
+	// --- Phase 2a-bis: Systematically nullify text_body for legacy rows.
+	// This ensures that migration 000016 reclaims storage safely without taking massive down-time updates.
 	for i := 0; i < 10; i++ {
-		nullifiedLegacyCount, err := w.rdb.NullifyLegacyTextBodiesWithRetry(ctx)
+		nullifiedLegacyCount, newLastHash, err := w.rdb.NullifyLegacyTextBodiesWithRetry(ctx, w.lastNullifyHash)
 		if err != nil {
 			logger.Error("Cleanup: Failed to nullify legacy text bodies", "error", err)
 			break
 		}
+		w.lastNullifyHash = newLastHash
 
 		if nullifiedLegacyCount > 0 {
 			logger.Info("Cleanup: Removed legacy text bodies, reclaiming storage", "count", nullifiedLegacyCount)

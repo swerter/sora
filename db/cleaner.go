@@ -310,27 +310,62 @@ func (d *Database) PruneOldMessageVectors(ctx context.Context, tx pgx.Tx, retent
 // NullifyLegacyTextBodies systematically sets text_body = NULL for legacy messages.
 // Prior to migration 000016, text_body was retained in the database until fts_source_retention
 // expired. The new trigger clears it immediately. This function safely nullifies lingering
-// text_body fields to reclaim backend storage. Updates are batched to prevent WAL bloat.
-// The update_message_contents_tsvector trigger preserves the existing text_body_tsv.
-func (d *Database) NullifyLegacyTextBodies(ctx context.Context, tx pgx.Tx) (int64, error) {
-	const maxPruneRows = 1_000
+// text_body fields to reclaim backend storage.
+//
+// To prevent massive sequential scans on a table with no index on text_body=NULL, this uses
+// an O(1) Key-Set Pagination cursor that bounds the active search window to 10,000 rows.
+func (d *Database) NullifyLegacyTextBodies(ctx context.Context, tx pgx.Tx, lastHash string) (int64, string, error) {
+	// targetUpdateRows caps the ultimate write burst (e.g. 1000)
+	// scanWindowSize bounds the fast PK sequential scan (e.g. 10,000)
+	const targetUpdateRows = 1_000
+	const scanWindowSize = 10_000
 
-	tag, err := tx.Exec(ctx, `
-		WITH legacy AS (
-			SELECT content_hash FROM message_contents
-			WHERE text_body IS NOT NULL
-			FOR UPDATE SKIP LOCKED
-			LIMIT $1
-		)
-		UPDATE message_contents
-		SET text_body = NULL
-		WHERE content_hash IN (SELECT content_hash FROM legacy)
-	`, maxPruneRows)
-	if err != nil {
-		return 0, fmt.Errorf("failed to nullify legacy text_body rows: %w", err)
+	var processedCount int64
+	var newLastHash string
+	// If starting point is empty, explicitly set to start of ascii space
+	if lastHash == "" {
+		lastHash = ""
 	}
 
-	return tag.RowsAffected(), nil
+	err := tx.QueryRow(ctx, `
+		WITH scan_window AS (
+			SELECT content_hash, text_body
+			FROM message_contents
+			WHERE content_hash > $1
+			ORDER BY content_hash
+			LIMIT $2
+		),
+		legacy AS (
+			SELECT content_hash 
+			FROM scan_window
+			WHERE text_body IS NOT NULL
+			FOR UPDATE SKIP LOCKED
+			LIMIT $3
+		),
+		nullified AS (
+			UPDATE message_contents mc
+			SET text_body = NULL
+			FROM legacy
+			WHERE mc.content_hash = legacy.content_hash
+			RETURNING mc.content_hash
+		)
+		SELECT 
+			(SELECT count(*) FROM nullified) AS rows_updated,
+			(SELECT max(content_hash) FROM scan_window) AS max_hash
+	`, lastHash, scanWindowSize, targetUpdateRows).Scan(&processedCount, &newLastHash)
+	if err != nil {
+		return 0, "", fmt.Errorf("failed to nullify legacy text_body rows: %w", err)
+	}
+
+	// If newLastHash is empty (no rows in scan_window), we reached the end of the table
+	if newLastHash == "" {
+		newLastHash = ""
+	}
+
+	// We return processedCount as how many were actually updated,
+	// BUT because scan_window returns 10,000 quickly even if processedCount=0,
+	// the worker will loop smoothly through empty spaces in 10,000 row chunks.
+	return processedCount, newLastHash, nil
 }
 
 // GetUnusedContentHashes finds content_hash values in message_contents that are no longer referenced

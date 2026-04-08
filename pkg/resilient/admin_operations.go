@@ -259,15 +259,21 @@ func (rd *ResilientDatabase) PruneOldMessageVectorsWithRetry(ctx context.Context
 	return result.(int64), nil
 }
 
-func (rd *ResilientDatabase) NullifyLegacyTextBodiesWithRetry(ctx context.Context) (int64, error) {
+func (rd *ResilientDatabase) NullifyLegacyTextBodiesWithRetry(ctx context.Context, lastHash string) (int64, string, error) {
+	type resultType struct {
+		count int64
+		hash  string
+	}
 	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
-		return rd.getOperationalDatabaseForOperation(true).NullifyLegacyTextBodies(ctx, tx)
+		count, newHash, err := rd.getOperationalDatabaseForOperation(true).NullifyLegacyTextBodies(ctx, tx, lastHash)
+		return resultType{count: count, hash: newHash}, err
 	}
 	result, err := rd.executeWriteInTxWithRetry(ctx, cleanupRetryConfig, timeoutAdmin, op)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return result.(int64), nil
+	res := result.(resultType)
+	return res.count, res.hash, nil
 }
 
 func (rd *ResilientDatabase) GetUnusedContentHashesWithRetry(ctx context.Context, batchSize int) ([]string, error) {
