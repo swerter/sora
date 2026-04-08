@@ -528,13 +528,14 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 				logger.Warn("Database: failed to create savepoint for FTS insert (non-fatal)",
 					"content_hash", truncateHash(options.ContentHash), "err", spErr)
 			} else {
-				// Give FTS its own independent 10s budget. The parent ctx may have only
-				// a few seconds left (write_timeout is 15s and the message INSERT already
-				// consumed part of it). Without this, the Go context expires before
-				// PostgreSQL's statement_timeout, causing "context deadline exceeded".
-				ftsCtx, ftsCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				// Give FTS its own independent 10s budget. We rely exclusively on PostgreSQL's
+				// server-side statement_timeout. We MUST use context.Background() here because
+				// if a Go context deadline is exceeded during a pgx operation, pgx assumes the
+				// connection is stuck and ungracefully closes the underlying TCP connection!
+				// This bubbles up as "conn closed" and breaks the parent LMTP session.
+				ftsCtx := context.Background()
 
-				// Also set PostgreSQL's statement_timeout as a server-side safety net.
+				// Set PostgreSQL's statement_timeout as the enforcer.
 				_, _ = tx.Exec(ftsCtx, "SET LOCAL statement_timeout = 10000") // 10 seconds
 
 				// Prevent lock contention pile-ups during parallel LMTP delivery to multiple
@@ -576,19 +577,15 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 					}
 				}
 
-				ftsCancel()
-
 				// Clean up the savepoint: RELEASE on success, ROLLBACK on failure.
-				// Use context.Background() — the ftsCtx may be expired and the parent
-				// ctx may also be expired. These are fast control-flow commands that
-				// must always succeed to keep the transaction in a clean state.
-				cleanupCtx := context.Background()
+				// ftsCtx is context.Background() so it is safe to reuse here —
+				// these are fast control-flow commands that must always succeed.
 				if ftsOK {
-					_, _ = tx.Exec(cleanupCtx, "SET LOCAL statement_timeout = 0")
-					_, _ = tx.Exec(cleanupCtx, "RELEASE SAVEPOINT fts_insert")
+					_, _ = tx.Exec(ftsCtx, "SET LOCAL statement_timeout = 0")
+					_, _ = tx.Exec(ftsCtx, "RELEASE SAVEPOINT fts_insert")
 				} else {
-					_, _ = tx.Exec(cleanupCtx, "ROLLBACK TO SAVEPOINT fts_insert")
-					_, _ = tx.Exec(cleanupCtx, "SET LOCAL statement_timeout = 0")
+					_, _ = tx.Exec(ftsCtx, "ROLLBACK TO SAVEPOINT fts_insert")
+					_, _ = tx.Exec(ftsCtx, "SET LOCAL statement_timeout = 0")
 				}
 			}
 		}
@@ -894,8 +891,8 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 				logger.Warn("Database: failed to create savepoint for FTS insert (non-fatal)",
 					"content_hash", truncateHash(options.ContentHash), "err", spErr)
 			} else {
-				// Give FTS its own independent 10s budget (see InsertMessage for rationale).
-				ftsCtx, ftsCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				// Give FTS its own independent 10s budget without Go-level cancellation.
+				ftsCtx := context.Background()
 
 				_, _ = tx.Exec(ftsCtx, "SET LOCAL statement_timeout = 10000") // 10 seconds
 
@@ -930,16 +927,13 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 					}
 				}
 
-				ftsCancel()
-
-				// Clean up savepoint (see InsertMessage for rationale on context.Background).
-				cleanupCtx := context.Background()
+				// Clean up savepoint (see InsertMessage for rationale).
 				if ftsOK {
-					_, _ = tx.Exec(cleanupCtx, "SET LOCAL statement_timeout = 0")
-					_, _ = tx.Exec(cleanupCtx, "RELEASE SAVEPOINT fts_insert")
+					_, _ = tx.Exec(ftsCtx, "SET LOCAL statement_timeout = 0")
+					_, _ = tx.Exec(ftsCtx, "RELEASE SAVEPOINT fts_insert")
 				} else {
-					_, _ = tx.Exec(cleanupCtx, "ROLLBACK TO SAVEPOINT fts_insert")
-					_, _ = tx.Exec(cleanupCtx, "SET LOCAL statement_timeout = 0")
+					_, _ = tx.Exec(ftsCtx, "ROLLBACK TO SAVEPOINT fts_insert")
+					_, _ = tx.Exec(ftsCtx, "SET LOCAL statement_timeout = 0")
 				}
 			}
 		}
