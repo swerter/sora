@@ -416,82 +416,6 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		return 0, 0, consts.ErrDBInsertFailed
 	}
 
-	// Skip message_contents entirely when the message is already past the FTS retention
-	// window. Creating the row would only add immediate work for the cleanup worker.
-	if options.FTSRetention == 0 || options.SentDate.IsZero() || !options.SentDate.Before(time.Now().Add(-options.FTSRetention)) {
-		// Decide what to store in message_contents.
-		// Skip very large bodies/headers (>64KB) — the full content is always available in S3.
-		// text_body is immediately cleared by the trigger after computing text_body_tsv,
-		// so it is never actually persisted in the database.
-		const maxStoredBodySize = 64 * 1024 // 64 KB
-		// Note: sanePlaintextBody and saneRawHeaders are already sanitized via SanitizeUTF8
-
-		// Prevent PostgreSQL to_tsvector DOS vulnerability (context deadline exceeded)
-		// by deleting excessively long tokens (e.g. base64 blobs, hex dumps) that cause O(N^2)
-		// parsing behavior in the text search engine. FTS is only useful for human words anyway.
-		safeFtsBody := helpers.RemoveLongTokens(sanePlaintextBody, 128)
-		safeFtsHeaders := helpers.RemoveLongTokens(saneRawHeaders, 128)
-
-		var textBodyArg any = safeFtsBody
-		var headersArg any = safeFtsHeaders
-
-		if len(safeFtsBody) > maxStoredBodySize {
-			truncLen := maxStoredBodySize
-			for truncLen > 0 && !utf8.RuneStart(safeFtsBody[truncLen]) {
-				truncLen--
-			}
-			textBodyArg = safeFtsBody[:truncLen]
-			logger.Info("Database: truncating text_body for FTS indexing to 64KB for very large message",
-				"content_hash", truncateHash(options.ContentHash), "original_size_bytes", len(sanePlaintextBody))
-			metrics.LargeBodyStorageSkipped.Inc()
-		}
-		if len(saneRawHeaders) > maxStoredBodySize {
-			logger.Info("Database: skipping headers storage for very large headers",
-				"content_hash", truncateHash(options.ContentHash), "size_bytes", len(saneRawHeaders))
-			headersArg = ""
-			metrics.LargeBodyStorageSkipped.Inc()
-		}
-
-		// Only insert when there is actual content. A missing message_contents row is
-		// expected for old/large messages and is handled gracefully downstream (unsearchable).
-		headersStr, _ := headersArg.(string)
-		if textBodyArg != nil || headersStr != "" {
-			// Fast-path: Check if the message_contents row already exists.
-			// This avoids heavy 'ON CONFLICT DO NOTHING' ExclusiveLock contention when a
-			// bulk mailer delivers identical messages to thousands of recipients simultaneously
-			// (which can quickly exhaust the pgxpool and cause 'context deadline exceeded').
-			var exists bool
-			err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
-			if err != nil {
-				logger.Error("Database: failed to check message_contents existence", "content_hash", options.ContentHash, "err", err)
-				return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
-			}
-
-			if !exists {
-				_, err = tx.Exec(ctx, `
-					INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
-					VALUES ($1, $2, $3, $4)
-					ON CONFLICT (content_hash) DO NOTHING
-				`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
-				if err != nil {
-					// Log the actual error details for debugging
-					var pgErr *pgconn.PgError
-					if errors.As(err, &pgErr) {
-						logger.Error("Database: failed to insert message content",
-							"content_hash", options.ContentHash,
-							"err", err,
-							"pg_code", pgErr.Code,
-							"pg_message", pgErr.Message,
-							"pg_detail", pgErr.Detail)
-					} else {
-						logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
-					}
-					return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
-				}
-			}
-		}
-	}
-
 	// Check if content is already uploaded for this account (content deduplication).
 	// If so, mark this message as uploaded immediately without creating a pending_upload.
 	//
@@ -546,6 +470,101 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		}
 		logger.Info("Database: pending_upload created",
 			"content_hash", truncateHash(options.ContentHash), "account_id", upload.AccountID)
+	}
+
+	// ---- FTS INDEXING (best-effort, non-fatal) ----
+	// Insert into message_contents AFTER the critical message row and pending_upload
+	// are secured. This runs with a capped sub-context so the to_tsvector() trigger
+	// cannot exhaust the write timeout budget. If this fails, the message is still
+	// delivered and uploaded to S3 — it just won't be FTS-searchable.
+	//
+	// Skip message_contents entirely when the message is already past the FTS retention
+	// window. Creating the row would only add immediate work for the cleanup worker.
+	if options.FTSRetention == 0 || options.SentDate.IsZero() || !options.SentDate.Before(time.Now().Add(-options.FTSRetention)) {
+		// Decide what to store in message_contents.
+		// Skip very large bodies/headers (>64KB) — the full content is always available in S3.
+		// text_body is immediately cleared by the trigger after computing text_body_tsv,
+		// so it is never actually persisted in the database.
+		const maxStoredBodySize = 64 * 1024 // 64 KB
+		// Note: sanePlaintextBody and saneRawHeaders are already sanitized via SanitizeUTF8
+
+		// Prevent PostgreSQL to_tsvector DOS vulnerability (context deadline exceeded)
+		// by deleting excessively long tokens (e.g. base64 blobs, hex dumps) that cause O(N^2)
+		// parsing behavior in the text search engine. FTS is only useful for human words anyway.
+		safeFtsBody := helpers.RemoveLongTokens(sanePlaintextBody, 128)
+		safeFtsHeaders := helpers.RemoveLongTokens(saneRawHeaders, 128)
+
+		var textBodyArg any = safeFtsBody
+		var headersArg any = safeFtsHeaders
+
+		if len(safeFtsBody) > maxStoredBodySize {
+			truncLen := maxStoredBodySize
+			for truncLen > 0 && !utf8.RuneStart(safeFtsBody[truncLen]) {
+				truncLen--
+			}
+			textBodyArg = safeFtsBody[:truncLen]
+			logger.Info("Database: truncating text_body for FTS indexing to 64KB for very large message",
+				"content_hash", truncateHash(options.ContentHash), "original_size_bytes", len(sanePlaintextBody))
+			metrics.LargeBodyStorageSkipped.Inc()
+		}
+		if len(saneRawHeaders) > maxStoredBodySize {
+			logger.Info("Database: skipping headers storage for very large headers",
+				"content_hash", truncateHash(options.ContentHash), "size_bytes", len(saneRawHeaders))
+			headersArg = ""
+			metrics.LargeBodyStorageSkipped.Inc()
+		}
+
+		// Only insert when there is actual content. A missing message_contents row is
+		// expected for old/large messages and is handled gracefully downstream (unsearchable).
+		headersStr, _ := headersArg.(string)
+		if textBodyArg != nil || headersStr != "" {
+			// Use a SAVEPOINT to isolate the FTS INSERT. If the to_tsvector() trigger
+			// times out or causes an error, ROLLBACK TO SAVEPOINT restores the transaction
+			// to a clean state so the COMMIT succeeds with the critical data intact.
+			// Without this, a cancelled query puts PostgreSQL in "aborted" state and the
+			// COMMIT silently becomes a ROLLBACK, losing the message row.
+			_, spErr := tx.Exec(ctx, "SAVEPOINT fts_insert")
+			if spErr != nil {
+				logger.Warn("Database: failed to create savepoint for FTS insert (non-fatal)",
+					"content_hash", truncateHash(options.ContentHash), "err", spErr)
+			} else {
+				// Use a capped sub-context so the to_tsvector() trigger cannot exhaust
+				// the entire write timeout budget (10s max for FTS, rest for COMMIT).
+				ftsCtx, ftsCancel := context.WithTimeout(ctx, 10*time.Second)
+
+				// Fast-path: Check if the message_contents row already exists.
+				// This avoids heavy 'ON CONFLICT DO NOTHING' ExclusiveLock contention when a
+				// bulk mailer delivers identical messages to thousands of recipients simultaneously.
+				var exists bool
+				ftsOK := true
+				err = tx.QueryRow(ftsCtx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
+				if err != nil {
+					ftsOK = false
+					logger.Warn("Database: failed to check message_contents existence (non-fatal, message will be unsearchable)",
+						"content_hash", truncateHash(options.ContentHash), "err", err)
+				} else if !exists {
+					_, err = tx.Exec(ftsCtx, `
+						INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
+						VALUES ($1, $2, $3, $4)
+						ON CONFLICT (content_hash) DO NOTHING
+					`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
+					if err != nil {
+						ftsOK = false
+						logger.Warn("Database: failed to insert message content (non-fatal, message will be unsearchable)",
+							"content_hash", truncateHash(options.ContentHash), "err", err)
+					}
+				}
+				ftsCancel()
+
+				// Clean up the savepoint: RELEASE on success, ROLLBACK on failure.
+				// Use the main ctx (not ftsCtx) so this succeeds even if ftsCtx expired.
+				if ftsOK {
+					tx.Exec(ctx, "RELEASE SAVEPOINT fts_insert")
+				} else {
+					tx.Exec(ctx, "ROLLBACK TO SAVEPOINT fts_insert")
+				}
+			}
+		}
 	}
 
 	return messageRowId, uidToUse, nil
@@ -842,25 +861,40 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 		// expected for old/large messages and is handled gracefully downstream (unsearchable).
 		headersStr, _ := headersArg.(string)
 		if textBodyArg != nil || headersStr != "" {
-			_, err = tx.Exec(ctx, `
-				INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
-				VALUES ($1, $2, $3, $4)
-				ON CONFLICT (content_hash) DO NOTHING
-			`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
-			if err != nil {
-				// Log the actual error details for debugging
-				var pgErr *pgconn.PgError
-				if errors.As(err, &pgErr) {
-					logger.Error("Database: failed to insert message content",
-						"content_hash", options.ContentHash,
-						"err", err,
-						"pg_code", pgErr.Code,
-						"pg_message", pgErr.Message,
-						"pg_detail", pgErr.Detail)
-				} else {
-					logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+			// Use a SAVEPOINT to isolate the FTS INSERT (same pattern as InsertMessage).
+			_, spErr := tx.Exec(ctx, "SAVEPOINT fts_insert")
+			if spErr != nil {
+				logger.Warn("Database: failed to create savepoint for FTS insert (non-fatal)",
+					"content_hash", truncateHash(options.ContentHash), "err", spErr)
+			} else {
+				ftsCtx, ftsCancel := context.WithTimeout(ctx, 10*time.Second)
+
+				var exists bool
+				ftsOK := true
+				err = tx.QueryRow(ftsCtx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
+				if err != nil {
+					ftsOK = false
+					logger.Warn("Database: failed to check message_contents existence (non-fatal, message will be unsearchable)",
+						"content_hash", truncateHash(options.ContentHash), "err", err)
+				} else if !exists {
+					_, err = tx.Exec(ftsCtx, `
+						INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
+						VALUES ($1, $2, $3, $4)
+						ON CONFLICT (content_hash) DO NOTHING
+					`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
+					if err != nil {
+						ftsOK = false
+						logger.Warn("Database: failed to insert message content (non-fatal, message will be unsearchable)",
+							"content_hash", truncateHash(options.ContentHash), "err", err)
+					}
 				}
-				return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
+				ftsCancel()
+
+				if ftsOK {
+					tx.Exec(ctx, "RELEASE SAVEPOINT fts_insert")
+				} else {
+					tx.Exec(ctx, "ROLLBACK TO SAVEPOINT fts_insert")
+				}
 			}
 		}
 	}
