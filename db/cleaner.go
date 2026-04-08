@@ -329,16 +329,17 @@ func (d *Database) NullifyLegacyTextBodies(ctx context.Context, tx pgx.Tx, lastH
 
 	err := tx.QueryRow(ctx, `
 		WITH scan_window AS (
-			SELECT content_hash, text_body
+			SELECT content_hash
 			FROM message_contents
 			WHERE content_hash > $1
 			ORDER BY content_hash
 			LIMIT $2
 		),
 		legacy AS (
-			SELECT content_hash 
-			FROM scan_window
-			WHERE text_body IS NOT NULL
+			SELECT mc.content_hash 
+			FROM scan_window sw
+			JOIN message_contents mc ON mc.content_hash = sw.content_hash
+			WHERE mc.text_body IS NOT NULL
 			FOR UPDATE SKIP LOCKED
 			LIMIT $3
 		),
