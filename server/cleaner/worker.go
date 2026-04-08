@@ -340,6 +340,8 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 				if prunedVectorsCount < 1000 {
 					break
 				}
+				// Yield to prevent database CPU/WAL starvation for incoming LMTP requests
+				time.Sleep(1 * time.Second)
 			} else {
 				break
 			}
@@ -362,6 +364,8 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 			if nullifiedLegacyCount < 1000 {
 				break // Done: fetched less than the full batch size
 			}
+			// Yield to prevent database CPU/WAL starvation for incoming LMTP requests
+			time.Sleep(1 * time.Second)
 		} else {
 			break // Done: no legacy rows left
 		}
