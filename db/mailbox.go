@@ -654,7 +654,7 @@ func (d *Database) GetMailboxSummary(ctx context.Context, mailboxID int64) (*Mai
 			SELECT ms.seqnum FROM messages m
 			JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
 			WHERE m.mailbox_id = $1 AND (m.flags & $2) = 0
-			ORDER BY ms.seqnum LIMIT 1
+			ORDER BY m.uid LIMIT 1
 		`, mailboxID, FlagSeen).Scan(&s.FirstUnseenSeqNum)
 
 		if err != nil && err != pgx.ErrNoRows {

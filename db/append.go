@@ -430,9 +430,10 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		// by deleting excessively long tokens (e.g. base64 blobs, hex dumps) that cause O(N^2)
 		// parsing behavior in the text search engine. FTS is only useful for human words anyway.
 		safeFtsBody := helpers.RemoveLongTokens(sanePlaintextBody, 128)
+		safeFtsHeaders := helpers.RemoveLongTokens(saneRawHeaders, 128)
 
 		var textBodyArg any = safeFtsBody
-		var headersArg any = saneRawHeaders
+		var headersArg any = safeFtsHeaders
 
 		if len(safeFtsBody) > maxStoredBodySize {
 			truncLen := maxStoredBodySize
@@ -455,25 +456,38 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		// expected for old/large messages and is handled gracefully downstream (unsearchable).
 		headersStr, _ := headersArg.(string)
 		if textBodyArg != nil || headersStr != "" {
-			_, err = tx.Exec(ctx, `
-				INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
-				VALUES ($1, $2, $3, $4)
-				ON CONFLICT (content_hash) DO NOTHING
-			`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
+			// Fast-path: Check if the message_contents row already exists.
+			// This avoids heavy 'ON CONFLICT DO NOTHING' ExclusiveLock contention when a
+			// bulk mailer delivers identical messages to thousands of recipients simultaneously
+			// (which can quickly exhaust the pgxpool and cause 'context deadline exceeded').
+			var exists bool
+			err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
 			if err != nil {
-				// Log the actual error details for debugging
-				var pgErr *pgconn.PgError
-				if errors.As(err, &pgErr) {
-					logger.Error("Database: failed to insert message content",
-						"content_hash", options.ContentHash,
-						"err", err,
-						"pg_code", pgErr.Code,
-						"pg_message", pgErr.Message,
-						"pg_detail", pgErr.Detail)
-				} else {
-					logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
-				}
+				logger.Error("Database: failed to check message_contents existence", "content_hash", options.ContentHash, "err", err)
 				return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
+			}
+
+			if !exists {
+				_, err = tx.Exec(ctx, `
+					INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
+					VALUES ($1, $2, $3, $4)
+					ON CONFLICT (content_hash) DO NOTHING
+				`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
+				if err != nil {
+					// Log the actual error details for debugging
+					var pgErr *pgconn.PgError
+					if errors.As(err, &pgErr) {
+						logger.Error("Database: failed to insert message content",
+							"content_hash", options.ContentHash,
+							"err", err,
+							"pg_code", pgErr.Code,
+							"pg_message", pgErr.Message,
+							"pg_detail", pgErr.Detail)
+					} else {
+						logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+					}
+					return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
+				}
 			}
 		}
 	}

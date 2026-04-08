@@ -32,7 +32,7 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 			m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
 		FROM messages m
 		JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
-		WHERE m.mailbox_id = $1 ORDER BY ms.seqnum`
+		WHERE m.mailbox_id = $1 ORDER BY m.uid`
 
 	rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, query, mailboxID)
 	if err != nil {

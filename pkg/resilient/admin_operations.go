@@ -241,7 +241,7 @@ func (rd *ResilientDatabase) GetUserScopedObjectsForCleanupWithRetry(ctx context
 	op := func(ctx context.Context) (any, error) {
 		return rd.getOperationalDatabaseForOperation(false).GetUserScopedObjectsForCleanup(ctx, gracePeriod, batchSize)
 	}
-	result, err := rd.executeReadWithRetry(ctx, cleanupRetryConfig, timeoutRead, op)
+	result, err := rd.executeReadWithRetry(ctx, cleanupRetryConfig, timeoutSearch, op)
 	if err != nil {
 		return nil, err
 	}

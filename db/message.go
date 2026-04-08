@@ -165,12 +165,12 @@ func (db *Database) getMessagesByUIDSet(ctx context.Context, mailboxID int64, ui
 		if uidRange.Stop == imap.UID(0) {
 			// Wildcard range (e.g., 1:*)
 			rangeDesc = fmt.Sprintf("%d:*", uidRange.Start)
-			query := baseQuery + " ORDER BY ms.seqnum"
+			query := baseQuery + " ORDER BY m.uid"
 			rows, err = db.GetReadPoolWithContext(ctx).Query(ctx, query, mailboxID, uint32(uidRange.Start))
 		} else {
 			// Regular range (e.g., 1:5)
 			rangeDesc = fmt.Sprintf("%d:%d", uidRange.Start, uidRange.Stop)
-			query := baseQuery + " AND m.uid <= $3 ORDER BY ms.seqnum"
+			query := baseQuery + " AND m.uid <= $3 ORDER BY m.uid"
 			rows, err = db.GetReadPoolWithContext(ctx).Query(ctx, query, mailboxID, uint32(uidRange.Start), uint32(uidRange.Stop))
 		}
 
@@ -210,7 +210,7 @@ func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, se
 			WHERE m.mailbox_id = $1
 			  AND ms.seqnum >= $2 AND ms.seqnum <= $3
 			  AND m.uploaded = true
-			ORDER BY ms.seqnum
+			ORDER BY m.uid
 		`
 
 		rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, query, mailboxID, seqRange.Start, stopSeq)
@@ -242,7 +242,7 @@ func (db *Database) fetchAllActiveMessagesRaw(ctx context.Context, mailboxID int
 		JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
 		WHERE m.mailbox_id = $1
 		  AND m.uploaded = true
-		ORDER BY ms.seqnum
+		ORDER BY m.uid
 	`
 	rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, query, mailboxID)
 	if err != nil {
