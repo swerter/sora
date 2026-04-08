@@ -203,6 +203,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	var failedUploadsCount, deletedAccountCount, vacationCount, healthCount int64
 	var successfulDeletes []db.UserScopedObjectForCleanup
 	var orphanHashCount, finalizedAccountCount int64
+	var ftsPrunedCount, legacyNullifiedCount int64
 
 	// First handle max age restriction if configured
 	if w.maxAgeRestriction > 0 {
@@ -337,6 +338,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 			}
 
 			if prunedVectorsCount > 0 {
+				ftsPrunedCount += prunedVectorsCount
 				logger.Info("Cleanup: Pruned text_body_tsv for old message contents", "count", prunedVectorsCount, "age", w.ftsRetention)
 				if prunedVectorsCount < 1000 {
 					break
@@ -360,6 +362,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 		w.lastNullifyHash = newLastHash
 
 		if nullifiedLegacyCount > 0 {
+			legacyNullifiedCount += nullifiedLegacyCount
 			logger.Info("Cleanup: Removed legacy text bodies, reclaiming storage", "count", nullifiedLegacyCount)
 			if nullifiedLegacyCount < 1000 {
 				break // Done: fetched less than the full batch size
@@ -426,7 +429,8 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	logger.Info("Cleanup: Cycle completed", "failed_uploads", failedUploadsCount,
 		"soft_deleted_accounts", deletedAccountCount, "vacation_responses", vacationCount,
 		"health_statuses", healthCount, "s3_objects", len(successfulDeletes),
-		"orphan_hashes", orphanHashCount, "finalized_accounts", finalizedAccountCount)
+		"orphan_hashes", orphanHashCount, "finalized_accounts", finalizedAccountCount,
+		"fts_pruned", ftsPrunedCount, "legacy_nullified", legacyNullifiedCount)
 
 	return nil
 }
