@@ -287,7 +287,7 @@ func (d *Database) CleanupFailedUploads(ctx context.Context, tx pgx.Tx, gracePer
 //
 // NOTE: The trigger does NOT fire on DELETE.
 func (d *Database) PruneOldMessageVectors(ctx context.Context, tx pgx.Tx, retention time.Duration) (int64, error) {
-	const maxPruneRows = 10_000
+	const maxPruneRows = 1_000
 
 	tag, err := tx.Exec(ctx, `
 		WITH expired AS (
@@ -313,7 +313,7 @@ func (d *Database) PruneOldMessageVectors(ctx context.Context, tx pgx.Tx, retent
 // text_body fields to reclaim backend storage. Updates are batched to prevent WAL bloat.
 // The update_message_contents_tsvector trigger preserves the existing text_body_tsv.
 func (d *Database) NullifyLegacyTextBodies(ctx context.Context, tx pgx.Tx) (int64, error) {
-	const maxPruneRows = 10_000
+	const maxPruneRows = 1_000
 
 	tag, err := tx.Exec(ctx, `
 		WITH legacy AS (

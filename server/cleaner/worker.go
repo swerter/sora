@@ -327,22 +327,44 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	if w.ftsRetention > 0 {
 		// This prunes text_body_tsv and headers_tsv of old messages, completely removing search capability.
 		// This is more aggressive than source pruning - use with caution.
-		prunedVectorsCount, err := w.rdb.PruneOldMessageVectorsWithRetry(ctx, w.ftsRetention)
-		if err != nil {
-			logger.Error("Cleanup: Failed to prune old message vectors", "error", err)
-			// Continue with other cleanup tasks even if this fails
-		} else if prunedVectorsCount > 0 {
-			logger.Info("Cleanup: Pruned text_body_tsv for old message contents", "count", prunedVectorsCount, "age", w.ftsRetention)
+		// Process in batches of 1000, up to 10 times per loop to keep transactions tiny.
+		for i := 0; i < 10; i++ {
+			prunedVectorsCount, err := w.rdb.PruneOldMessageVectorsWithRetry(ctx, w.ftsRetention)
+			if err != nil {
+				logger.Error("Cleanup: Failed to prune old message vectors", "error", err)
+				break
+			}
+
+			if prunedVectorsCount > 0 {
+				logger.Info("Cleanup: Pruned text_body_tsv for old message contents", "count", prunedVectorsCount, "age", w.ftsRetention)
+				if prunedVectorsCount < 1000 {
+					break
+				}
+			} else {
+				break
+			}
 		}
 	}
 
 	// --- Phase 2a-bis: Legacy Text Body Sweeping ---
 	// Clean up legacy `text_body` stored prior to migration 000016.
-	nullifiedLegacyCount, err := w.rdb.NullifyLegacyTextBodiesWithRetry(ctx)
-	if err != nil {
-		logger.Error("Cleanup: Failed to nullify legacy text bodies", "error", err)
-	} else if nullifiedLegacyCount > 0 {
-		logger.Info("Cleanup: Removed legacy text bodies, reclaiming storage", "count", nullifiedLegacyCount)
+	// We loop up to 10 times per worker run (processing batches of 1000)
+	// so the total throughput is high without ever hitting transaction timeouts.
+	for i := 0; i < 10; i++ {
+		nullifiedLegacyCount, err := w.rdb.NullifyLegacyTextBodiesWithRetry(ctx)
+		if err != nil {
+			logger.Error("Cleanup: Failed to nullify legacy text bodies", "error", err)
+			break
+		}
+
+		if nullifiedLegacyCount > 0 {
+			logger.Info("Cleanup: Removed legacy text bodies, reclaiming storage", "count", nullifiedLegacyCount)
+			if nullifiedLegacyCount < 1000 {
+				break // Done: fetched less than the full batch size
+			}
+		} else {
+			break // Done: no legacy rows left
+		}
 	}
 
 	// --- Phase 2b: Global resource cleanup (message_contents and cache) ---
