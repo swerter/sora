@@ -117,3 +117,43 @@ func SanitizeFlags(flags []imap.Flag) []imap.Flag {
 
 	return sanitized
 }
+
+// RemoveLongTokens drops any continuous sequence of non-whitespace characters longer than maxTokenLen.
+// This prevents PostgreSQL to_tsvector from taking excessive time on pathological blocks
+// (e.g. continuous base64, hex dumps, gpg blocks) while keeping the rest of the text searchable,
+// and prevents polluting the FTS index with broken chunks.
+func RemoveLongTokens(s string, maxTokenLen int) string {
+	if len(s) == 0 {
+		return s
+	}
+
+	var buf strings.Builder
+	buf.Grow(len(s))
+
+	var currentWord []rune
+	for _, r := range s {
+		// We use standard whitespace as token boundaries.
+		// PostgreSQL splits on other punctuation too, but removing long blobs between whitespace
+		// is the safest way to target raw payloads without needing a complex lexer.
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '<' || r == '>' {
+			if len(currentWord) <= maxTokenLen {
+				for _, wr := range currentWord {
+					buf.WriteRune(wr)
+				}
+			}
+			currentWord = currentWord[:0]
+			buf.WriteRune(r)
+		} else {
+			currentWord = append(currentWord, r)
+		}
+	}
+
+	// Handle the final word
+	if len(currentWord) <= maxTokenLen {
+		for _, wr := range currentWord {
+			buf.WriteRune(wr)
+		}
+	}
+
+	return buf.String()
+}

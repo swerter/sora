@@ -425,15 +425,21 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		// so it is never actually persisted in the database.
 		const maxStoredBodySize = 64 * 1024 // 64 KB
 		// Note: sanePlaintextBody and saneRawHeaders are already sanitized via SanitizeUTF8
-		var textBodyArg any = sanePlaintextBody
+
+		// Prevent PostgreSQL to_tsvector DOS vulnerability (context deadline exceeded)
+		// by deleting excessively long tokens (e.g. base64 blobs, hex dumps) that cause O(N^2)
+		// parsing behavior in the text search engine. FTS is only useful for human words anyway.
+		safeFtsBody := helpers.RemoveLongTokens(sanePlaintextBody, 128)
+
+		var textBodyArg any = safeFtsBody
 		var headersArg any = saneRawHeaders
 
-		if len(sanePlaintextBody) > maxStoredBodySize {
+		if len(safeFtsBody) > maxStoredBodySize {
 			truncLen := maxStoredBodySize
-			for truncLen > 0 && !utf8.RuneStart(sanePlaintextBody[truncLen]) {
+			for truncLen > 0 && !utf8.RuneStart(safeFtsBody[truncLen]) {
 				truncLen--
 			}
-			textBodyArg = sanePlaintextBody[:truncLen]
+			textBodyArg = safeFtsBody[:truncLen]
 			logger.Info("Database: truncating text_body for FTS indexing to 64KB for very large message",
 				"content_hash", truncateHash(options.ContentHash), "original_size_bytes", len(sanePlaintextBody))
 			metrics.LargeBodyStorageSkipped.Inc()
