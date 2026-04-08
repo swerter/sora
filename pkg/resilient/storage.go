@@ -120,7 +120,7 @@ func (rs *ResilientS3Storage) classifyRetryable(err error, retry404 bool) bool {
 		return false
 	}
 
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, os.ErrDeadlineExceeded) {
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
 
@@ -160,6 +160,8 @@ func (rs *ResilientS3Storage) classifyRetryable(err error, retry404 bool) bool {
 		"bad gateway",
 		"gateway timeout",
 		"timeout",
+		"deadline exceeded",
+		"canceled",
 		"slowdown",
 		"throttling",
 		"rate limit",

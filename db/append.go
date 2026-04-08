@@ -528,22 +528,26 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 				logger.Warn("Database: failed to create savepoint for FTS insert (non-fatal)",
 					"content_hash", truncateHash(options.ContentHash), "err", spErr)
 			} else {
-				// Use a capped sub-context so the to_tsvector() trigger cannot exhaust
-				// the entire write timeout budget (10s max for FTS, rest for COMMIT).
-				ftsCtx, ftsCancel := context.WithTimeout(ctx, 10*time.Second)
+				// Use PostgreSQL's native statement_timeout instead of Go's context.WithTimeout.
+				// If a Go context times out during a query, pgx tries to send a CancelRequest.
+				// If that takes too long or fails, pgx forcefully closes the underlying TCP connection,
+				// which fatally poisons the entire transaction, causing `conn closed` errors downstream.
+				// Using `SET LOCAL statement_timeout` cleanly halts the query on the database side
+				// without jeopardizing the pgx connection.
+				_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = 10000") // 10 seconds
 
 				// Fast-path: Check if the message_contents row already exists.
 				// This avoids heavy 'ON CONFLICT DO NOTHING' ExclusiveLock contention when a
 				// bulk mailer delivers identical messages to thousands of recipients simultaneously.
 				var exists bool
 				ftsOK := true
-				err = tx.QueryRow(ftsCtx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
+				err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
 				if err != nil {
 					ftsOK = false
 					logger.Warn("Database: failed to check message_contents existence (non-fatal, message will be unsearchable)",
 						"content_hash", truncateHash(options.ContentHash), "err", err)
 				} else if !exists {
-					_, err = tx.Exec(ftsCtx, `
+					_, err = tx.Exec(ctx, `
 						INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
 						VALUES ($1, $2, $3, $4)
 						ON CONFLICT (content_hash) DO NOTHING
@@ -554,11 +558,10 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 							"content_hash", truncateHash(options.ContentHash), "err", err)
 					}
 				}
-				ftsCancel()
 
 				// Clean up the savepoint: RELEASE on success, ROLLBACK on failure.
-				// Use the main ctx (not ftsCtx) so this succeeds even if ftsCtx expired.
 				if ftsOK {
+					_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = 0")
 					tx.Exec(ctx, "RELEASE SAVEPOINT fts_insert")
 				} else {
 					tx.Exec(ctx, "ROLLBACK TO SAVEPOINT fts_insert")
@@ -867,17 +870,17 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 				logger.Warn("Database: failed to create savepoint for FTS insert (non-fatal)",
 					"content_hash", truncateHash(options.ContentHash), "err", spErr)
 			} else {
-				ftsCtx, ftsCancel := context.WithTimeout(ctx, 10*time.Second)
+				_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = 10000") // 10 seconds
 
 				var exists bool
 				ftsOK := true
-				err = tx.QueryRow(ftsCtx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
+				err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
 				if err != nil {
 					ftsOK = false
 					logger.Warn("Database: failed to check message_contents existence (non-fatal, message will be unsearchable)",
 						"content_hash", truncateHash(options.ContentHash), "err", err)
 				} else if !exists {
-					_, err = tx.Exec(ftsCtx, `
+					_, err = tx.Exec(ctx, `
 						INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
 						VALUES ($1, $2, $3, $4)
 						ON CONFLICT (content_hash) DO NOTHING
@@ -888,9 +891,9 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 							"content_hash", truncateHash(options.ContentHash), "err", err)
 					}
 				}
-				ftsCancel()
 
 				if ftsOK {
+					_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = 0")
 					tx.Exec(ctx, "RELEASE SAVEPOINT fts_insert")
 				} else {
 					tx.Exec(ctx, "ROLLBACK TO SAVEPOINT fts_insert")
