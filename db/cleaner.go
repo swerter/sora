@@ -643,7 +643,7 @@ func (d *Database) GetMessagesForMailboxAndChildren(ctx context.Context, account
 	query := `
 		SELECT
 			m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart,
-			m.uploaded, m.flags, m.custom_flags, m.internal_date, m.size, m.body_structure,
+			m.uploaded, m.flags, m.custom_flags, m.internal_date, m.size,
 			m.created_modseq, m.updated_modseq, m.expunged_modseq, 0 as seqnum,
 			m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
 		FROM messages m
@@ -659,7 +659,7 @@ func (d *Database) GetMessagesForMailboxAndChildren(ctx context.Context, account
 	}
 	defer rows.Close()
 
-	return scanMessages(rows)
+	return scanMessages(rows, false)
 }
 
 // PurgeMessagesByIDs permanently deletes messages by their IDs
@@ -694,7 +694,7 @@ func (d *Database) GetMessagesForAccount(ctx context.Context, accountID int64) (
 	query := `
 		SELECT
 			m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart,
-			m.uploaded, m.flags, m.custom_flags, m.internal_date, m.size, m.body_structure,
+			m.uploaded, m.flags, m.custom_flags, m.internal_date, m.size,
 			m.created_modseq, m.updated_modseq, m.expunged_modseq, 0 as seqnum,
 			m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
 		FROM messages m
@@ -708,7 +708,7 @@ func (d *Database) GetMessagesForAccount(ctx context.Context, accountID int64) (
 	}
 	defer rows.Close()
 
-	return scanMessages(rows)
+	return scanMessages(rows, false)
 }
 
 // ExpungeAllMessagesForAccount marks all messages for an account as expunged

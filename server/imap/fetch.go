@@ -128,7 +128,8 @@ func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 	decodedNumSet = s.decodeNumSetLocked(numSet)
 	release()
 
-	messages, err := s.server.rdb.GetMessagesByNumSetWithRetry(s.ctx, selectedMailboxID, decodedNumSet)
+	needsBodyStructure := options.BodyStructure != nil
+	messages, err := s.server.rdb.GetMessagesByNumSetWithRetry(s.ctx, selectedMailboxID, decodedNumSet, needsBodyStructure)
 	if err != nil {
 		recordMetrics("failure")
 		return s.internalError("failed to retrieve messages: %v", err)
@@ -141,7 +142,7 @@ func (s *IMAPSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 		if _, isSeqSet := numSet.(imap.SeqSet); isSeqSet {
 			// Re-decode and re-fetch to ensure consistency
 			decodedNumSet = s.decodeNumSet(numSet) // This will re-lock, but it's a rare case
-			messages, err = s.server.rdb.GetMessagesByNumSetWithRetry(s.ctx, selectedMailboxID, decodedNumSet)
+			messages, err = s.server.rdb.GetMessagesByNumSetWithRetry(s.ctx, selectedMailboxID, decodedNumSet, needsBodyStructure)
 			if err != nil {
 				recordMetrics("failure")
 				return s.internalError("failed to retrieve messages: %v", err)
@@ -286,29 +287,34 @@ func (s *IMAPSession) writeMessageFetchData(w *imapserver.FetchWriter, msg *db.M
 		}
 	}
 	if options.BodyStructure != nil {
-		// Validate body structure from database to prevent panics on malformed data
-		if err := helpers.ValidateBodyStructure(&msg.BodyStructure); err != nil {
-			s.DebugLog("invalid body structure from database, using fallback", "uid", msg.UID, "error", err)
-			// Create fallback structure (always with Extended field to match imapserver.ExtractBodyStructure behavior)
-			fallback := &imap.BodyStructureSinglePart{
-				Type:     "text",
-				Subtype:  "plain",
-				Size:     uint32(msg.Size),
-				Extended: &imap.BodyStructureSinglePartExt{}, // Always populate Extended
-			}
-			var fallbackBS imap.BodyStructure = fallback
-			if err := s.writeBodyStructure(m, &fallbackBS); err != nil {
-				return err
-			}
+		var bs *imap.BodyStructure
+
+		// Use pre-loaded body structure from the bulk query if available,
+		// otherwise lazy-fetch it (fallback for code paths that don't pre-load).
+		if msg.BodyStructure != nil {
+			bs = msg.BodyStructure
 		} else {
-			// Ensure Extended field is populated if client requested extended BODYSTRUCTURE
-			bs := msg.BodyStructure
-			if options.BodyStructure.Extended {
-				bs = ensureExtendedBodyStructure(bs)
+			var err error
+			bs, err = s.server.rdb.GetMessageBodyStructureWithRetry(s.ctx, msg.UID, selectedMailboxID)
+			if err != nil {
+				s.WarnLog("failed to fetch body structure, using fallback", "uid", msg.UID, "error", err)
+				fallback := &imap.BodyStructureSinglePart{
+					Type:     "text",
+					Subtype:  "plain",
+					Size:     uint32(msg.Size),
+					Extended: &imap.BodyStructureSinglePartExt{},
+				}
+				var fallbackBS imap.BodyStructure = fallback
+				bs = &fallbackBS
 			}
-			if err := s.writeBodyStructure(m, &bs); err != nil {
-				return err
-			}
+		}
+
+		if options.BodyStructure.Extended {
+			extended := ensureExtendedBodyStructure(*bs)
+			bs = &extended
+		}
+		if err := s.writeBodyStructure(m, bs); err != nil {
+			return err
 		}
 	}
 

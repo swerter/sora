@@ -489,7 +489,7 @@ func (db *Database) getMessagesQueryExecutor(ctx context.Context, mailboxID int6
 		const simpleQuery = `			
 			SELECT 
 				m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
-				m.internal_date, m.size, m.body_structure, m.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
+				m.internal_date, m.size, m.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
 				m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
 			FROM messages m
 			JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
@@ -520,7 +520,7 @@ func (db *Database) getMessagesQueryExecutor(ctx context.Context, mailboxID int6
 				m.id, m.uid,
 				ms.seqnum,
 				m.account_id, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
-				m.internal_date, m.size, m.body_structure, m.created_modseq, m.updated_modseq, m.expunged_modseq,
+				m.internal_date, m.size, m.created_modseq, m.updated_modseq, m.expunged_modseq,
 				m.flags_changed_at, m.subject, m.sent_date, m.message_id,
 				m.in_reply_to, m.recipients_json, mc.text_body_tsv, mc.headers_tsv,
 				m.subject_sort, m.from_name_sort, m.from_email_sort, m.to_name_sort, m.to_email_sort, m.cc_email_sort
@@ -531,7 +531,7 @@ func (db *Database) getMessagesQueryExecutor(ctx context.Context, mailboxID int6
 		)
 		SELECT 
 			id, account_id, uid, mailbox_id, content_hash, s3_domain, s3_localpart, uploaded, flags, custom_flags,
-			internal_date, size, body_structure, created_modseq, updated_modseq, expunged_modseq, seqnum,
+			internal_date, size, created_modseq, updated_modseq, expunged_modseq, seqnum,
 			flags_changed_at, subject, sent_date, message_id, in_reply_to, recipients_json
 		FROM message_seqs`
 		finalQueryString = fmt.Sprintf("%s WHERE %s %s LIMIT %d", complexQuery, whereCondition, orderByClause, resultLimit)
@@ -555,7 +555,7 @@ func (db *Database) getMessagesQueryExecutor(ctx context.Context, mailboxID int6
 	}
 	defer rows.Close()
 
-	messages, err := scanMessages(rows)
+	messages, err := scanMessages(rows, false)
 	if err != nil {
 		return nil, fmt.Errorf("getMessagesQueryExecutor: failed to scan messages: %w", err)
 	}

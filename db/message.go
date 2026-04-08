@@ -32,7 +32,7 @@ type Message struct {
 	SentDate       time.Time  // The date the message was sent
 	Size           int        // Size of the message in bytes
 	MessageID      string     // Unique Message-ID from the message headers
-	BodyStructure  imap.BodyStructure
+	BodyStructure  *imap.BodyStructure
 	CreatedModSeq  int64
 	UpdatedModSeq  *int64
 	InReplyTo      string
@@ -119,9 +119,10 @@ func BitwiseToFlags(bitwiseFlags int) []imap.Flag {
 	return flags
 }
 
-func (db *Database) GetMessagesByNumSet(ctx context.Context, mailboxID int64, numSet imap.NumSet) ([]Message, error) {
+func (db *Database) GetMessagesByNumSet(ctx context.Context, mailboxID int64, numSet imap.NumSet, includeBodyStructure ...bool) ([]Message, error) {
+	includeBS := len(includeBodyStructure) > 0 && includeBodyStructure[0]
 	if uidSet, ok := numSet.(imap.UIDSet); ok {
-		messages, err := db.getMessagesByUIDSet(ctx, mailboxID, uidSet)
+		messages, err := db.getMessagesByUIDSet(ctx, mailboxID, uidSet, includeBS)
 		if err != nil {
 			return nil, err
 		}
@@ -129,7 +130,7 @@ func (db *Database) GetMessagesByNumSet(ctx context.Context, mailboxID int64, nu
 	}
 
 	if seqSet, ok := numSet.(imap.SeqSet); ok {
-		messages, err := db.getMessagesBySeqSet(ctx, mailboxID, seqSet)
+		messages, err := db.getMessagesBySeqSet(ctx, mailboxID, seqSet, includeBS)
 		if err != nil {
 			return nil, err
 		}
@@ -139,23 +140,28 @@ func (db *Database) GetMessagesByNumSet(ctx context.Context, mailboxID int64, nu
 	return nil, fmt.Errorf("unsupported NumSet type: %T", numSet)
 }
 
-func (db *Database) getMessagesByUIDSet(ctx context.Context, mailboxID int64, uidSet imap.UIDSet) ([]Message, error) {
+func (db *Database) getMessagesByUIDSet(ctx context.Context, mailboxID int64, uidSet imap.UIDSet, includeBodyStructure bool) ([]Message, error) {
 	var messages []Message
+
+	bsCol := ""
+	if includeBodyStructure {
+		bsCol = "m.body_structure, "
+	}
 
 	for _, uidRange := range uidSet {
 		// Filter to uploaded messages only.  A message that is not yet uploaded to S3
 		// has its body on local disk only — on any other node its body is inaccessible
 		// and FETCH would return a misleading empty literal.  Only serving uploaded
 		// messages ensures consistent, correct behaviour across all nodes.
-		baseQuery := `
+		baseQuery := fmt.Sprintf(`
 			SELECT
 				m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
-				m.internal_date, m.size, m.body_structure, m.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
+				m.internal_date, m.size, %sm.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
 				m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
 			FROM messages m
 			JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
 			WHERE m.mailbox_id = $1 AND m.uid >= $2 AND m.uploaded = true
-		`
+		`, bsCol)
 
 		var rows pgx.Rows
 		var err error
@@ -178,7 +184,7 @@ func (db *Database) getMessagesByUIDSet(ctx context.Context, mailboxID int64, ui
 			return nil, fmt.Errorf("failed to query messages with UID range %s: %v", rangeDesc, err)
 		}
 
-		rangeMessages, err := scanMessages(rows)
+		rangeMessages, err := scanMessages(rows, includeBodyStructure)
 		if err != nil {
 			return nil, err
 		}
@@ -188,10 +194,15 @@ func (db *Database) getMessagesByUIDSet(ctx context.Context, mailboxID int64, ui
 	return messages, nil
 }
 
-func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, seqSet imap.SeqSet) ([]Message, error) {
+func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, seqSet imap.SeqSet, includeBodyStructure bool) ([]Message, error) {
 	if len(seqSet) == 1 && seqSet[0].Start == 1 && (seqSet[0].Stop == 0) {
 		log.Printf("Database: SeqSet includes all messages (1:*) for mailbox %d", mailboxID)
-		return db.fetchAllActiveMessagesRaw(ctx, mailboxID)
+		return db.fetchAllActiveMessagesRaw(ctx, mailboxID, includeBodyStructure)
+	}
+
+	bsCol := ""
+	if includeBodyStructure {
+		bsCol = "m.body_structure, "
 	}
 
 	var allMessages []Message
@@ -200,10 +211,10 @@ func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, se
 		stopSeq := seqRange.Stop
 
 		// Filter to uploaded messages only (see getMessagesByUIDSet for the rationale).
-		query := `			
+		query := fmt.Sprintf(`
 			SELECT 
 				m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
-				m.internal_date, m.size, m.body_structure, m.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
+				m.internal_date, m.size, %sm.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
 				m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
 			FROM messages m
 			JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
@@ -211,7 +222,7 @@ func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, se
 			  AND ms.seqnum >= $2 AND ms.seqnum <= $3
 			  AND m.uploaded = true
 			ORDER BY m.uid
-		`
+		`, bsCol)
 
 		rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, query, mailboxID, seqRange.Start, stopSeq)
 		if err != nil {
@@ -219,7 +230,7 @@ func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, se
 				seqRange.Start, stopSeq, err)
 		}
 
-		rangeMessages, err := scanMessages(rows)
+		rangeMessages, err := scanMessages(rows, includeBodyStructure)
 		if err != nil {
 			return nil, err
 		}
@@ -229,78 +240,72 @@ func (db *Database) getMessagesBySeqSet(ctx context.Context, mailboxID int64, se
 	return allMessages, nil
 }
 
-func (db *Database) fetchAllActiveMessagesRaw(ctx context.Context, mailboxID int64) ([]Message, error) {
+func (db *Database) fetchAllActiveMessagesRaw(ctx context.Context, mailboxID int64, includeBodyStructure bool) ([]Message, error) {
 	// Filter to uploaded messages only (same as getMessagesBySeqSet / getMessagesByUIDSet).
 	// This path handles the rare edge-case SeqSet "1:*" where the wildcard was not
 	// resolved (session count == 0).  See getMessagesByUIDSet for the full rationale.
-	query := `
+	bsCol := ""
+	if includeBodyStructure {
+		bsCol = "m.body_structure, "
+	}
+
+	query := fmt.Sprintf(`
 		SELECT 
 			m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
-			m.internal_date, m.size, m.body_structure, m.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
+			m.internal_date, m.size, %sm.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
 			m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
 		FROM messages m
 		JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
 		WHERE m.mailbox_id = $1
 		  AND m.uploaded = true
 		ORDER BY m.uid
-	`
+	`, bsCol)
 	rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, query, mailboxID)
 	if err != nil {
 		return nil, fmt.Errorf("fetchAllActiveMessagesRaw: failed to query: %w", err)
 	}
-	return scanMessages(rows)
+	return scanMessages(rows, includeBodyStructure)
 }
 
-func scanMessages(rows pgx.Rows) ([]Message, error) {
+func scanMessages(rows pgx.Rows, includeBodyStructure bool) ([]Message, error) {
 	defer rows.Close()
 
 	var messages []Message
 	for rows.Next() {
 		var msg Message
-		var bodyStructureBytes []byte
 		var customFlagsJSON []byte
 		var recipientsJSON []byte
+		var bodyStructureBytes []byte
 
-		if err := rows.Scan(&msg.ID, &msg.AccountID, &msg.UID, &msg.MailboxID, &msg.ContentHash,
+		// Build scan args dynamically — body_structure is only present when includeBodyStructure is true.
+		scanArgs := []any{
+			&msg.ID, &msg.AccountID, &msg.UID, &msg.MailboxID, &msg.ContentHash,
 			&msg.S3Domain, &msg.S3Localpart, &msg.IsUploaded, &msg.BitwiseFlags, &customFlagsJSON,
-			&msg.InternalDate, &msg.Size, &bodyStructureBytes, &msg.CreatedModSeq, &msg.UpdatedModSeq,
+			&msg.InternalDate, &msg.Size,
+		}
+		if includeBodyStructure {
+			scanArgs = append(scanArgs, &bodyStructureBytes)
+		}
+		scanArgs = append(scanArgs,
+			&msg.CreatedModSeq, &msg.UpdatedModSeq,
 			&msg.ExpungedModSeq, &msg.Seq, &msg.FlagsChangedAt, &msg.Subject, &msg.SentDate, &msg.MessageID,
-			&msg.InReplyTo, &recipientsJSON); err != nil {
+			&msg.InReplyTo, &recipientsJSON,
+		)
+
+		if err := rows.Scan(scanArgs...); err != nil {
 			return nil, fmt.Errorf("failed to scan message: %v", err)
 		}
-		var bodyStructure *imap.BodyStructure
 
-		// Always attempt to deserialize, but fall back to default on any error
-		if len(bodyStructureBytes) > 0 {
-			if bs, err := helpers.DeserializeBodyStructureGob(bodyStructureBytes); err == nil {
-				// Validate the deserialized structure (e.g., multipart with no children)
-				if validateErr := helpers.ValidateBodyStructure(bs); validateErr != nil {
-					log.Printf("Database: WARNING - account_id=%d mailbox_id=%d UID=%d content_hash=%s has invalid body_structure (%v), using default",
-						msg.AccountID, msg.MailboxID, msg.UID, msg.ContentHash, validateErr)
-					bodyStructure = nil // Force fallback
-				} else {
-					bodyStructure = bs
-				}
-			}
+		if includeBodyStructure {
+			msg.BodyStructure = deserializeBodyStructure(bodyStructureBytes, msg.Size, msg.AccountID, msg.MailboxID, msg.UID, msg.ContentHash)
 		}
+		// When !includeBodyStructure, msg.BodyStructure remains nil.
+		// Callers that need it (e.g. FETCH BODYSTRUCTURE) will lazy-fetch via GetMessageBodyStructure.
 
-		// If deserialization failed, validation failed, or data was empty, create a safe default
-		if bodyStructure == nil {
-			log.Printf("Database: WARNING - account_id=%d mailbox_id=%d UID=%d content_hash=%s has invalid or empty body_structure, using default",
-				msg.AccountID, msg.MailboxID, msg.UID, msg.ContentHash)
-			defaultBS := &imap.BodyStructureSinglePart{
-				Type:    "text",
-				Subtype: "plain",
-				Size:    uint32(msg.Size), // Use the actual message size
-			}
-			var bs imap.BodyStructure = defaultBS
-			bodyStructure = &bs
-		}
 		if err := json.Unmarshal(customFlagsJSON, &msg.CustomFlags); err != nil {
 			log.Printf("Database: ERROR - failed unmarshalling custom_flags for UID %d: %v. JSON: %s", msg.UID, err, string(customFlagsJSON))
 		}
 		msg.RecipientsJSON = recipientsJSON
-		msg.BodyStructure = *bodyStructure
 		messages = append(messages, msg)
 	}
 
@@ -311,6 +316,52 @@ func scanMessages(rows pgx.Rows) ([]Message, error) {
 	return messages, nil
 }
 
+// deserializeBodyStructure deserializes and validates a body_structure blob, returning a fallback on any error.
+func deserializeBodyStructure(data []byte, msgSize int, accountID, mailboxID int64, uid imap.UID, contentHash string) *imap.BodyStructure {
+	if len(data) > 0 {
+		bs, err := helpers.DeserializeBodyStructureGob(data)
+		if err != nil {
+			log.Printf("Database: WARNING - account_id=%d mailbox_id=%d UID=%d content_hash=%s: failed to deserialize body_structure: %v",
+				accountID, mailboxID, uid, contentHash, err)
+		} else if validateErr := helpers.ValidateBodyStructure(bs); validateErr != nil {
+			log.Printf("Database: WARNING - account_id=%d mailbox_id=%d UID=%d content_hash=%s: invalid body_structure: %v",
+				accountID, mailboxID, uid, contentHash, validateErr)
+		} else {
+			return bs
+		}
+	}
+
+	// Fallback: safe default with Extended populated for BODYSTRUCTURE compatibility.
+	defaultBS := &imap.BodyStructureSinglePart{
+		Type:     "text",
+		Subtype:  "plain",
+		Size:     uint32(msgSize),
+		Extended: &imap.BodyStructureSinglePartExt{},
+	}
+	var bs imap.BodyStructure = defaultBS
+	return &bs
+}
+
+// GetMessageBodyStructure fetches the body structure of a single message individually.
+func (db *Database) GetMessageBodyStructure(ctx context.Context, uid imap.UID, mailboxID int64) (*imap.BodyStructure, error) {
+	var bodyStructureBytes []byte
+	var size int
+	var accountID int64
+	var contentHash string
+
+	err := db.GetReadPoolWithContext(ctx).QueryRow(ctx, `
+		SELECT body_structure, size, account_id, content_hash
+		FROM messages
+		WHERE mailbox_id = $1 AND uid = $2
+	`, mailboxID, uid).Scan(&bodyStructureBytes, &size, &accountID, &contentHash)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve body_structure: %w", err)
+	}
+
+	return deserializeBodyStructure(bodyStructureBytes, size, accountID, mailboxID, uid, contentHash), nil
+}
+
 func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag imap.Flag) ([]Message, error) {
 	// Convert the IMAP flag to its corresponding bitwise value
 	bitwiseFlag := FlagToBitwise(flag)
@@ -319,7 +370,7 @@ func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag
 	rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, `
 		SELECT
 			m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
-			m.internal_date, m.size, m.body_structure, m.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
+			m.internal_date, m.size, m.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
 			m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
 		FROM messages m
 		JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
@@ -331,7 +382,7 @@ func (db *Database) GetMessagesByFlag(ctx context.Context, mailboxID int64, flag
 	defer rows.Close()
 
 	// Use scanMessages helper which correctly handles all fields including custom_flags
-	messages, err := scanMessages(rows)
+	messages, err := scanMessages(rows, false)
 	if err != nil {
 		return nil, fmt.Errorf("GetMessagesByFlag: failed to scan messages: %w", err)
 	}

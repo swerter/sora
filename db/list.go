@@ -28,7 +28,7 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 	query := `
 		SELECT 
 			m.id, m.account_id, m.uid, m.mailbox_id, m.content_hash, m.s3_domain, m.s3_localpart, m.uploaded, m.flags, m.custom_flags,
-			m.internal_date, m.size, m.body_structure, m.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
+			m.internal_date, m.size, m.created_modseq, m.updated_modseq, m.expunged_modseq, ms.seqnum,
 			m.flags_changed_at, m.subject, m.sent_date, m.message_id, m.in_reply_to, m.recipients_json
 		FROM messages m
 		JOIN message_sequences ms ON m.mailbox_id = ms.mailbox_id AND m.uid = ms.uid
@@ -38,7 +38,7 @@ func (db *Database) ListMessages(ctx context.Context, mailboxID int64) ([]Messag
 	if err != nil {
 		return nil, fmt.Errorf("failed to query messages: %v", err)
 	}
-	messages, err = scanMessages(rows) // scanMessages will close rows
+	messages, err = scanMessages(rows, false) // scanMessages will close rows
 	if err != nil {
 		return nil, fmt.Errorf("ListMessages: failed to scan messages: %w", err)
 	}

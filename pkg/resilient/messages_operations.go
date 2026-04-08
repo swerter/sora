@@ -114,6 +114,17 @@ func (rd *ResilientDatabase) GetMessageTextBodyWithRetry(ctx context.Context, ui
 	return result.(string), nil
 }
 
+func (rd *ResilientDatabase) GetMessageBodyStructureWithRetry(ctx context.Context, uid imap.UID, mailboxID int64) (*imap.BodyStructure, error) {
+	op := func(ctx context.Context) (any, error) {
+		return rd.getOperationalDatabaseForOperation(false).GetMessageBodyStructure(ctx, uid, mailboxID)
+	}
+	result, err := rd.executeReadWithRetry(ctx, readRetryConfig, timeoutRead, op)
+	if err != nil {
+		return nil, err
+	}
+	return result.(*imap.BodyStructure), nil
+}
+
 func (rd *ResilientDatabase) GetMessagesSorted(ctx context.Context, mailboxID int64, criteria *imap.SearchCriteria, sortCriteria []imap.SortCriterion, limit int) ([]db.Message, error) {
 	op := func(ctx context.Context) (any, error) {
 		return rd.getOperationalDatabaseForOperation(false).GetMessagesSorted(ctx, mailboxID, criteria, sortCriteria, limit)
