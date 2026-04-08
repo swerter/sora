@@ -120,7 +120,7 @@ func (rs *ResilientS3Storage) classifyRetryable(err error, retry404 bool) bool {
 		return false
 	}
 
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 
@@ -150,6 +150,7 @@ func (rs *ResilientS3Storage) classifyRetryable(err error, retry404 bool) bool {
 	retryableErrors := []string{
 		"connection refused",
 		"connection reset",
+		"connection aborted",
 		"connection timeout",
 		"i/o timeout",
 		"network unreachable",
@@ -166,6 +167,9 @@ func (rs *ResilientS3Storage) classifyRetryable(err error, retry404 bool) bool {
 		"throttling",
 		"rate limit",
 		"closed network connection",
+		"eof",
+		"broken pipe",
+		"reset by peer",
 	}
 
 	for _, retryable := range retryableErrors {

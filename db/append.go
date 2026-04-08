@@ -528,43 +528,67 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 				logger.Warn("Database: failed to create savepoint for FTS insert (non-fatal)",
 					"content_hash", truncateHash(options.ContentHash), "err", spErr)
 			} else {
-				// Use PostgreSQL's native statement_timeout instead of Go's context.WithTimeout.
-				// If a Go context times out during a query, pgx tries to send a CancelRequest.
-				// If that takes too long or fails, pgx forcefully closes the underlying TCP connection,
-				// which fatally poisons the entire transaction, causing `conn closed` errors downstream.
-				// Using `SET LOCAL statement_timeout` cleanly halts the query on the database side
-				// without jeopardizing the pgx connection.
-				_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = 10000") // 10 seconds
+				// Give FTS its own independent 10s budget. The parent ctx may have only
+				// a few seconds left (write_timeout is 15s and the message INSERT already
+				// consumed part of it). Without this, the Go context expires before
+				// PostgreSQL's statement_timeout, causing "context deadline exceeded".
+				ftsCtx, ftsCancel := context.WithTimeout(context.Background(), 10*time.Second)
 
-				// Fast-path: Check if the message_contents row already exists.
-				// This avoids heavy 'ON CONFLICT DO NOTHING' ExclusiveLock contention when a
-				// bulk mailer delivers identical messages to thousands of recipients simultaneously.
-				var exists bool
-				ftsOK := true
-				err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
+				// Also set PostgreSQL's statement_timeout as a server-side safety net.
+				_, _ = tx.Exec(ftsCtx, "SET LOCAL statement_timeout = 10000") // 10 seconds
+
+				// Prevent lock contention pile-ups during parallel LMTP delivery to multiple
+				// recipients by taking a non-blocking advisory lock on the content_hash.
+				// hashtext() deterministically maps the string to a 32-bit integer.
+				var lockAcquired bool
+				err = tx.QueryRow(ftsCtx, "SELECT pg_try_advisory_xact_lock(hashtext($1), 0)", options.ContentHash).Scan(&lockAcquired)
+
 				if err != nil {
-					ftsOK = false
-					logger.Warn("Database: failed to check message_contents existence (non-fatal, message will be unsearchable)",
-						"content_hash", truncateHash(options.ContentHash), "err", err)
-				} else if !exists {
-					_, err = tx.Exec(ctx, `
-						INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
-						VALUES ($1, $2, $3, $4)
-						ON CONFLICT (content_hash) DO NOTHING
-					`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
+					logger.Warn("Database: failed to attempt advisory lock for FTS (non-fatal)", "err", err)
+					// Proceed without lock to degrade gracefully
+					lockAcquired = true
+				}
+
+				ftsOK := true
+				if !lockAcquired {
+					// Another parallel transaction is currently inserting this exact content_hash.
+					// We can assume they'll succeed and we bypass the slow row lock.
+					logger.Info("Database: skipping FTS insert due to concurrent indexing (advisory lock held)", "content_hash", truncateHash(options.ContentHash))
+				} else {
+					// Fast-path: Check if the message_contents row already exists.
+					var exists bool
+					err = tx.QueryRow(ftsCtx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
 					if err != nil {
 						ftsOK = false
-						logger.Warn("Database: failed to insert message content (non-fatal, message will be unsearchable)",
+						logger.Warn("Database: failed to check message_contents existence (non-fatal, message will be unsearchable)",
 							"content_hash", truncateHash(options.ContentHash), "err", err)
+					} else if !exists {
+						_, err = tx.Exec(ftsCtx, `
+							INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
+							VALUES ($1, $2, $3, $4)
+							ON CONFLICT (content_hash) DO NOTHING
+						`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
+						if err != nil {
+							ftsOK = false
+							logger.Warn("Database: failed to insert message content (non-fatal, message will be unsearchable)",
+								"content_hash", truncateHash(options.ContentHash), "err", err)
+						}
 					}
 				}
 
+				ftsCancel()
+
 				// Clean up the savepoint: RELEASE on success, ROLLBACK on failure.
+				// Use context.Background() — the ftsCtx may be expired and the parent
+				// ctx may also be expired. These are fast control-flow commands that
+				// must always succeed to keep the transaction in a clean state.
+				cleanupCtx := context.Background()
 				if ftsOK {
-					_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = 0")
-					tx.Exec(ctx, "RELEASE SAVEPOINT fts_insert")
+					_, _ = tx.Exec(cleanupCtx, "SET LOCAL statement_timeout = 0")
+					_, _ = tx.Exec(cleanupCtx, "RELEASE SAVEPOINT fts_insert")
 				} else {
-					tx.Exec(ctx, "ROLLBACK TO SAVEPOINT fts_insert")
+					_, _ = tx.Exec(cleanupCtx, "ROLLBACK TO SAVEPOINT fts_insert")
+					_, _ = tx.Exec(cleanupCtx, "SET LOCAL statement_timeout = 0")
 				}
 			}
 		}
@@ -870,33 +894,52 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 				logger.Warn("Database: failed to create savepoint for FTS insert (non-fatal)",
 					"content_hash", truncateHash(options.ContentHash), "err", spErr)
 			} else {
-				_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = 10000") // 10 seconds
+				// Give FTS its own independent 10s budget (see InsertMessage for rationale).
+				ftsCtx, ftsCancel := context.WithTimeout(context.Background(), 10*time.Second)
 
-				var exists bool
-				ftsOK := true
-				err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
+				_, _ = tx.Exec(ftsCtx, "SET LOCAL statement_timeout = 10000") // 10 seconds
+
+				var lockAcquired bool
+				err = tx.QueryRow(ftsCtx, "SELECT pg_try_advisory_xact_lock(hashtext($1), 0)", options.ContentHash).Scan(&lockAcquired)
 				if err != nil {
-					ftsOK = false
-					logger.Warn("Database: failed to check message_contents existence (non-fatal, message will be unsearchable)",
-						"content_hash", truncateHash(options.ContentHash), "err", err)
-				} else if !exists {
-					_, err = tx.Exec(ctx, `
-						INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
-						VALUES ($1, $2, $3, $4)
-						ON CONFLICT (content_hash) DO NOTHING
-					`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
+					logger.Warn("Database: failed to attempt advisory lock for FTS (non-fatal)", "err", err)
+					lockAcquired = true // Proceed without lock to degrade gracefully
+				}
+
+				ftsOK := true
+				if !lockAcquired {
+					logger.Info("Database: skipping FTS insert due to concurrent indexing (advisory lock held)", "content_hash", truncateHash(options.ContentHash))
+				} else {
+					var exists bool
+					err = tx.QueryRow(ftsCtx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash = $1)", options.ContentHash).Scan(&exists)
 					if err != nil {
 						ftsOK = false
-						logger.Warn("Database: failed to insert message content (non-fatal, message will be unsearchable)",
+						logger.Warn("Database: failed to check message_contents existence (non-fatal, message will be unsearchable)",
 							"content_hash", truncateHash(options.ContentHash), "err", err)
+					} else if !exists {
+						_, err = tx.Exec(ftsCtx, `
+							INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
+							VALUES ($1, $2, $3, $4)
+							ON CONFLICT (content_hash) DO NOTHING
+						`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
+						if err != nil {
+							ftsOK = false
+							logger.Warn("Database: failed to insert message content (non-fatal, message will be unsearchable)",
+								"content_hash", truncateHash(options.ContentHash), "err", err)
+						}
 					}
 				}
 
+				ftsCancel()
+
+				// Clean up savepoint (see InsertMessage for rationale on context.Background).
+				cleanupCtx := context.Background()
 				if ftsOK {
-					_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = 0")
-					tx.Exec(ctx, "RELEASE SAVEPOINT fts_insert")
+					_, _ = tx.Exec(cleanupCtx, "SET LOCAL statement_timeout = 0")
+					_, _ = tx.Exec(cleanupCtx, "RELEASE SAVEPOINT fts_insert")
 				} else {
-					tx.Exec(ctx, "ROLLBACK TO SAVEPOINT fts_insert")
+					_, _ = tx.Exec(cleanupCtx, "ROLLBACK TO SAVEPOINT fts_insert")
+					_, _ = tx.Exec(cleanupCtx, "SET LOCAL statement_timeout = 0")
 				}
 			}
 		}
