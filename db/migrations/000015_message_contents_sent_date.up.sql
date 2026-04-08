@@ -1,0 +1,95 @@
+-- Add sent_date to message_contents so FTS/header retention can be determined
+-- from a single table without joining back to messages.
+--
+-- The value is populated at INSERT time from the message's sent_date (Date header).
+-- Because the INSERT uses ON CONFLICT (content_hash) DO NOTHING, shared content
+-- (same bytes delivered to multiple users, e.g. newsletters) retains the sent_date
+-- of the first copy — which is correct since the Date header is identical across
+-- all copies of the same message.
+--
+-- ── LOCKING / PERFORMANCE NOTES ────────────────────────────────────────────
+-- This migration is intentionally split into two safe, fast operations:
+--
+-- 1. ALTER TABLE ADD COLUMN: PostgreSQL 11+ adds a nullable column with no
+--    DEFAULT as a catalog-only change — instant, with only a brief
+--    ACCESS EXCLUSIVE lock on the system catalog. No table rewrite, no row scan.
+--
+-- 2. CREATE INDEX (partial, WHERE sent_date IS NOT NULL): Because all existing
+--    rows have sent_date = NULL immediately after the ADD COLUMN, the partial
+--    index has ZERO qualifying rows to scan. The SHARE lock held during index
+--    build is therefore released in milliseconds even on a table with millions
+--    of rows. New rows inserted after this migration will be indexed as they
+--    arrive.
+--
+-- ── BACK-FILL ───────────────────────────────────────────────────────────────
+-- The inline UPDATE back-fill was deliberately removed.
+-- Reason: a single UPDATE joining message_contents × messages in a transaction
+-- takes minutes-to-hours on large tables and holds ROW EXCLUSIVE locks on every
+-- row for the entire duration, blocking concurrent writes.
+--
+-- Existing rows (sent_date = NULL) are silently excluded from
+-- PruneOldMessageVectors (NULL < threshold evaluates to NULL, i.e. false), so
+-- they are never accidentally pruned. This is safe: those rows existed before
+-- this retention feature and will remain until they become orphaned and are
+-- removed by GetUnusedContentHashes.
+--
+-- If you want to back-fill existing rows (to make them eligible for future
+-- pruning), run the following OUTSIDE sora, in small batches during a
+-- maintenance window:
+--
+--   DO $$ 
+--   DECLARE 
+--       batch_size INT := 10000;
+--       last_hash VARCHAR(64) := '';
+--       rows_updated INT;
+--   BEGIN 
+--       LOOP
+--           -- Find the next batch of content_hashes to process using the Primary Key directly
+--           WITH next_batch AS (
+--               SELECT content_hash 
+--               FROM message_contents
+--               WHERE content_hash > last_hash
+--               ORDER BY content_hash ASC 
+--               LIMIT batch_size
+--           ),
+--           -- Calculate the earliest sent_date for those hashes
+--           computed_dates AS (
+--               SELECT m.content_hash, MIN(m.sent_date) AS min_sent_date
+--               FROM next_batch nb
+--               JOIN messages m ON m.content_hash = nb.content_hash
+--               GROUP BY m.content_hash
+--           )
+--           -- Update exactly the ones that need it
+--           UPDATE message_contents mc
+--           SET sent_date = cd.min_sent_date
+--           FROM computed_dates cd
+--           WHERE mc.content_hash = cd.content_hash
+--             AND mc.sent_date IS NULL;
+-- 
+--           GET DIAGNOSTICS rows_updated = ROW_COUNT;
+-- 
+--           -- Fetch the actual max hash from the batch to advance the cursor securely
+--           SELECT MAX(content_hash) INTO last_hash FROM (
+--               SELECT content_hash FROM message_contents
+--               WHERE content_hash > last_hash
+--               ORDER BY content_hash ASC 
+--               LIMIT batch_size
+--           ) sub;
+-- 
+--           -- If the cursor couldn't advance, we have reached the end of the table
+--           EXIT WHEN last_hash IS NULL;
+-- 
+--           PERFORM pg_sleep(0.05); -- brief yield to alleviate WAL pressure
+--       END LOOP; 
+--   END $$;
+
+ALTER TABLE message_contents ADD COLUMN IF NOT EXISTS sent_date timestamptz;
+
+-- Index used by PruneOldMessageVectors: range scan on sent_date for expired rows.
+-- Partial index (WHERE sent_date IS NOT NULL) excludes null rows (existing rows
+-- without a back-fill) so they are never accidentally deleted.
+-- Because all existing rows have sent_date = NULL immediately after ADD COLUMN,
+-- the initial index build scans zero rows and completes in milliseconds.
+CREATE INDEX IF NOT EXISTS idx_message_contents_sent_date
+    ON message_contents (sent_date)
+    WHERE sent_date IS NOT NULL;

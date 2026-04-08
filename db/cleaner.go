@@ -272,190 +272,34 @@ func (d *Database) CleanupFailedUploads(ctx context.Context, tx pgx.Tx, gracePer
 	return deletedCount, nil
 }
 
-// PruneOldMessageBodies sets text_body and headers to NULL for message contents
-// where all associated non-expunged messages are older than the given retention period.
-// This saves storage while preserving text_body_tsv and headers_tsv for full-text search.
-// NOTE: This function is designed to work in a single-batch mode when called with a transaction.
-// For production use with large datasets, use PruneOldMessageBodiesBatched instead.
-func (d *Database) PruneOldMessageBodies(ctx context.Context, tx pgx.Tx, retention time.Duration) (int64, error) {
-	// Process a single batch of 100 records
-	// This is safe within the transaction timeout constraints
-	const batchSize = 100
-
-	// NOT EXISTS with a correlated index probe: for each of the (small) batch of
-	// message_contents rows, PostgreSQL does a single B-tree lookup on
-	// idx_messages_content_hash_active_sent_date — a nested-loop anti-join.
-	// This avoids building a hash table of all live messages, which could spill
-	// to disk (temp files) when work_mem is small and the messages table is large.
-	// LIMIT is placed inside the CTE so it applies after the NOT EXISTS check,
-	// ensuring every batch is filled with truly prunable rows.
-	query := `
-		WITH prunable AS (
-			SELECT mc.content_hash
-			FROM message_contents mc
-			WHERE (mc.text_body IS NOT NULL OR mc.headers != '')
-			  AND NOT EXISTS (
-				SELECT 1 FROM messages m
-				WHERE m.content_hash = mc.content_hash
-				  AND m.expunged_at IS NULL
-				  AND m.sent_date >= (now() - $1::interval)
-			  )
-			ORDER BY mc.content_hash
-			LIMIT $2
-		)
-		UPDATE message_contents mc
-		SET
-			text_body = NULL,
-			headers = '',
-			updated_at = now()
-		FROM prunable p
-		WHERE mc.content_hash = p.content_hash
-	`
-	tag, err := tx.Exec(ctx, query, retention, batchSize)
-	if err != nil {
-		return 0, fmt.Errorf("failed to prune old message bodies: %w", err)
-	}
-
-	return tag.RowsAffected(), nil
-}
-
-// PruneOldMessageBodiesBatched processes message body and header pruning in multiple batches,
-// committing between batches to avoid transaction timeout issues.
-// This should be used for production cleanup operations on large databases.
-// Uses SKIP LOCKED to avoid blocking user queries and other cleanup workers.
-func (d *Database) PruneOldMessageBodiesBatched(ctx context.Context, retention time.Duration) (int64, error) {
-	const batchSize = 50                    // Reduced from 100 to hold locks for shorter duration
-	const maxBatches = 1000                 // Hard upper bound: 50,000 records per run
-	const maxRunDuration = 10 * time.Minute // Reduced from 15min to limit lock duration
-	const progressLogInterval = 20          // Log progress every N batches
-
-	var totalPruned int64
-	runDeadline := time.Now().Add(maxRunDuration)
-
-	for batch := 0; batch < maxBatches; batch++ {
-		// Respect the per-run time cap so this never blocks the cleanup worker
-		// for more than maxRunDuration. The next cleanup cycle will resume.
-		if time.Now().After(runDeadline) {
-			logger.Info("Pruning bodies: reached per-run time limit, will resume on next cycle",
-				"batches_completed", batch, "pruned_so_far", totalPruned)
-			break
-		}
-
-		// Check if context is cancelled (e.g. server shutdown)
-		if ctx.Err() != nil {
-			return totalPruned, ctx.Err()
-		}
-
-		// Start a new transaction for this batch
-		tx, err := d.GetWritePool().Begin(ctx)
-		if err != nil {
-			return totalPruned, fmt.Errorf("failed to begin transaction for batch %d: %w", batch, err)
-		}
-
-		// NOT EXISTS with a correlated index probe: for each of the (small) batch of
-		// message_contents rows, PostgreSQL does a single B-tree lookup on
-		// idx_messages_content_hash_active_sent_date — a nested-loop anti-join.
-		// This avoids building a hash table of all live messages, which could spill
-		// to disk (temp files) when work_mem is small and the messages table is large.
-		// LIMIT is placed inside the CTE so it applies after the NOT EXISTS check,
-		// ensuring every batch is filled with truly prunable rows.
-		// FOR UPDATE SKIP LOCKED ensures we don't block on rows locked by other workers or queries.
-		query := `
-			WITH prunable AS (
-				SELECT mc.content_hash
-				FROM message_contents mc
-				WHERE (mc.text_body IS NOT NULL OR mc.headers != '')
-				  AND NOT EXISTS (
-					SELECT 1 FROM messages m
-					WHERE m.content_hash = mc.content_hash
-					  AND m.expunged_at IS NULL
-					  AND m.sent_date >= (now() - $1::interval)
-				  )
-				ORDER BY mc.content_hash
-				LIMIT $2
-				FOR UPDATE SKIP LOCKED
-			)
-			UPDATE message_contents mc
-			SET
-				text_body = NULL,
-				headers = '',
-				updated_at = now()
-			FROM prunable p
-			WHERE mc.content_hash = p.content_hash
-		`
-		tag, err := tx.Exec(ctx, query, retention, batchSize)
-		if err != nil {
-			tx.Rollback(ctx)
-			return totalPruned, fmt.Errorf("failed to prune message bodies in batch %d: %w", batch, err)
-		}
-
-		rowsAffected := tag.RowsAffected()
-
-		// Commit this batch
-		if err := tx.Commit(ctx); err != nil {
-			return totalPruned, fmt.Errorf("failed to commit batch %d: %w", batch, err)
-		}
-
-		totalPruned += rowsAffected
-
-		// If we processed zero rows, we're done (no more candidates)
-		if rowsAffected == 0 {
-			break
-		}
-
-		// Periodic progress logging so long-running cleanup is observable
-		if (batch+1)%progressLogInterval == 0 {
-			logger.Info("Pruning bodies: batch progress",
-				"batch", batch+1, "pruned_so_far", totalPruned, "elapsed", time.Since(runDeadline.Add(-maxRunDuration)).Round(time.Second))
-		}
-
-		// Pace between batches: pruning is a background maintenance task — give other
-		// operations (IMAP, LMTP) ample time to acquire WAL and I/O bandwidth.
-		// 100ms keeps 1000 batches within ~1.7 minutes, well under the 5-min cap.
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	return totalPruned, nil
-}
-
-// PruneOldMessageVectors sets text_body_tsv and headers_tsv to NULL for message contents
-// where all associated non-expunged messages are older than the given retention period.
-// This completely removes search capability for old messages to save space.
-// NOTE: This is a more aggressive cleanup than PruneOldMessageBodies - use with caution.
-// For production use with large datasets, use PruneOldMessageVectorsBatched instead.
+// PruneOldMessageVectors deletes message_contents rows whose fts_retention has expired.
+// Each row holds FTS search vectors (text_body_tsv, headers_tsv) and the raw headers used
+// for IMAP fast-path header fetches (BODY[HEADER] / BODY[HEADER.FIELDS]).
+// text_body is never persisted — the trigger clears it immediately after computing
+// text_body_tsv at insert time.
+//
+// The DELETE uses a CTE with LIMIT to cap each invocation at maxPruneRows rows,
+// preventing long-held locks and WAL bloat if fts_retention is shortened dramatically.
+// The cleanup worker calls this periodically; remaining rows are pruned on the next cycle.
+//
+// The range scan uses the idx_message_contents_sent_date partial index (WHERE sent_date
+// IS NOT NULL), so pre-existing rows with NULL sent_date are never selected.
+//
+// NOTE: The trigger does NOT fire on DELETE.
 func (d *Database) PruneOldMessageVectors(ctx context.Context, tx pgx.Tx, retention time.Duration) (int64, error) {
-	const batchSize = 100
+	const maxPruneRows = 10_000
 
-	// NOT EXISTS with a correlated index probe: for each of the (small) batch of
-	// message_contents rows, PostgreSQL does a single B-tree lookup on
-	// idx_messages_content_hash_active_sent_date — a nested-loop anti-join.
-	// This avoids building a hash table of all live messages, which could spill
-	// to disk (temp files) when work_mem is small and the messages table is large.
-	// LIMIT is placed inside the CTE so it applies after the NOT EXISTS check,
-	// ensuring every batch is filled with truly prunable rows.
-	query := `
-		WITH prunable AS (
-			SELECT mc.content_hash
-			FROM message_contents mc
-			WHERE (mc.text_body_tsv IS NOT NULL OR mc.headers_tsv IS NOT NULL)
-			  AND NOT EXISTS (
-				SELECT 1 FROM messages m
-				WHERE m.content_hash = mc.content_hash
-				  AND m.expunged_at IS NULL
-				  AND m.sent_date >= (now() - $1::interval)
-			  )
-			ORDER BY mc.content_hash
+	tag, err := tx.Exec(ctx, `
+		WITH expired AS (
+			SELECT content_hash FROM message_contents
+			WHERE sent_date < (now() - $1::interval)
+			ORDER BY sent_date
+			FOR UPDATE SKIP LOCKED
 			LIMIT $2
 		)
-		UPDATE message_contents mc
-		SET
-			text_body_tsv = NULL,
-			headers_tsv = NULL,
-			updated_at = now()
-		FROM prunable p
-		WHERE mc.content_hash = p.content_hash
-	`
-	tag, err := tx.Exec(ctx, query, retention, batchSize)
+		DELETE FROM message_contents
+		WHERE content_hash IN (SELECT content_hash FROM expired)
+	`, retention, maxPruneRows)
 	if err != nil {
 		return 0, fmt.Errorf("failed to prune old message vectors: %w", err)
 	}
@@ -463,103 +307,30 @@ func (d *Database) PruneOldMessageVectors(ctx context.Context, tx pgx.Tx, retent
 	return tag.RowsAffected(), nil
 }
 
-// PruneOldMessageVectorsBatched processes message vector pruning in multiple batches,
-// committing between batches to avoid transaction timeout issues.
-// This should be used for production cleanup operations on large databases.
-// Uses SKIP LOCKED to avoid blocking user queries and other cleanup workers.
-func (d *Database) PruneOldMessageVectorsBatched(ctx context.Context, retention time.Duration) (int64, error) {
-	const batchSize = 50                    // Reduced from 100 to hold locks for shorter duration
-	const maxBatches = 1000                 // Hard upper bound: 50,000 records per run
-	const maxRunDuration = 10 * time.Minute // Reduced from 15min to limit lock duration
-	const progressLogInterval = 20          // Log progress every N batches
+// NullifyLegacyTextBodies systematically sets text_body = NULL for legacy messages.
+// Prior to migration 000016, text_body was retained in the database until fts_source_retention
+// expired. The new trigger clears it immediately. This function safely nullifies lingering
+// text_body fields to reclaim backend storage. Updates are batched to prevent WAL bloat.
+// The update_message_contents_tsvector trigger preserves the existing text_body_tsv.
+func (d *Database) NullifyLegacyTextBodies(ctx context.Context, tx pgx.Tx) (int64, error) {
+	const maxPruneRows = 10_000
 
-	var totalPruned int64
-	runDeadline := time.Now().Add(maxRunDuration)
-
-	for batch := 0; batch < maxBatches; batch++ {
-		// Respect the per-run time cap so this never blocks the cleanup worker
-		// for more than maxRunDuration. The next cleanup cycle will resume.
-		if time.Now().After(runDeadline) {
-			logger.Info("Pruning vectors: reached per-run time limit, will resume on next cycle",
-				"batches_completed", batch, "pruned_so_far", totalPruned)
-			break
-		}
-
-		// Check if context is cancelled (e.g. server shutdown)
-		if ctx.Err() != nil {
-			return totalPruned, ctx.Err()
-		}
-
-		// Start a new transaction for this batch
-		tx, err := d.GetWritePool().Begin(ctx)
-		if err != nil {
-			return totalPruned, fmt.Errorf("failed to begin transaction for batch %d: %w", batch, err)
-		}
-
-		// NOT EXISTS with a correlated index probe: for each of the (small) batch of
-		// message_contents rows, PostgreSQL does a single B-tree lookup on
-		// idx_messages_content_hash_active_sent_date — a nested-loop anti-join.
-		// This avoids building a hash table of all live messages, which could spill
-		// to disk (temp files) when work_mem is small and the messages table is large.
-		// LIMIT is placed inside the CTE so it applies after the NOT EXISTS check,
-		// ensuring every batch is filled with truly prunable rows.
-		// FOR UPDATE SKIP LOCKED ensures we don't block on rows locked by other workers or queries.
-		query := `
-			WITH prunable AS (
-				SELECT mc.content_hash
-				FROM message_contents mc
-				WHERE (mc.text_body_tsv IS NOT NULL OR mc.headers_tsv IS NOT NULL)
-				  AND NOT EXISTS (
-					SELECT 1 FROM messages m
-					WHERE m.content_hash = mc.content_hash
-					  AND m.expunged_at IS NULL
-					  AND m.sent_date >= (now() - $1::interval)
-				  )
-				ORDER BY mc.content_hash
-				LIMIT $2
-				FOR UPDATE SKIP LOCKED
-			)
-			UPDATE message_contents mc
-			SET
-				text_body_tsv = NULL,
-				headers_tsv = NULL,
-				updated_at = now()
-			FROM prunable p
-			WHERE mc.content_hash = p.content_hash
-		`
-		tag, err := tx.Exec(ctx, query, retention, batchSize)
-		if err != nil {
-			tx.Rollback(ctx)
-			return totalPruned, fmt.Errorf("failed to prune message vectors in batch %d: %w", batch, err)
-		}
-
-		rowsAffected := tag.RowsAffected()
-
-		// Commit this batch
-		if err := tx.Commit(ctx); err != nil {
-			return totalPruned, fmt.Errorf("failed to commit batch %d: %w", batch, err)
-		}
-
-		totalPruned += rowsAffected
-
-		// If we processed zero rows, we're done (no more candidates)
-		if rowsAffected == 0 {
-			break
-		}
-
-		// Periodic progress logging so long-running cleanup is observable
-		if (batch+1)%progressLogInterval == 0 {
-			logger.Info("Pruning vectors: batch progress",
-				"batch", batch+1, "pruned_so_far", totalPruned, "elapsed", time.Since(runDeadline.Add(-maxRunDuration)).Round(time.Second))
-		}
-
-		// Pace between batches: pruning is a background maintenance task — give other
-		// operations (IMAP, LMTP) ample time to acquire WAL and I/O bandwidth.
-		// 100ms keeps 1000 batches within ~1.7 minutes, well under the 5-min cap.
-		time.Sleep(100 * time.Millisecond)
+	tag, err := tx.Exec(ctx, `
+		WITH legacy AS (
+			SELECT content_hash FROM message_contents
+			WHERE text_body IS NOT NULL
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		UPDATE message_contents
+		SET text_body = NULL
+		WHERE content_hash IN (SELECT content_hash FROM legacy)
+	`, maxPruneRows)
+	if err != nil {
+		return 0, fmt.Errorf("failed to nullify legacy text_body rows: %w", err)
 	}
 
-	return totalPruned, nil
+	return tag.RowsAffected(), nil
 }
 
 // GetUnusedContentHashes finds content_hash values in message_contents that are no longer referenced

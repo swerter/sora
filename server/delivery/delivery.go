@@ -27,15 +27,15 @@ import (
 
 // DeliveryContext contains the context for message delivery operations.
 type DeliveryContext struct {
-	Ctx                context.Context
-	RDB                *resilient.ResilientDatabase
-	Uploader           *uploader.UploadWorker
-	Hostname           string
-	ExternalRelay      string
-	FTSSourceRetention time.Duration
-	MetricsLabel       string // "lmtp" or "http_delivery"
-	SieveExecutor      SieveExecutor
-	Logger             Logger
+	Ctx           context.Context
+	RDB           *resilient.ResilientDatabase
+	Uploader      *uploader.UploadWorker
+	Hostname      string
+	ExternalRelay string
+	FTSRetention  time.Duration
+	MetricsLabel  string // "lmtp" or "http_delivery"
+	SieveExecutor SieveExecutor
+	Logger        Logger
 }
 
 // Logger interface for logging delivery operations.
@@ -209,7 +209,7 @@ func (d *DeliveryContext) DeliverMessage(recipient RecipientInfo, messageBytes [
 			Recipients:           recipients,
 			Flags:                []imap.Flag{}, // Unread
 			RawHeaders:           rawHeadersText,
-			FTSSourceRetention:   d.FTSSourceRetention,
+			FTSRetention:         d.FTSRetention,
 			PreservedUID:         recipient.PreservedUID,
 			PreservedUIDValidity: recipient.PreservedUIDVal,
 		},
@@ -370,24 +370,24 @@ func (d *DeliveryContext) SaveMessageToMailbox(ctx context.Context, recipient Re
 
 	_, _, err = d.RDB.InsertMessageWithRetry(ctx,
 		&db.InsertMessageOptions{
-			AccountID:          recipient.AccountID,
-			MailboxID:          mailbox.ID,
-			S3Domain:           recipient.Address.Domain(),
-			S3Localpart:        recipient.Address.LocalPart(),
-			MailboxName:        mailbox.Name,
-			ContentHash:        contentHash,
-			MessageID:          messageID,
-			InternalDate:       time.Now(),
-			Size:               size,
-			Subject:            subject,
-			PlaintextBody:      *plaintextBody,
-			SentDate:           sentDate,
-			InReplyTo:          inReplyTo,
-			BodyStructure:      bodyStructure,
-			Recipients:         recipients,
-			Flags:              []imap.Flag{},
-			RawHeaders:         rawHeadersText,
-			FTSSourceRetention: d.FTSSourceRetention,
+			AccountID:     recipient.AccountID,
+			MailboxID:     mailbox.ID,
+			S3Domain:      recipient.Address.Domain(),
+			S3Localpart:   recipient.Address.LocalPart(),
+			MailboxName:   mailbox.Name,
+			ContentHash:   contentHash,
+			MessageID:     messageID,
+			InternalDate:  time.Now(),
+			Size:          size,
+			Subject:       subject,
+			PlaintextBody: *plaintextBody,
+			SentDate:      sentDate,
+			InReplyTo:     inReplyTo,
+			BodyStructure: bodyStructure,
+			Recipients:    recipients,
+			Flags:         []imap.Flag{},
+			RawHeaders:    rawHeadersText,
+			FTSRetention:  d.FTSRetention,
 		},
 		db.PendingUpload{
 			ContentHash: contentHash,

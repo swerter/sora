@@ -248,23 +248,6 @@ func (rd *ResilientDatabase) GetUserScopedObjectsForCleanupWithRetry(ctx context
 	return result.([]db.UserScopedObjectForCleanup), nil
 }
 
-func (rd *ResilientDatabase) PruneOldMessageBodiesWithRetry(ctx context.Context, retention time.Duration) (int64, error) {
-	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
-		return rd.getOperationalDatabaseForOperation(true).PruneOldMessageBodies(ctx, tx, retention)
-	}
-	result, err := rd.executeWriteInTxWithRetry(ctx, cleanupRetryConfig, timeoutAdmin, op)
-	if err != nil {
-		return 0, err
-	}
-	return result.(int64), nil
-}
-
-func (rd *ResilientDatabase) PruneOldMessageBodiesBatchedWithRetry(ctx context.Context, retention time.Duration) (int64, error) {
-	// This function manages its own transactions, so we don't use executeWriteInTxWithRetry
-	// We add retry logic at the call level if a batch fails
-	return rd.getOperationalDatabaseForOperation(true).PruneOldMessageBodiesBatched(ctx, retention)
-}
-
 func (rd *ResilientDatabase) PruneOldMessageVectorsWithRetry(ctx context.Context, retention time.Duration) (int64, error) {
 	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return rd.getOperationalDatabaseForOperation(true).PruneOldMessageVectors(ctx, tx, retention)
@@ -276,10 +259,15 @@ func (rd *ResilientDatabase) PruneOldMessageVectorsWithRetry(ctx context.Context
 	return result.(int64), nil
 }
 
-func (rd *ResilientDatabase) PruneOldMessageVectorsBatchedWithRetry(ctx context.Context, retention time.Duration) (int64, error) {
-	// This function manages its own transactions, so we don't use executeWriteInTxWithRetry
-	// We add retry logic at the call level if a batch fails
-	return rd.getOperationalDatabaseForOperation(true).PruneOldMessageVectorsBatched(ctx, retention)
+func (rd *ResilientDatabase) NullifyLegacyTextBodiesWithRetry(ctx context.Context) (int64, error) {
+	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
+		return rd.getOperationalDatabaseForOperation(true).NullifyLegacyTextBodies(ctx, tx)
+	}
+	result, err := rd.executeWriteInTxWithRetry(ctx, cleanupRetryConfig, timeoutAdmin, op)
+	if err != nil {
+		return 0, err
+	}
+	return result.(int64), nil
 }
 
 func (rd *ResilientDatabase) GetUnusedContentHashesWithRetry(ctx context.Context, batchSize int) ([]string, error) {

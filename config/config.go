@@ -256,8 +256,7 @@ type CleanupConfig struct {
 	GracePeriod           string `toml:"grace_period"`
 	WakeInterval          string `toml:"wake_interval"`
 	MaxAgeRestriction     string `toml:"max_age_restriction"`
-	FTSRetention          string `toml:"fts_retention"`        // How long to keep FTS vectors (text_body_tsv, headers_tsv)
-	FTSSourceRetention    string `toml:"fts_source_retention"` // How long to keep source text (text_body, headers)
+	FTSRetention          string `toml:"fts_retention"` // How long to keep the message_contents row (FTS vectors + raw headers)
 	HealthStatusRetention string `toml:"health_status_retention"`
 }
 
@@ -291,20 +290,6 @@ func (c *CleanupConfig) GetFTSRetention() (time.Duration, error) {
 		return 0, nil // 0 means keep vectors forever (default)
 	}
 	return helpers.ParseDuration(c.FTSRetention)
-}
-
-// GetFTSSourceRetention parses the FTS source retention duration (for text_body and headers)
-// This controls how long we keep the original text that FTS indexes are built from.
-// If not set, falls back to FTSRetention for backwards compatibility.
-func (c *CleanupConfig) GetFTSSourceRetention() (time.Duration, error) {
-	if c.FTSSourceRetention != "" {
-		return helpers.ParseDuration(c.FTSSourceRetention)
-	}
-	// Backwards compatibility: if fts_source_retention not set, use fts_retention
-	if c.FTSRetention != "" {
-		return helpers.ParseDuration(c.FTSRetention)
-	}
-	return 730 * 24 * time.Hour, nil // 2 years default
 }
 
 // GetHealthStatusRetention parses the health status retention duration
@@ -1544,7 +1529,6 @@ func NewDefaultConfig() Config {
 		Cleanup: CleanupConfig{
 			GracePeriod:           "14d",
 			WakeInterval:          "1h",
-			FTSSourceRetention:    "730d", // 2 years default for source text
 			HealthStatusRetention: "30d",
 		},
 		LocalCache: LocalCacheConfig{
@@ -2087,15 +2071,6 @@ func (c *CleanupConfig) GetFTSRetentionWithDefault() time.Duration {
 	if err != nil {
 		log.Printf("WARNING: Failed to parse cleanup fts_retention: %v, using default (keep forever)", err)
 		return 0
-	}
-	return retention
-}
-
-func (c *CleanupConfig) GetFTSSourceRetentionWithDefault() time.Duration {
-	retention, err := c.GetFTSSourceRetention()
-	if err != nil {
-		log.Printf("WARNING: Failed to parse cleanup fts_source_retention: %v, using default (2 years)", err)
-		return 730 * 24 * time.Hour
 	}
 	return retention
 }

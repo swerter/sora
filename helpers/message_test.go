@@ -42,12 +42,13 @@ func TestValidateBodyStructure(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "valid multipart with no children (unusual but allowed)",
+			name: "invalid multipart with no children (go-imap cannot serialize this)",
 			bs: &imap.BodyStructureMultiPart{
 				Subtype:  "report",
 				Children: []imap.BodyStructure{},
 			},
-			wantErr: false,
+			wantErr: true,
+			errMsg:  "multipart structure has no children",
 		},
 		{
 			name: "valid nested multipart",
@@ -68,17 +69,18 @@ func TestValidateBodyStructure(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "valid nested multipart with empty child (unusual but allowed)",
+			name: "invalid nested multipart with empty child (go-imap cannot serialize this)",
 			bs: &imap.BodyStructureMultiPart{
 				Subtype: "alternative",
 				Children: []imap.BodyStructure{
 					&imap.BodyStructureMultiPart{
 						Subtype:  "mixed",
-						Children: []imap.BodyStructure{}, // Unusual but valid
+						Children: []imap.BodyStructure{}, // Invalid - go-imap panics
 					},
 				},
 			},
-			wantErr: false,
+			wantErr: true,
+			errMsg:  "multipart structure has no children",
 		},
 		{
 			name: "valid message/rfc822",

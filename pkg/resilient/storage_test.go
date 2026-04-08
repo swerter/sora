@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPutWithRetryRewindsReader tests that PutWithRetry rewinds the io.Reader 
+// TestPutWithRetryRewindsReader tests that PutWithRetry rewinds the io.Reader
 // when retrying after a transient error, preventing 0-byte uploads.
 func TestPutWithRetryRewindsReader(t *testing.T) {
 	// A mock S3 server that fails on the first PUT request, and succeeds on the second.
@@ -41,7 +41,7 @@ func TestPutWithRetryRewindsReader(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		
+
 		// For any other requests, just return 200 (like HEAD for existence check etc if needed)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -76,7 +76,7 @@ func TestPutWithRetryRewindsReader(t *testing.T) {
 
 	// The PutWithRetry should fail once, rewind the reader, retry, and succeed.
 	err = resilientS3.PutWithRetry(ctx, key, reader, size)
-	
+
 	// Expectations
 	require.NoError(t, err, "PutWithRetry should eventually succeed")
 	assert.Equal(t, int32(2), atomic.LoadInt32(&requestCount), "Should have retried exactly once")

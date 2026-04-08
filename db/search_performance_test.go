@@ -177,10 +177,10 @@ func (pts *PerformanceTestSuite) createMessageBatch(ctx context.Context, tx pgx.
 			return fmt.Errorf("failed to insert message %d: %w", i, err)
 		}
 
-		// Insert message content for full-text search
+		// Insert message content for full-text search — trigger handles FTS vector generation
 		_, err = tx.Exec(ctx, `
-			INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, headers_tsv)
-			VALUES ($1, $2, to_tsvector('simple', $2), $3, to_tsvector('simple', $3))
+			INSERT INTO message_contents (content_hash, text_body, headers)
+			VALUES ($1, $2, $3)
 			ON CONFLICT (content_hash) DO NOTHING`,
 			contentHash, body, headers)
 		if err != nil {

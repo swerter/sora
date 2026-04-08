@@ -242,7 +242,7 @@ type IMAPServer struct {
 	masterSASLUsername []byte
 	masterSASLPassword []byte
 	appendLimit        int64
-	ftsSourceRetention time.Duration
+	ftsRetention       time.Duration
 	version            string
 	config             *config.Config       // Full config reference for shared mailboxes
 	spamTraining       *spamtraining.Client // Spam filter training client (optional)
@@ -340,7 +340,7 @@ type IMAPServerOptions struct {
 	WarmupAsync        bool
 	WarmupTimeout      string
 	WarmupInterval     string // Minimum time between warmups for same user (e.g., "1h", "30m")
-	FTSSourceRetention time.Duration
+	FTSRetention       time.Duration
 	// Client capability filtering
 	CapabilityFilters []config.ClientCapabilityFilter
 	// Global capability disabling
@@ -502,7 +502,7 @@ func New(appCtx context.Context, name, hostname, imapAddr string, s3 *storage.S3
 		cache:                        cache,
 		lookupCache:                  lookupCache,
 		appendLimit:                  options.AppendLimit,
-		ftsSourceRetention:           options.FTSSourceRetention,
+		ftsRetention:                 options.FTSRetention,
 		version:                      options.Version,
 		config:                       options.Config,
 		spamTraining:                 options.SpamTraining,

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/jackc/pgx/v5"
@@ -136,7 +137,7 @@ type InsertMessageOptions struct {
 	RawHeaders           string
 	PreservedUID         *uint32       // Optional: preserved UID from import
 	PreservedUIDValidity *uint32       // Optional: preserved UIDVALIDITY from import
-	FTSSourceRetention   time.Duration // Optional: FTS source retention period to skip storing text for old messages
+	FTSRetention         time.Duration // Optional: skip creating message_contents entirely for messages older than this
 }
 
 func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *InsertMessageOptions, upload PendingUpload) (messageID int64, uid int64, err error) {
@@ -357,31 +358,6 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 	sanePlaintextBody := helpers.SanitizeUTF8(options.PlaintextBody)
 	saneRawHeaders := helpers.SanitizeUTF8(options.RawHeaders)
 
-	// PostgreSQL tsvector has a hard limit of 1,048,575 bytes (1MB).
-	// For extremely large messages (>1MB plaintext), skip FTS indexing entirely.
-	// These are typically spam, newsletters, or malformed messages - not legitimate correspondence.
-	// Use empty strings for FTS to avoid indexing overhead while still storing the full content.
-	const maxFTSBytes = 1024 * 1024 // 1 MB
-
-	// For FTS inputs, additionally strip backslashes to prevent PostgreSQL
-	// "unsupported Unicode escape sequence" errors (SQLSTATE 22P05) in to_tsvector().
-	// Regular text columns are safe with backslashes via parameterized queries.
-	sanePlaintextBodyForFTS := helpers.SanitizeUTF8ForFTS(sanePlaintextBody)
-	saneRawHeadersForFTS := helpers.SanitizeUTF8ForFTS(saneRawHeaders)
-
-	if len(sanePlaintextBodyForFTS) > maxFTSBytes {
-		logger.Info("Database: skipping FTS indexing for very large message body",
-			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(sanePlaintextBody))
-		sanePlaintextBodyForFTS = ""
-		metrics.LargeFTSSkipped.Inc()
-	}
-	if len(saneRawHeadersForFTS) > maxFTSBytes {
-		logger.Info("Database: skipping FTS indexing for very large headers",
-			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(saneRawHeaders))
-		saneRawHeadersForFTS = ""
-		metrics.LargeFTSSkipped.Inc()
-	}
-
 	err = tx.QueryRow(ctx, `
 		INSERT INTO messages
 			(account_id, mailbox_id, mailbox_path, uid, message_id, content_hash, s3_domain, s3_localpart, flags, custom_flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, recipients_json, created_modseq, subject_sort, from_name_sort, from_email_sort, to_name_sort, to_email_sort, cc_email_sort)
@@ -440,64 +416,59 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		return 0, 0, consts.ErrDBInsertFailed
 	}
 
-	// Insert into message_contents. ON CONFLICT DO NOTHING handles content deduplication.
-	// For messages older than the FTS retention period, we store NULL for text_body
-	// and empty string for headers (which has NOT NULL constraint) to save space,
-	// but still generate the TSV vectors for searching.
-	// Also skip storing very large message bodies (>64KB) to avoid database bloat.
-	const maxStoredBodySize = 64 * 1024 // 64 KB
-	var textBodyArg any = sanePlaintextBody
-	var headersArg any = saneRawHeaders
+	// Skip message_contents entirely when the message is already past the FTS retention
+	// window. Creating the row would only add immediate work for the cleanup worker.
+	if options.FTSRetention == 0 || options.SentDate.IsZero() || !options.SentDate.Before(time.Now().Add(-options.FTSRetention)) {
+		// Decide what to store in message_contents.
+		// Skip very large bodies/headers (>64KB) — the full content is always available in S3.
+		// text_body is immediately cleared by the trigger after computing text_body_tsv,
+		// so it is never actually persisted in the database.
+		const maxStoredBodySize = 64 * 1024 // 64 KB
+		// Note: sanePlaintextBody and saneRawHeaders are already sanitized via SanitizeUTF8
+		var textBodyArg any = sanePlaintextBody
+		var headersArg any = saneRawHeaders
 
-	if options.FTSSourceRetention > 0 && options.SentDate.Before(time.Now().Add(-options.FTSSourceRetention)) {
-		textBodyArg = nil
-		headersArg = "" // headers column is NOT NULL, use empty string
-	} else {
 		if len(sanePlaintextBody) > maxStoredBodySize {
-			// Message body is too large to store in database - full content is in S3
-			logger.Info("Database: skipping text_body storage for very large message",
-				"content_hash", truncateHash(options.ContentHash), "size_bytes", len(sanePlaintextBody))
-			textBodyArg = nil
+			truncLen := maxStoredBodySize
+			for truncLen > 0 && !utf8.RuneStart(sanePlaintextBody[truncLen]) {
+				truncLen--
+			}
+			textBodyArg = sanePlaintextBody[:truncLen]
+			logger.Info("Database: truncating text_body for FTS indexing to 64KB for very large message",
+				"content_hash", truncateHash(options.ContentHash), "original_size_bytes", len(sanePlaintextBody))
 			metrics.LargeBodyStorageSkipped.Inc()
 		}
 		if len(saneRawHeaders) > maxStoredBodySize {
-			// Headers are unusually large - skip storing in database
 			logger.Info("Database: skipping headers storage for very large headers",
 				"content_hash", truncateHash(options.ContentHash), "size_bytes", len(saneRawHeaders))
 			headersArg = ""
 			metrics.LargeBodyStorageSkipped.Inc()
 		}
-	}
 
-	// Quick check if the content already exists to avoid heavy FTS parsing in concurrent deliveries.
-	var contentExists bool
-	err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash=$1)", options.ContentHash).Scan(&contentExists)
-	if err != nil {
-		logger.Error("Database: failed to check message content existence", "content_hash", options.ContentHash, "err", err)
-		return 0, 0, consts.ErrDBQueryFailed
-	}
-
-	if !contentExists {
-		// For old messages, textBodyArg/headersArg are NULL, but the raw values are used for TSV generation.
-		_, err = tx.Exec(ctx, `
-			INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, headers_tsv)
-			VALUES ($1, $2, to_tsvector('simple', $3), $4, to_tsvector('simple', $5))
-			ON CONFLICT (content_hash) DO NOTHING
-		`, options.ContentHash, textBodyArg, sanePlaintextBodyForFTS, headersArg, saneRawHeadersForFTS)
-		if err != nil {
-			// Log the actual error details for debugging
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) {
-				logger.Error("Database: failed to insert message content",
-					"content_hash", options.ContentHash,
-					"err", err,
-					"pg_code", pgErr.Code,
-					"pg_message", pgErr.Message,
-					"pg_detail", pgErr.Detail)
-			} else {
-				logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+		// Only insert when there is actual content. A missing message_contents row is
+		// expected for old/large messages and is handled gracefully downstream (unsearchable).
+		headersStr, _ := headersArg.(string)
+		if textBodyArg != nil || headersStr != "" {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (content_hash) DO NOTHING
+			`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
+			if err != nil {
+				// Log the actual error details for debugging
+				var pgErr *pgconn.PgError
+				if errors.As(err, &pgErr) {
+					logger.Error("Database: failed to insert message content",
+						"content_hash", options.ContentHash,
+						"err", err,
+						"pg_code", pgErr.Code,
+						"pg_message", pgErr.Message,
+						"pg_detail", pgErr.Detail)
+				} else {
+					logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+				}
+				return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 			}
-			return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 		}
 	}
 
@@ -763,31 +734,6 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 	sanePlaintextBody := helpers.SanitizeUTF8(options.PlaintextBody)
 	saneRawHeaders := helpers.SanitizeUTF8(options.RawHeaders)
 
-	// PostgreSQL tsvector has a hard limit of 1,048,575 bytes (1MB).
-	// For extremely large messages (>1MB plaintext), skip FTS indexing entirely.
-	// These are typically spam, newsletters, or malformed messages - not legitimate correspondence.
-	// Use empty strings for FTS to avoid indexing overhead while still storing the full content.
-	const maxFTSBytes = 1024 * 1024 // 1 MB
-
-	// For FTS inputs, additionally strip backslashes to prevent PostgreSQL
-	// "unsupported Unicode escape sequence" errors (SQLSTATE 22P05) in to_tsvector().
-	// Regular text columns are safe with backslashes via parameterized queries.
-	sanePlaintextBodyForFTS := helpers.SanitizeUTF8ForFTS(sanePlaintextBody)
-	saneRawHeadersForFTS := helpers.SanitizeUTF8ForFTS(saneRawHeaders)
-
-	if len(sanePlaintextBodyForFTS) > maxFTSBytes {
-		logger.Info("Database: skipping FTS indexing for very large message body",
-			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(sanePlaintextBody))
-		sanePlaintextBodyForFTS = ""
-		metrics.LargeFTSSkipped.Inc()
-	}
-	if len(saneRawHeadersForFTS) > maxFTSBytes {
-		logger.Info("Database: skipping FTS indexing for very large headers",
-			"content_hash", truncateHash(options.ContentHash), "size_bytes", len(saneRawHeaders))
-		saneRawHeadersForFTS = ""
-		metrics.LargeFTSSkipped.Inc()
-	}
-
 	err = tx.QueryRow(ctx, `
 		INSERT INTO messages
 			(account_id, mailbox_id, mailbox_path, uid, message_id, content_hash, s3_domain, s3_localpart, flags, custom_flags, internal_date, size, subject, sent_date, in_reply_to, body_structure, recipients_json, uploaded, created_modseq, subject_sort, from_name_sort, from_email_sort, to_name_sort, to_email_sort, cc_email_sort)
@@ -846,64 +792,56 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 		return 0, 0, consts.ErrDBInsertFailed
 	}
 
-	// Insert into message_contents. ON CONFLICT DO NOTHING handles content deduplication.
-	// For messages older than the FTS retention period, we store NULL for text_body
-	// and empty string for headers (which has NOT NULL constraint) to save space,
-	// but still generate the TSV vectors for searching.
-	// Also skip storing very large message bodies (>64KB) to avoid database bloat.
-	const maxStoredBodySize = 64 * 1024 // 64 KB
-	var textBodyArg any = sanePlaintextBody
-	var headersArg any = saneRawHeaders
+	// Skip message_contents entirely when the message is already past the FTS retention
+	// window. Creating the row would only add immediate work for the cleanup worker.
+	if options.FTSRetention == 0 || options.SentDate.IsZero() || !options.SentDate.Before(time.Now().Add(-options.FTSRetention)) {
+		// Decide what to store in message_contents.
+		// Skip very large bodies/headers (>64KB) — the full content is always available in S3.
+		const maxStoredBodySize = 64 * 1024 // 64 KB
+		var textBodyArg any = sanePlaintextBody
+		var headersArg any = saneRawHeaders
 
-	if options.FTSSourceRetention > 0 && options.SentDate.Before(time.Now().Add(-options.FTSSourceRetention)) {
-		textBodyArg = nil
-		headersArg = "" // headers column is NOT NULL, use empty string
-	} else {
 		if len(sanePlaintextBody) > maxStoredBodySize {
-			// Message body is too large to store in database - full content is in S3
-			logger.Info("Database: skipping text_body storage for very large message",
-				"content_hash", truncateHash(options.ContentHash), "size_bytes", len(sanePlaintextBody))
-			textBodyArg = nil
+			truncLen := maxStoredBodySize
+			for truncLen > 0 && !utf8.RuneStart(sanePlaintextBody[truncLen]) {
+				truncLen--
+			}
+			textBodyArg = sanePlaintextBody[:truncLen]
+			logger.Info("Database: truncating text_body for FTS indexing to 64KB for very large message",
+				"content_hash", truncateHash(options.ContentHash), "original_size_bytes", len(sanePlaintextBody))
 			metrics.LargeBodyStorageSkipped.Inc()
 		}
 		if len(saneRawHeaders) > maxStoredBodySize {
-			// Headers are unusually large - skip storing in database
 			logger.Info("Database: skipping headers storage for very large headers",
 				"content_hash", truncateHash(options.ContentHash), "size_bytes", len(saneRawHeaders))
 			headersArg = ""
 			metrics.LargeBodyStorageSkipped.Inc()
 		}
-	}
 
-	// Quick check if the content already exists to avoid heavy FTS parsing in concurrent deliveries.
-	var contentExists bool
-	err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM message_contents WHERE content_hash=$1)", options.ContentHash).Scan(&contentExists)
-	if err != nil {
-		logger.Error("Database: failed to check message content existence", "content_hash", options.ContentHash, "err", err)
-		return 0, 0, consts.ErrDBQueryFailed
-	}
-
-	if !contentExists {
-		// For old messages, textBodyArg/headersArg are NULL, but the raw values are used for TSV generation.
-		_, err = tx.Exec(ctx, `
-			INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, headers_tsv)
-			VALUES ($1, $2, to_tsvector('simple', $3), $4, to_tsvector('simple', $5))
-			ON CONFLICT (content_hash) DO NOTHING
-		`, options.ContentHash, textBodyArg, sanePlaintextBodyForFTS, headersArg, saneRawHeadersForFTS)
-		if err != nil {
-			// Log the actual error details for debugging
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) {
-				logger.Error("Database: failed to insert message content",
-					"content_hash", options.ContentHash,
-					"err", err,
-					"pg_code", pgErr.Code,
-					"pg_message", pgErr.Message,
-					"pg_detail", pgErr.Detail)
-			} else {
-				logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+		// Only insert when there is actual content. A missing message_contents row is
+		// expected for old/large messages and is handled gracefully downstream (unsearchable).
+		headersStr, _ := headersArg.(string)
+		if textBodyArg != nil || headersStr != "" {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (content_hash) DO NOTHING
+			`, options.ContentHash, textBodyArg, headersArg, options.SentDate)
+			if err != nil {
+				// Log the actual error details for debugging
+				var pgErr *pgconn.PgError
+				if errors.As(err, &pgErr) {
+					logger.Error("Database: failed to insert message content",
+						"content_hash", options.ContentHash,
+						"err", err,
+						"pg_code", pgErr.Code,
+						"pg_message", pgErr.Message,
+						"pg_detail", pgErr.Detail)
+				} else {
+					logger.Error("Database: failed to insert message content", "content_hash", options.ContentHash, "err", err)
+				}
+				return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 			}
-			return 0, 0, consts.ErrDBInsertFailed // Transaction will rollback
 		}
 	}
 

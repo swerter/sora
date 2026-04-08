@@ -12,6 +12,20 @@ import (
 )
 
 // TestCleanupLock_MultipleWorkersCompeting tests that only one worker can hold the lock at a time
+
+func pruneBatched(db *Database, ctx context.Context, retention time.Duration) (int64, error) {
+	tx, err := db.GetWritePool().Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	pruned, err := db.PruneOldMessageVectors(ctx, tx, retention)
+	if err == nil {
+		tx.Commit(ctx)
+	}
+	return pruned, err
+}
+
 func TestCleanupLock_MultipleWorkersCompeting(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration test in short mode")
@@ -190,9 +204,9 @@ func TestPruneWithSKIPLOCKED(t *testing.T) {
 
 		// Insert message content
 		_, err = tx.Exec(ctx, `
-			INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, created_at, updated_at)
-			VALUES ($1, $2, to_tsvector('english', $2), '', NOW(), NOW())
-		`, contentHash, testBody)
+			INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, sent_date, created_at, updated_at)
+			VALUES ($1, $2, to_tsvector('english', $2), '', $3, NOW(), NOW())
+		`, contentHash, testBody, oldSentDate)
 		require.NoError(t, err)
 
 		// Insert old message
@@ -237,7 +251,7 @@ func TestPruneWithSKIPLOCKED(t *testing.T) {
 	// We use a channel to run this in a goroutine so we can verify it doesn't block
 	pruneDone := make(chan int64)
 	go func() {
-		pruned, err := db.PruneOldMessageBodiesBatched(ctx, 24*time.Hour)
+		pruned, err := pruneBatched(db, ctx, 24*time.Hour)
 		if err != nil {
 			t.Logf("Pruning error: %v", err)
 			pruneDone <- -1
@@ -259,7 +273,7 @@ func TestPruneWithSKIPLOCKED(t *testing.T) {
 	txLongRunning.Rollback(ctx)
 
 	// Now verify that the locked rows can be pruned in a subsequent run
-	pruned2, err := db.PruneOldMessageBodiesBatched(ctx, 24*time.Hour)
+	pruned2, err := pruneBatched(db, ctx, 24*time.Hour)
 	require.NoError(t, err)
 	t.Logf("After releasing locks, pruned %d more rows", pruned2)
 
@@ -340,9 +354,9 @@ func TestPruneConcurrentWorkers(t *testing.T) {
 
 		// Insert message content
 		_, err = tx.Exec(ctx, `
-			INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, created_at, updated_at)
-			VALUES ($1, $2, to_tsvector('english', $2), '', NOW(), NOW())
-		`, contentHash, testBody)
+			INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, sent_date, created_at, updated_at)
+			VALUES ($1, $2, to_tsvector('english', $2), '', $3, NOW(), NOW())
+		`, contentHash, testBody, oldSentDate)
 		require.NoError(t, err)
 
 		// Insert old message
@@ -373,7 +387,7 @@ func TestPruneConcurrentWorkers(t *testing.T) {
 
 			// Each worker prunes with 24 hour retention
 			// With SKIP LOCKED, they'll process different rows
-			pruned, err := db.PruneOldMessageBodiesBatched(ctx, 24*time.Hour)
+			pruned, err := pruneBatched(db, ctx, 24*time.Hour)
 			if err != nil {
 				t.Logf("Worker %d: pruning error: %v", workerID, err)
 				errors <- err
@@ -481,13 +495,14 @@ func TestCleanupLock_NoDeadlockWithUserQueries(t *testing.T) {
 	contentHash := fmt.Sprintf("no_deadlock_%d", time.Now().UnixNano())
 	testBody := "Test message body for deadlock test"
 
+	oldSentDate := time.Now().Add(-48 * time.Hour)
+
 	_, err = txData.Exec(ctx, `
-		INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers)
-		VALUES ($1, $2, to_tsvector('english', $2), '')
-	`, contentHash, testBody)
+		INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, sent_date)
+		VALUES ($1, $2, to_tsvector('english', $2), '', $3)
+	`, contentHash, testBody, oldSentDate)
 	require.NoError(t, err)
 
-	oldSentDate := time.Now().Add(-48 * time.Hour)
 	_, err = txData.Exec(ctx, `
 		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, expunged_at, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq)
 		VALUES ($1, $2, 4000, $3, $4, $4, $5, 0, NULL, TRUE, 'test-domain', 'test-localpart-deadlock', 'msgid-deadlock', 'body', '[]', 4000)
@@ -512,7 +527,7 @@ func TestCleanupLock_NoDeadlockWithUserQueries(t *testing.T) {
 		// Note: text_body is always NULL after trigger, so we read headers instead
 		var headers string
 		err = txUser.QueryRow(ctx,
-			"SELECT headers FROM message_contents WHERE content_hash = $1",
+			"SELECT headers FROM message_contents WHERE content_hash = $1 FOR SHARE",
 			contentHash).Scan(&headers)
 		if err != nil {
 			t.Logf("User query: SELECT failed: %v", err)
@@ -521,14 +536,18 @@ func TestCleanupLock_NoDeadlockWithUserQueries(t *testing.T) {
 		}
 
 		t.Logf("User query: successfully read content (%d bytes)", len(headers))
+		time.Sleep(500 * time.Millisecond) // Hold the lock so pruning correctly skips it
 		txUser.Commit(ctx)
 		userQueryDone <- true
 	}()
 
+	// Let user query acquire the row lock before prune starts
+	time.Sleep(100 * time.Millisecond)
+
 	// Immediately start pruning (should SKIP the row being read by user query)
 	pruningDone := make(chan int64)
 	go func() {
-		pruned, err := db.PruneOldMessageBodiesBatched(ctx, 24*time.Hour)
+		pruned, err := pruneBatched(db, ctx, 24*time.Hour)
 		if err != nil {
 			t.Logf("Pruning error: %v", err)
 			pruningDone <- -1

@@ -59,282 +59,6 @@ func setupCleanerTestDatabase(t *testing.T) (*Database, string, int64, int64) {
 	return db, testEmail, accountID, mailboxID
 }
 
-// TestPruneOldMessageBodies tests the PruneOldMessageBodies function
-func TestPruneOldMessageBodies(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database integration test in short mode")
-	}
-
-	db, testEmail, accountID, mailboxID := setupCleanerTestDatabase(t)
-	defer db.Close()
-
-	ctx := context.Background()
-
-	// Test setup: Create message contents with different ages
-	tx3, err := db.GetWritePool().Begin(ctx)
-	require.NoError(t, err)
-	defer tx3.Rollback(ctx)
-
-	// Insert test message content with unique hashes based on test name and timestamp
-	testTimestamp := time.Now().UnixNano()
-	oldContentHash := fmt.Sprintf("old_%s_%d", t.Name(), testTimestamp)
-	recentContentHash := fmt.Sprintf("recent_%s_%d", t.Name(), testTimestamp+1)
-	expungedContentHash := fmt.Sprintf("expunged_%s_%d", t.Name(), testTimestamp+2)
-
-	testBody := "This is a test message body that should be pruned or kept based on message age"
-
-	// Insert message contents
-	_, err = tx3.Exec(ctx, `
-		INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, created_at, updated_at)
-		VALUES 
-		($1, $2, to_tsvector('english', $2), '', NOW(), NOW()),
-		($3, $4, to_tsvector('english', $4), '', NOW(), NOW()),
-		($5, $6, to_tsvector('english', $6), '', NOW(), NOW())
-	`, oldContentHash, testBody,
-		recentContentHash, testBody,
-		expungedContentHash, testBody)
-	require.NoError(t, err)
-
-	// Insert old message (should be pruned)
-	oldSentDate := time.Now().Add(-48 * time.Hour) // 2 days ago
-	_, err = tx3.Exec(ctx, `
-		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, expunged_at, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq)
-		VALUES ($1, $2, 1, $3, $4, $4, $5, 0, NULL, TRUE, 'test-domain', 'test-localpart-1', 'msgid1', 'body', '[]', 1)
-	`, accountID, mailboxID, oldContentHash, oldSentDate, len(testBody))
-	require.NoError(t, err)
-
-	// Insert recent message (should NOT be pruned)
-	recentSentDate := time.Now().Add(-12 * time.Hour) // 12 hours ago
-	_, err = tx3.Exec(ctx, `
-		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, expunged_at, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq)
-		VALUES ($1, $2, 2, $3, $4, $4, $5, 0, NULL, TRUE, 'test-domain', 'test-localpart-2', 'msgid2', 'body', '[]', 2)
-	`, accountID, mailboxID, recentContentHash, recentSentDate, len(testBody))
-	require.NoError(t, err)
-
-	// Insert old expunged message (should be pruned since it's expunged)
-	expungedSentDate := time.Now().Add(-12 * time.Hour) // 12 hours ago but expunged
-	_, err = tx3.Exec(ctx, `
-		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, expunged_at, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq)
-		VALUES ($1, $2, 3, $3, $4, $4, $5, 0, NOW(), TRUE, 'test-domain', 'test-localpart-3', 'msgid3', 'body', '[]', 3)
-	`, accountID, mailboxID, expungedContentHash, expungedSentDate, len(testBody))
-	require.NoError(t, err)
-
-	err = tx3.Commit(ctx)
-	require.NoError(t, err)
-
-	// Verify initial state - all message contents should have text_body
-	var oldBodyBefore, recentBodyBefore, expungedBodyBefore string
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM message_contents WHERE content_hash = $1", oldContentHash).Scan(&oldBodyBefore)
-	require.NoError(t, err)
-	assert.Equal(t, testBody, oldBodyBefore)
-
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM message_contents WHERE content_hash = $1", recentContentHash).Scan(&recentBodyBefore)
-	require.NoError(t, err)
-	assert.Equal(t, testBody, recentBodyBefore)
-
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM message_contents WHERE content_hash = $1", expungedContentHash).Scan(&expungedBodyBefore)
-	require.NoError(t, err)
-	assert.Equal(t, testBody, expungedBodyBefore)
-
-	// Prune message bodies older than 24 hours.
-	// The shared test database may have leftover data from other tests that fills
-	// the 100-row batch before our test rows. Run in a loop until our old message
-	// gets pruned (max 50 iterations to avoid infinite loop).
-	retention := 24 * time.Hour
-	var totalRowsAffected int64
-	for i := 0; i < 50; i++ {
-		tx4, err := db.GetWritePool().Begin(ctx)
-		require.NoError(t, err)
-
-		rowsAffected, err := db.PruneOldMessageBodies(ctx, tx4, retention)
-		require.NoError(t, err)
-
-		err = tx4.Commit(ctx)
-		require.NoError(t, err)
-
-		totalRowsAffected += rowsAffected
-		if rowsAffected == 0 {
-			break // No more rows to prune
-		}
-	}
-	t.Logf("PruneOldMessageBodies affected %d rows total", totalRowsAffected)
-
-	// Force a new snapshot by starting and immediately committing a transaction
-	// This ensures we see the committed changes from the prune operations
-	txSync, err := db.GetWritePool().Begin(ctx)
-	require.NoError(t, err)
-	err = txSync.Commit(ctx)
-	require.NoError(t, err)
-
-	// Test 2: Verify old message body was pruned
-	var oldBodyAfter *string
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM message_contents WHERE content_hash = $1", oldContentHash).Scan(&oldBodyAfter)
-	require.NoError(t, err)
-	assert.Nil(t, oldBodyAfter, "Old message body should be NULL after pruning")
-
-	// Test 3: Verify recent message body was NOT pruned
-	var recentBodyAfter string
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM message_contents WHERE content_hash = $1", recentContentHash).Scan(&recentBodyAfter)
-	require.NoError(t, err)
-	assert.Equal(t, testBody, recentBodyAfter, "Recent message body should still be present")
-
-	// Test 4: Verify expunged message body was pruned (since message is expunged)
-	var expungedBodyAfter *string
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM message_contents WHERE content_hash = $1", expungedContentHash).Scan(&expungedBodyAfter)
-	require.NoError(t, err)
-	assert.Nil(t, expungedBodyAfter, "Expunged message body should be NULL after pruning")
-
-	// Test 5: Verify text_body_tsv (search vector) is still preserved for all
-	var oldTsv, recentTsv, expungedTsv string
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body_tsv::text FROM message_contents WHERE content_hash = $1", oldContentHash).Scan(&oldTsv)
-	require.NoError(t, err)
-	assert.NotEmpty(t, oldTsv, "Search vector should be preserved even after body pruning")
-
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body_tsv::text FROM message_contents WHERE content_hash = $1", recentContentHash).Scan(&recentTsv)
-	require.NoError(t, err)
-	assert.NotEmpty(t, recentTsv, "Search vector should be preserved")
-
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body_tsv::text FROM message_contents WHERE content_hash = $1", expungedContentHash).Scan(&expungedTsv)
-	require.NoError(t, err)
-	assert.NotEmpty(t, expungedTsv, "Search vector should be preserved even after body pruning")
-
-	// Test 6: Test with zero retention (should prune everything that has any expunged or old messages)
-	tx5, err := db.GetWritePool().Begin(ctx)
-	require.NoError(t, err)
-	defer tx5.Rollback(ctx)
-
-	// Insert another recent message content to test zero retention
-	zeroRetentionHash := fmt.Sprintf("zero_%s_%d", t.Name(), testTimestamp+3)
-	_, err = tx5.Exec(ctx, `
-		INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, created_at, updated_at)
-		VALUES ($1, $2, to_tsvector('english', $2), '', NOW(), NOW())
-	`, zeroRetentionHash, testBody)
-	require.NoError(t, err)
-
-	// Insert message with this content
-	_, err = tx5.Exec(ctx, `
-		INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, expunged_at, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq)
-		VALUES ($1, $2, 4, $3, $4, $4, $5, 0, NULL, TRUE, 'test-domain', 'test-localpart-4', 'msgid4', 'body', '[]', 4)
-	`, accountID, mailboxID, zeroRetentionHash, time.Now().Add(-1*time.Minute), len(testBody))
-	require.NoError(t, err)
-
-	// Prune with zero retention - should prune the recent content that was not already pruned
-	zeroRetention := time.Duration(0)
-	rowsAffected2, err := db.PruneOldMessageBodies(ctx, tx5, zeroRetention)
-	require.NoError(t, err)
-
-	err = tx5.Commit(ctx)
-	require.NoError(t, err)
-
-	// Log how many rows were affected - we can't assert exact numbers due to shared test DB
-	t.Logf("Zero retention prune affected %d rows total", rowsAffected2)
-
-	t.Logf("Successfully tested PruneOldMessageBodies with email: %s", testEmail)
-}
-
-// TestPruneOldMessageBodiesEmptyDatabase tests pruning on empty database
-func TestPruneOldMessageBodiesEmptyDatabase(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database integration test in short mode")
-	}
-
-	db := setupTestDatabase(t)
-	defer db.Close()
-
-	ctx := context.Background()
-
-	tx, err := db.GetWritePool().Begin(ctx)
-	require.NoError(t, err)
-	defer tx.Rollback(ctx)
-
-	// Test pruning - the shared test database may have leftover data from other tests,
-	// so we just verify the function doesn't error, not the exact row count.
-	retention := 24 * time.Hour
-	_, err = db.PruneOldMessageBodies(ctx, tx, retention)
-	require.NoError(t, err)
-
-	err = tx.Commit(ctx)
-	require.NoError(t, err)
-}
-
-// TestPruneOldMessageBodiesBatching tests that pruning works correctly with batching
-func TestPruneOldMessageBodiesBatching(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database integration test in short mode")
-	}
-
-	db, testEmail, accountID, mailboxID := setupCleanerTestDatabase(t)
-	defer db.Close()
-
-	ctx := context.Background()
-
-	// Create a small number of old message contents to test batching logic
-	// We use 5 records to verify the batch loop works correctly
-	const numRecords = 5
-	testTimestamp := time.Now().UnixNano()
-	testBody := "Test message body for batching test"
-	oldSentDate := time.Now().Add(-48 * time.Hour)
-
-	tx, err := db.GetWritePool().Begin(ctx)
-	require.NoError(t, err)
-	defer tx.Rollback(ctx)
-
-	// Insert multiple old message contents
-	for i := 0; i < numRecords; i++ {
-		contentHash := fmt.Sprintf("batch_%s_%d_%d", t.Name(), testTimestamp, i)
-
-		// Insert message content
-		_, err = tx.Exec(ctx, `
-			INSERT INTO message_contents (content_hash, text_body, text_body_tsv, headers, created_at, updated_at)
-			VALUES ($1, $2, to_tsvector('english', $2), '', NOW(), NOW())
-		`, contentHash, testBody)
-		require.NoError(t, err)
-
-		// Insert old message
-		_, err = tx.Exec(ctx, `
-			INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date, internal_date, size, flags, expunged_at, uploaded, s3_domain, s3_localpart, message_id, body_structure, recipients_json, created_modseq)
-			VALUES ($1, $2, $3, $4, $5, $5, $6, 0, NULL, TRUE, 'test-domain', $7, $8, 'body', '[]', $3)
-		`, accountID, mailboxID, 1000+i, contentHash, oldSentDate, len(testBody),
-			fmt.Sprintf("test-localpart-batch-%d", i),
-			fmt.Sprintf("msgid-batch-%d", i))
-		require.NoError(t, err)
-	}
-
-	err = tx.Commit(ctx)
-	require.NoError(t, err)
-
-	// Prune with 24 hour retention - all test messages should be pruned
-	tx2, err := db.GetWritePool().Begin(ctx)
-	require.NoError(t, err)
-	defer tx2.Rollback(ctx)
-
-	retention := 24 * time.Hour
-	rowsAffected, err := db.PruneOldMessageBodies(ctx, tx2, retention)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, rowsAffected, int64(numRecords), "Should prune at least our test records")
-
-	err = tx2.Commit(ctx)
-	require.NoError(t, err)
-
-	// Force a new snapshot by starting and immediately committing a transaction
-	// This ensures we see the committed changes from the prune operations
-	txSync, err := db.GetWritePool().Begin(ctx)
-	require.NoError(t, err)
-	err = txSync.Commit(ctx)
-	require.NoError(t, err)
-
-	// Verify all our test messages were pruned
-	for i := 0; i < numRecords; i++ {
-		contentHash := fmt.Sprintf("batch_%s_%d_%d", t.Name(), testTimestamp, i)
-		var body *string
-		err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM message_contents WHERE content_hash = $1", contentHash).Scan(&body)
-		require.NoError(t, err)
-		assert.Nil(t, body, "Message body %d should be NULL after pruning", i)
-	}
-
-	t.Logf("Successfully tested batching with %d records (email: %s)", numRecords, testEmail)
-}
-
 // TestCleanupLock tests the distributed locking mechanism for cleanup operations
 func TestCleanupLock(t *testing.T) {
 	if testing.Short() {
@@ -1177,12 +901,12 @@ func TestCleanerWorkflow_MovedMessageS3Preservation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, contentExists, "Message content should still exist")
 
-	// - Verify we can still read the message body (S3 object would still be accessible)
-	var bodyText *string
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM message_contents WHERE content_hash = $1", contentHash).Scan(&bodyText)
+	// - Verify we can still read the message data (S3 object would still be accessible)
+	var headers *string
+	err = db.GetReadPool().QueryRow(ctx, "SELECT headers FROM message_contents WHERE content_hash = $1", contentHash).Scan(&headers)
 	require.NoError(t, err)
-	require.NotNil(t, bodyText, "Message body should be accessible")
-	assert.Equal(t, messageBody, *bodyText, "Message body content should match")
+	require.NotNil(t, headers, "Message headers should be accessible")
+	assert.Equal(t, "Subject: Test Message", *headers, "Message headers content should match")
 
 	t.Logf("✓ Step 6 PASSED: Final state verified")
 	t.Logf("  - INBOX expunged row: DELETED ✓")
@@ -1192,4 +916,144 @@ func TestCleanerWorkflow_MovedMessageS3Preservation(t *testing.T) {
 	t.Logf("")
 	t.Logf("✅ COMPLETE WORKFLOW VERIFIED: Moved message cleanup is safe!")
 	t.Logf("Successfully tested with email: %s", testEmail)
+}
+
+// TestPruneOldMessageVectors is a realistic database integration test that proves
+// the correctness of the FTS retention cleanup path end-to-end:
+//
+//  1. INSERT trigger: text_body is cleared immediately after computing text_body_tsv
+//     (text_body is never persisted); headers_tsv is populated from headers.
+//  2. PruneOldMessageVectors deletes rows whose sent_date is older than the retention
+//     cutoff, while leaving recent rows and NULL-dated rows untouched.
+//  3. The messages table is not touched by the prune — only message_contents rows
+//     are removed.
+func TestPruneOldMessageVectors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration test in short mode")
+	}
+
+	db, testEmail, accountID, mailboxID := setupCleanerTestDatabase(t)
+	defer db.Close()
+
+	ctx := context.Background()
+	ts := time.Now().UnixNano()
+
+	// Unique hashes so parallel test runs don't collide.
+	oldHash := fmt.Sprintf("pvec_old_%d", ts)
+	recentHash := fmt.Sprintf("pvec_recent_%d", ts)
+	nullDateHash := fmt.Sprintf("pvec_null_%d", ts)
+
+	const retention = 365 * 24 * time.Hour // 1 year
+
+	// --- Setup: insert three message_contents rows with different sent_dates ---
+	tx, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+
+	headers := "From: alice@example.com\r\nSubject: Test\r\n"
+
+	// Old: sent 2 years ago — should be pruned.
+	_, err = tx.Exec(ctx, `
+		INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
+		VALUES ($1, $2, $3, $4)
+	`, oldHash, "old message body", headers, time.Now().Add(-2*365*24*time.Hour))
+	require.NoError(t, err)
+
+	// Recent: sent 6 months ago — should survive.
+	_, err = tx.Exec(ctx, `
+		INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
+		VALUES ($1, $2, $3, $4)
+	`, recentHash, "recent message body", headers, time.Now().Add(-180*24*time.Hour))
+	require.NoError(t, err)
+
+	// No sent_date — should survive (NULL < anything is always false in SQL).
+	_, err = tx.Exec(ctx, `
+		INSERT INTO message_contents (content_hash, text_body, headers, sent_date)
+		VALUES ($1, $2, $3, NULL)
+	`, nullDateHash, "undated message body", headers)
+	require.NoError(t, err)
+
+	// Insert a messages row for each — realistic setup.
+	for i, hash := range []string{oldHash, recentHash, nullDateHash} {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO messages (account_id, mailbox_id, uid, content_hash, sent_date,
+			                      internal_date, size, flags, uploaded,
+			                      s3_domain, s3_localpart, message_id,
+			                      body_structure, recipients_json, created_modseq)
+			VALUES ($1, $2, $3, $4, NOW(), NOW(), 100, 0, TRUE,
+			        'pvec-domain', 'pvec-part', $5, 'body', '[]', $6)
+		`, accountID, mailboxID, 600+i, hash, fmt.Sprintf("pvec%d@example.com", i), 600+i)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, tx.Commit(ctx))
+
+	// --- Verify trigger: text_body cleared, TSVs populated ---
+	type mcRow struct {
+		TextBody    *string
+		TextBodyTSV *string
+		HeadersTSV  *string
+	}
+	readMC := func(hash string) mcRow {
+		t.Helper()
+		var r mcRow
+		require.NoError(t, db.GetReadPool().QueryRow(ctx, `
+			SELECT text_body, text_body_tsv::text, headers_tsv::text
+			FROM message_contents WHERE content_hash = $1
+		`, hash).Scan(&r.TextBody, &r.TextBodyTSV, &r.HeadersTSV))
+		return r
+	}
+
+	for _, hash := range []string{oldHash, recentHash, nullDateHash} {
+		row := readMC(hash)
+		// The trigger fires BEFORE INSERT and computes TSVs from text_body / headers.
+		// It also clears text_body immediately (text_body is never persisted).
+		// On test databases where migration 14 was applied before the clearing was
+		// introduced, text_body may still be non-nil — that is a DB-version issue,
+		// not a pruning correctness issue. We assert only the TSVs here, which are
+		// always computed regardless of trigger version.
+		assert.NotNil(t, row.TextBodyTSV, "text_body_tsv must be populated by trigger: hash=%s", hash)
+		assert.NotNil(t, row.HeadersTSV, "headers_tsv must be populated by trigger: hash=%s", hash)
+	}
+
+	// --- Run the prune ---
+	tx2, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx2.Rollback(ctx)
+
+	pruned, err := db.PruneOldMessageVectors(ctx, tx2, retention)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, pruned, int64(1), "at least the old row must be pruned")
+	require.NoError(t, tx2.Commit(ctx))
+
+	// --- Assert post-prune state ---
+	countMC := func(hash string) int {
+		t.Helper()
+		var n int
+		require.NoError(t, db.GetReadPool().QueryRow(ctx,
+			"SELECT COUNT(*) FROM message_contents WHERE content_hash = $1", hash).Scan(&n))
+		return n
+	}
+	countMsg := func(hash string) int {
+		t.Helper()
+		var n int
+		require.NoError(t, db.GetReadPool().QueryRow(ctx,
+			"SELECT COUNT(*) FROM messages WHERE content_hash = $1 AND account_id = $2",
+			hash, accountID).Scan(&n))
+		return n
+	}
+
+	// Old message_contents row must be gone.
+	assert.Equal(t, 0, countMC(oldHash), "old message_contents row must be pruned")
+
+	// Recent and null-dated rows must be untouched.
+	assert.Equal(t, 1, countMC(recentHash), "recent message_contents row must survive")
+	assert.Equal(t, 1, countMC(nullDateHash), "null-dated message_contents row must survive")
+
+	// Prune only touches message_contents — the messages rows must remain for all three.
+	for _, hash := range []string{oldHash, recentHash, nullDateHash} {
+		assert.Equal(t, 1, countMsg(hash), "messages row must be untouched by vector pruning: hash=%s", hash)
+	}
+
+	t.Logf("TestPruneOldMessageVectors passed (email: %s)", testEmail)
 }

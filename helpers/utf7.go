@@ -103,4 +103,3 @@ func DecodeModifiedUTF7(src string) (string, error) {
 
 	return string(result), nil
 }
-

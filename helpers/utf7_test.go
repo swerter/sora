@@ -58,4 +58,3 @@ func TestDecodeModifiedUTF7(t *testing.T) {
 		})
 	}
 }
-

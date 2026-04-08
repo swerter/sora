@@ -42,10 +42,8 @@ type DatabaseManager interface {
 	CleanupOldHealthStatusesWithRetry(ctx context.Context, retention time.Duration) (int64, error)
 	GetUserScopedObjectsForCleanupWithRetry(ctx context.Context, gracePeriod time.Duration, limit int) ([]db.UserScopedObjectForCleanup, error)
 	DeleteExpungedMessagesByS3KeyPartsBatchWithRetry(ctx context.Context, objects []db.UserScopedObjectForCleanup) (int64, error)
-	PruneOldMessageBodiesWithRetry(ctx context.Context, retention time.Duration) (int64, error)
-	PruneOldMessageBodiesBatchedWithRetry(ctx context.Context, retention time.Duration) (int64, error)
 	PruneOldMessageVectorsWithRetry(ctx context.Context, retention time.Duration) (int64, error)
-	PruneOldMessageVectorsBatchedWithRetry(ctx context.Context, retention time.Duration) (int64, error)
+	NullifyLegacyTextBodiesWithRetry(ctx context.Context) (int64, error)
 	GetUnusedContentHashesWithRetry(ctx context.Context, limit int) ([]string, error)
 	DeleteMessageContentsByHashBatchWithRetry(ctx context.Context, hashes []string) (int64, error)
 	GetDanglingAccountsForFinalDeletionWithRetry(ctx context.Context, limit int) ([]int64, error)
@@ -71,7 +69,6 @@ type CleanupWorker struct {
 	gracePeriod           time.Duration
 	maxAgeRestriction     time.Duration
 	ftsRetention          time.Duration // How long to keep FTS vectors (text_body_tsv, headers_tsv)
-	ftsSourceRetention    time.Duration // How long to keep source text (text_body, headers)
 	healthStatusRetention time.Duration
 	stopCh                chan struct{}
 	errCh                 chan<- error
@@ -81,7 +78,7 @@ type CleanupWorker struct {
 }
 
 // New creates a new CleanupWorker.
-func New(rdb *resilient.ResilientDatabase, s3 *storage.S3Storage, cache *cache.Cache, interval, gracePeriod, maxAgeRestriction, ftsRetention, ftsSourceRetention, healthStatusRetention time.Duration, errCh chan<- error) *CleanupWorker {
+func New(rdb *resilient.ResilientDatabase, s3 *storage.S3Storage, cache *cache.Cache, interval, gracePeriod, maxAgeRestriction, ftsRetention, healthStatusRetention time.Duration, errCh chan<- error) *CleanupWorker {
 	// Wrap S3 storage with resilient patterns including circuit breakers
 	resilientS3 := resilient.NewResilientS3Storage(s3)
 
@@ -93,7 +90,6 @@ func New(rdb *resilient.ResilientDatabase, s3 *storage.S3Storage, cache *cache.C
 		gracePeriod:           gracePeriod,
 		maxAgeRestriction:     maxAgeRestriction,
 		ftsRetention:          ftsRetention,
-		ftsSourceRetention:    ftsSourceRetention,
 		healthStatusRetention: healthStatusRetention,
 		stopCh:                make(chan struct{}),
 		errCh:                 errCh,
@@ -132,9 +128,6 @@ func (w *CleanupWorker) run(ctx context.Context) {
 	}
 	if w.ftsRetention > 0 {
 		logParts = append(logParts, fmt.Sprintf("FTS vector retention: %v", w.ftsRetention))
-	}
-	if w.ftsSourceRetention > 0 {
-		logParts = append(logParts, fmt.Sprintf("FTS source retention: %v", w.ftsSourceRetention))
 	}
 	logParts = append(logParts, fmt.Sprintf("health status retention: %v", w.healthStatusRetention))
 
@@ -208,7 +201,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	// Initialize counters for summary logging
 	var failedUploadsCount, deletedAccountCount, vacationCount, healthCount int64
 	var successfulDeletes []db.UserScopedObjectForCleanup
-	var prunedBodiesCount, orphanHashCount, finalizedAccountCount int64
+	var orphanHashCount, finalizedAccountCount int64
 
 	// First handle max age restriction if configured
 	if w.maxAgeRestriction > 0 {
@@ -327,32 +320,29 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 		logger.Info("Cleanup: no user-scoped objects to clean up")
 	}
 
-	// --- Phase 2a: FTS Source Text Pruning (for old messages) ---
-	if w.ftsSourceRetention > 0 {
-		// This prunes text_body and headers of old messages to save space, but keeps
-		// text_body_tsv and headers_tsv so that full-text search continues to work.
-		// Use the batched version which commits between batches to avoid timeout issues.
-		prunedBodiesCount, err = w.rdb.PruneOldMessageBodiesBatchedWithRetry(ctx, w.ftsSourceRetention)
-		if err != nil {
-			logger.Error("Cleanup: Failed to prune old message source text", "error", err)
-			// Continue with other cleanup tasks even if this fails
-		} else if prunedBodiesCount > 0 {
-			logger.Info("Cleanup: Pruned text_body for old message contents", "count", prunedBodiesCount, "age", w.ftsSourceRetention)
-		}
-	}
-
-	// --- Phase 2a2: FTS Vector Pruning (for very old messages) ---
+	// --- Phase 2a: FTS Vector Pruning ---
+	// text_body is never persisted (the trigger clears it at insert time).
+	// This phase deletes message_contents rows whose fts_retention has expired, removing
+	// both the FTS search vectors and the raw headers used for IMAP fast-path header fetches.
 	if w.ftsRetention > 0 {
 		// This prunes text_body_tsv and headers_tsv of old messages, completely removing search capability.
 		// This is more aggressive than source pruning - use with caution.
-		// Use the batched version which commits between batches to avoid timeout issues.
-		prunedVectorsCount, err := w.rdb.PruneOldMessageVectorsBatchedWithRetry(ctx, w.ftsRetention)
+		prunedVectorsCount, err := w.rdb.PruneOldMessageVectorsWithRetry(ctx, w.ftsRetention)
 		if err != nil {
 			logger.Error("Cleanup: Failed to prune old message vectors", "error", err)
 			// Continue with other cleanup tasks even if this fails
 		} else if prunedVectorsCount > 0 {
 			logger.Info("Cleanup: Pruned text_body_tsv for old message contents", "count", prunedVectorsCount, "age", w.ftsRetention)
 		}
+	}
+
+	// --- Phase 2a-bis: Legacy Text Body Sweeping ---
+	// Clean up legacy `text_body` stored prior to migration 000016.
+	nullifiedLegacyCount, err := w.rdb.NullifyLegacyTextBodiesWithRetry(ctx)
+	if err != nil {
+		logger.Error("Cleanup: Failed to nullify legacy text bodies", "error", err)
+	} else if nullifiedLegacyCount > 0 {
+		logger.Info("Cleanup: Removed legacy text bodies, reclaiming storage", "count", nullifiedLegacyCount)
 	}
 
 	// --- Phase 2b: Global resource cleanup (message_contents and cache) ---
@@ -410,7 +400,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	logger.Info("Cleanup: Cycle completed", "failed_uploads", failedUploadsCount,
 		"soft_deleted_accounts", deletedAccountCount, "vacation_responses", vacationCount,
 		"health_statuses", healthCount, "s3_objects", len(successfulDeletes),
-		"pruned_bodies", prunedBodiesCount, "orphan_hashes", orphanHashCount, "finalized_accounts", finalizedAccountCount)
+		"orphan_hashes", orphanHashCount, "finalized_accounts", finalizedAccountCount)
 
 	return nil
 }

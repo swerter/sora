@@ -173,12 +173,13 @@ func TestInsertMessage_LargeBodyStorageSkip(t *testing.T) {
 	assert.Equal(t, "Large Storage Test", messages[0].Subject)
 
 	// Verify that text_body is NULL (not stored)
-	var textBody *string
+	var textBody, textBodyTSV *string
 	err = db.GetReadPool().QueryRow(ctx,
-		"SELECT text_body FROM message_contents WHERE content_hash = $1",
-		contentHash).Scan(&textBody)
+		"SELECT text_body, text_body_tsv::text FROM message_contents WHERE content_hash = $1",
+		contentHash).Scan(&textBody, &textBodyTSV)
 	assert.NoError(t, err)
 	assert.Nil(t, textBody, "text_body should be NULL for large messages")
+	assert.NotNil(t, textBodyTSV, "text_body_tsv should NOT be NULL since it now indexes the first 64KB")
 
 	t.Logf("Successfully tested large body storage skip with messageID: %d, UID: %d", messageID, uid)
 }
@@ -257,15 +258,17 @@ func TestInsertMessage_NormalSizeStored(t *testing.T) {
 	assert.Len(t, messages, 1)
 	assert.Equal(t, "Normal Size Test", messages[0].Subject)
 
-	// Verify that text_body is NOT NULL (stored)
-	var textBody *string
+	// Verify that text_body is NULL and text_body_tsv is NOT NULL (stored)
+	var textBody, textBodyTSV *string
 	err = db.GetReadPool().QueryRow(ctx,
-		"SELECT text_body FROM message_contents WHERE content_hash = $1",
-		contentHash).Scan(&textBody)
+		"SELECT text_body, text_body_tsv::text FROM message_contents WHERE content_hash = $1",
+		contentHash).Scan(&textBody, &textBodyTSV)
 	assert.NoError(t, err)
-	assert.NotNil(t, textBody, "text_body should NOT be NULL for normal-sized messages")
-	if textBody != nil {
-		assert.Equal(t, normalBody, *textBody)
+	assert.Nil(t, textBody, "text_body should be NULL for normal-sized messages due to trigger")
+	assert.NotNil(t, textBodyTSV, "text_body_tsv should NOT be NULL for normal-sized messages")
+	if textBodyTSV != nil {
+		assert.Contains(t, *textBodyTSV, "normal")
+		assert.Contains(t, *textBodyTSV, "searchable")
 	}
 
 	t.Logf("Successfully tested normal size storage with messageID: %d, UID: %d", messageID, uid)

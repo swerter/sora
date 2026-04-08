@@ -203,12 +203,6 @@ Examples:
 		}
 	}
 
-	// Get FTS retention from config
-	ftsSourceRetention, err := globalConfig.Cleanup.GetFTSSourceRetention()
-	if err != nil {
-		logger.Fatalf("Failed to parse FTS retention: %v", err)
-	}
-
 	// Create importer options
 	options := ImporterOptions{
 		DryRun:               *dryRun,
@@ -223,7 +217,6 @@ Examples:
 		ImportDelay:          *delay,
 		SievePath:            *sievePath,
 		PreserveUIDs:         *preserveUIDs || *dovecot,
-		FTSSourceRetention:   ftsSourceRetention,
 		TestMode:             s3 == nil,
 		BatchSize:            *batchSize,
 		BatchTransactionMode: *batchTxMode,

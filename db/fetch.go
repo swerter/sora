@@ -49,13 +49,12 @@ func (db *Database) GetMessageTextBody(ctx context.Context, uid imap.UID, mailbo
 	}
 
 	if !textBody.Valid {
-		// Message was found in 'messages', but the LEFT JOIN didn't find a corresponding
-		// row in 'message_contents'. Since message_contents.text_body is NOT NULL,
-		// textBody.Valid being false implies no matching row in message_contents.
-		// This indicates a data integrity issue, as a message's content_hash (which is NOT NULL)
-		// should always exist in message_contents.
-		logger.Error("Database: data integrity issue: Message found but no corresponding entry in message_contents", "uid", uid, "mailbox_id", mailboxID)
-		return "", fmt.Errorf("message text content missing for UID %d, Mailbox %d (data integrity)", uid, mailboxID)
+		// No message_contents row for this message. This is expected for:
+		//   - messages older than fts_retention (row never created at insert time)
+		//   - messages with body > 64KB (body skipped at insert time)
+		//   - messages whose row was deleted by PruneOldMessageVectors
+		// The full message is always retrievable from S3.
+		return "", nil
 	}
 
 	return textBody.String, nil
