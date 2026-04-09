@@ -353,7 +353,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 
 	// --- Phase 2a-bis: Systematically nullify text_body for legacy rows.
 	// This ensures that migration 000016 reclaims storage safely without taking massive down-time updates.
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 50; i++ {
 		nullifiedLegacyCount, newLastHash, err := w.rdb.NullifyLegacyTextBodiesWithRetry(ctx, w.lastNullifyHash)
 		if err != nil {
 			logger.Error("Cleanup: Failed to nullify legacy text bodies", "error", err)
@@ -364,13 +364,13 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 		if nullifiedLegacyCount > 0 {
 			legacyNullifiedCount += nullifiedLegacyCount
 			logger.Info("Cleanup: Removed legacy text bodies, reclaiming storage", "count", nullifiedLegacyCount)
-			if nullifiedLegacyCount < 1000 {
-				break // Done: fetched less than the full batch size
-			}
 			// Yield to prevent database CPU/WAL starvation for incoming LMTP requests
 			time.Sleep(1 * time.Second)
-		} else {
-			break // Done: no legacy rows left
+		}
+		
+		if w.lastNullifyHash == "" {
+			logger.Info("Cleanup: Reached end of message_contents table for legacy nullification.")
+			break // Done: reached end of the table
 		}
 	}
 
