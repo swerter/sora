@@ -188,7 +188,8 @@ func (rd *ResilientDatabase) ExpungeMessageUIDsWithRetry(ctx context.Context, ma
 	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return rd.getOperationalDatabaseForOperation(true).ExpungeMessageUIDs(ctx, tx, mailboxID, uids...)
 	}
-	result, err := rd.executeWriteInTxWithRetry(ctx, writeRetryConfig, timeoutWrite, op)
+	// Expunge can be a massive array operation. Give it administrative level timeouts (45s) instead of tight write timeouts (15s).
+	result, err := rd.executeWriteInTxWithRetry(ctx, writeRetryConfig, timeoutAdmin, op)
 	if err != nil {
 		return 0, err
 	}

@@ -203,6 +203,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	var failedUploadsCount, deletedAccountCount, vacationCount, healthCount int64
 	var successfulDeletes []db.UserScopedObjectForCleanup
 	var orphanHashCount, finalizedAccountCount int64
+	var ftsPrunedCount, legacyNullifiedCount int64
 
 	// First handle max age restriction if configured
 	if w.maxAgeRestriction > 0 {
@@ -337,6 +338,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 			}
 
 			if prunedVectorsCount > 0 {
+				ftsPrunedCount += prunedVectorsCount
 				logger.Info("Cleanup: Pruned text_body_tsv for old message contents", "count", prunedVectorsCount, "age", w.ftsRetention)
 				if prunedVectorsCount < 1000 {
 					break
@@ -351,7 +353,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 
 	// --- Phase 2a-bis: Systematically nullify text_body for legacy rows.
 	// This ensures that migration 000016 reclaims storage safely without taking massive down-time updates.
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 50; i++ {
 		nullifiedLegacyCount, newLastHash, err := w.rdb.NullifyLegacyTextBodiesWithRetry(ctx, w.lastNullifyHash)
 		if err != nil {
 			logger.Error("Cleanup: Failed to nullify legacy text bodies", "error", err)
@@ -360,14 +362,15 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 		w.lastNullifyHash = newLastHash
 
 		if nullifiedLegacyCount > 0 {
+			legacyNullifiedCount += nullifiedLegacyCount
 			logger.Info("Cleanup: Removed legacy text bodies, reclaiming storage", "count", nullifiedLegacyCount)
-			if nullifiedLegacyCount < 1000 {
-				break // Done: fetched less than the full batch size
-			}
 			// Yield to prevent database CPU/WAL starvation for incoming LMTP requests
 			time.Sleep(1 * time.Second)
-		} else {
-			break // Done: no legacy rows left
+		}
+		
+		if w.lastNullifyHash == "" {
+			logger.Info("Cleanup: Reached end of message_contents table for legacy nullification.")
+			break // Done: reached end of the table
 		}
 	}
 
@@ -426,7 +429,8 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	logger.Info("Cleanup: Cycle completed", "failed_uploads", failedUploadsCount,
 		"soft_deleted_accounts", deletedAccountCount, "vacation_responses", vacationCount,
 		"health_statuses", healthCount, "s3_objects", len(successfulDeletes),
-		"orphan_hashes", orphanHashCount, "finalized_accounts", finalizedAccountCount)
+		"orphan_hashes", orphanHashCount, "finalized_accounts", finalizedAccountCount,
+		"fts_pruned", ftsPrunedCount, "legacy_nullified", legacyNullifiedCount)
 
 	return nil
 }

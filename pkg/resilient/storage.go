@@ -167,6 +167,7 @@ func (rs *ResilientS3Storage) classifyRetryable(err error, retry404 bool) bool {
 		"throttling",
 		"rate limit",
 		"closed network connection",
+		"server closed idle connection",
 		"eof",
 		"broken pipe",
 		"reset by peer",
