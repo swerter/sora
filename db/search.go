@@ -596,10 +596,11 @@ func (db *Database) canUseTextUnion(criteria *imap.SearchCriteria, needsSeqNumSe
 	return true
 }
 
-// buildTextSearchBranches generates the header predicate and returns the tsquery parameter
-// name for a single IMAP TEXT term. The body predicate matches messages_fts_v2 via the
-// materialized fts_hits CTE in buildTextUnionQuery; the header predicate matches the indexed
-// messages.* sort columns.
+// buildTextSearchBranches binds the arguments for a single IMAP TEXT term, split for the
+// UNION rewrite. It returns the header predicate, which matches the indexed messages.* sort
+// columns, and the name of the tsquery parameter, from which buildTextUnionQuery builds the
+// body branch in whichever shape the mailbox size calls for. Together the two branches are
+// semantically identical to the combined OR produced for criteria.Text.
 func buildTextSearchBranches(text string, args pgx.NamedArgs, paramPrefix string, paramCounter *int) (headerCond, tsParam string) {
 	next := func() string {
 		*paramCounter++
@@ -640,7 +641,11 @@ const (
 // deduped CTE alias f (and is where "0 as seqnum" lives). All non-Text criteria are
 // built once and replicated into both branches so combined searches (TEXT +
 // flags/dates/etc.) stay correct.
-func (db *Database) buildTextUnionQuery(criteria *imap.SearchCriteria, mailboxID, accountID int64, branchSelect, sortColumns, outerSelect, orderByClause string, resultLimit int, paramCounter *int) (string, pgx.NamedArgs, error) {
+//
+// prefilterBody selects the body branch's shape, exactly as for a BODY search (see
+// ftsCTEThreshold): a large mailbox evaluates the account's matches for the term once and
+// joins them in, a small one probes the FTS table per message. Neither wins everywhere.
+func (db *Database) buildTextUnionQuery(criteria *imap.SearchCriteria, mailboxID, accountID int64, branchSelect, sortColumns, outerSelect, orderByClause string, resultLimit int, prefilterBody bool, paramCounter *int) (string, pgx.NamedArgs, error) {
 	// Base (non-Text) conditions, replicated into both branches. A shallow copy with
 	// Text cleared is sufficient: buildSearchCriteriaWithPrefix only reads the criteria.
 	base := *criteria
@@ -674,18 +679,17 @@ func (db *Database) buildTextUnionQuery(criteria *imap.SearchCriteria, mailboxID
 		limitClause = fmt.Sprintf("LIMIT %d", resultLimit)
 	}
 
-	// The body branch uses a materialized CTE on messages_fts_v2 scoped to @accountID.
-	// This evaluates the composite GIN index ONCE for the account to find matching content hashes (1-2 ms),
-	// rather than joining messages_fts_v2 and scanning/detoasting tsvectors across every message in the mailbox.
+	withClause := "WITH "
+	bodyJoin := ftsScopedJoin
+	bodyCond := fmt.Sprintf("text_body_tsv IS NOT NULL AND text_body_tsv @@ plainto_tsquery('simple', @%s)", tsParam)
+	if prefilterBody {
+		withClause = "WITH " + fmt.Sprintf(ftsPrefilterCTE, tsParam) + ",\n"
+		bodyJoin = "JOIN fts_hits ON fts_hits.content_hash = m.content_hash"
+		bodyCond = "TRUE"
+	}
+
 	query := fmt.Sprintf(`
-		WITH fts_hits AS MATERIALIZED (
-			SELECT content_hash
-			FROM messages_fts_v2
-			WHERE account_id = @accountID
-			  AND text_body_tsv IS NOT NULL
-			  AND text_body_tsv @@ plainto_tsquery('simple', @%[5]s)
-		),
-		matched AS (
+		%[9]smatched AS (
 			SELECT %[1]s, %[2]s
 			FROM messages m
 			LEFT JOIN message_state ms ON ms.message_id = m.id AND ms.mailbox_id = m.mailbox_id
@@ -693,15 +697,15 @@ func (db *Database) buildTextUnionQuery(criteria *imap.SearchCriteria, mailboxID
 			UNION
 			SELECT %[1]s, %[2]s
 			FROM messages m
-			JOIN fts_hits ON fts_hits.content_hash = m.content_hash
+			%[10]s
 			LEFT JOIN message_state ms ON ms.message_id = m.id AND ms.mailbox_id = m.mailbox_id
-			WHERE m.mailbox_id = @mailboxID AND m.expunged_at IS NULL AND (%[3]s)
+			WHERE m.mailbox_id = @mailboxID AND m.expunged_at IS NULL AND (%[3]s) AND (%[5]s)
 		)
 		SELECT %[6]s
 		FROM matched f
 		%[7]s
 		%[8]s`,
-		branchSelect, sortColumns, baseCond, headerCond, tsParam, outerSelect, outerOrder, limitClause)
+		branchSelect, sortColumns, baseCond, headerCond, bodyCond, outerSelect, outerOrder, limitClause, withClause, bodyJoin)
 
 	return query, args, nil
 }
@@ -1078,11 +1082,15 @@ func (db *Database) getMessagesQueryExecutor(ctx context.Context, mailboxID, acc
 		// header branch (trigram indexes on messages) UNION an indexable body branch
 		// (FTS GIN on messages_fts), avoiding the full-mailbox-scan + per-row probe the
 		// combined OR forces on large mailboxes. See canUseTextUnion.
-		finalQueryString, whereArgs, err = db.buildTextUnionQuery(criteria, mailboxID, accountID, ftsFullBranchSelect, textUnionSortColumnsFull, ftsFullOuterSelect, orderByClause, resultLimit, &paramCounter)
+		prefilterBody := mailboxMessageCount >= ftsCTEThreshold
+		finalQueryString, whereArgs, err = db.buildTextUnionQuery(criteria, mailboxID, accountID, ftsFullBranchSelect, textUnionSortColumnsFull, ftsFullOuterSelect, orderByClause, resultLimit, prefilterBody, &paramCounter)
 		if err != nil {
 			return nil, err
 		}
 		metricsLabel = "search_messages_complex_text_union"
+		if prefilterBody {
+			metricsLabel = "search_messages_complex_text_union_prefilter"
+		}
 
 	} else if db.canUseFTSPrefilter(criteria, needsSeqNumSearch, orderByClause, mailboxMessageCount) {
 		// LARGE-MAILBOX path: evaluate the account's body matches once instead of probing
@@ -1434,11 +1442,15 @@ func (db *Database) getSearchMessagesQueryExecutor(ctx context.Context, mailboxI
 	} else if db.canUseTextUnion(criteria, needsSeqNumSearch, orderByClause) {
 		// TEXT UNION path (lightweight columns): see canUseTextUnion and the matching
 		// branch in getMessagesQueryExecutor.
-		finalQueryString, whereArgs, err = db.buildTextUnionQuery(criteria, mailboxID, accountID, ftsLightBranchSelect, textUnionSortColumnsLight, ftsLightOuterSelect, orderByClause, resultLimit, &paramCounter)
+		prefilterBody := mailboxMessageCount >= ftsCTEThreshold
+		finalQueryString, whereArgs, err = db.buildTextUnionQuery(criteria, mailboxID, accountID, ftsLightBranchSelect, textUnionSortColumnsLight, ftsLightOuterSelect, orderByClause, resultLimit, prefilterBody, &paramCounter)
 		if err != nil {
 			return nil, err
 		}
 		metricsLabel = "search_messages_complex_text_union"
+		if prefilterBody {
+			metricsLabel = "search_messages_complex_text_union_prefilter"
+		}
 
 	} else if db.canUseFTSPrefilter(criteria, needsSeqNumSearch, orderByClause, mailboxMessageCount) {
 		// LARGE-MAILBOX path: see ftsCTEThreshold.
