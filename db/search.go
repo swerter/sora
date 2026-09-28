@@ -596,23 +596,20 @@ func (db *Database) canUseTextUnion(criteria *imap.SearchCriteria, needsSeqNumSe
 	return true
 }
 
-// buildTextSearchBranches generates the two SQL predicates for a single IMAP TEXT
-// term, split for the UNION rewrite. The body predicate matches messages_fts.
-// text_body_tsv (unqualified so it resolves to the joined messages_fts row, exactly
-// as in buildSearchCriteriaWithPrefix); the header predicate matches the indexed
-// messages.* sort columns. Together they are semantically identical to the combined
-// OR produced for criteria.Text, just separated so each side can use its own index.
-func buildTextSearchBranches(text string, args pgx.NamedArgs, paramPrefix string, paramCounter *int) (headerCond, bodyCond string) {
+// buildTextSearchBranches generates the header predicate and returns the tsquery parameter
+// name for a single IMAP TEXT term. The body predicate matches messages_fts_v2 via the
+// materialized fts_hits CTE in buildTextUnionQuery; the header predicate matches the indexed
+// messages.* sort columns.
+func buildTextSearchBranches(text string, args pgx.NamedArgs, paramPrefix string, paramCounter *int) (headerCond, tsParam string) {
 	next := func() string {
 		*paramCounter++
 		return fmt.Sprintf("%s%d", paramPrefix, *paramCounter)
 	}
-	tsParam := next()
+	tsParam = next()
 	args[tsParam] = text
 	likeParam := next()
 	args[likeParam] = "%" + strings.ToLower(text) + "%"
 
-	bodyCond = fmt.Sprintf("text_body_tsv IS NOT NULL AND text_body_tsv @@ plainto_tsquery('simple', @%s)", tsParam)
 	headerCond = fmt.Sprintf(
 		"(LOWER(m.subject) LIKE @%[1]s "+
 			"OR m.from_email_sort LIKE @%[1]s "+
@@ -621,7 +618,7 @@ func buildTextSearchBranches(text string, args pgx.NamedArgs, paramPrefix string
 			"OR m.to_name_sort LIKE @%[1]s "+
 			"OR m.cc_email_sort LIKE @%[1]s)",
 		likeParam)
-	return headerCond, bodyCond
+	return headerCond, tsParam
 }
 
 // Sort columns carried through the UNION CTE (in addition to each branch's data
@@ -653,7 +650,7 @@ func (db *Database) buildTextUnionQuery(criteria *imap.SearchCriteria, mailboxID
 		return "", nil, err
 	}
 
-	headerCond, bodyCond := buildTextSearchBranches(criteria.Text[0], args, paramPrefix, paramCounter)
+	headerCond, tsParam := buildTextSearchBranches(criteria.Text[0], args, paramPrefix, paramCounter)
 
 	if orderByClause == "" {
 		orderByClause = "ORDER BY m.uid DESC"
@@ -677,8 +674,18 @@ func (db *Database) buildTextUnionQuery(criteria *imap.SearchCriteria, mailboxID
 		limitClause = fmt.Sprintf("LIMIT %d", resultLimit)
 	}
 
+	// The body branch uses a materialized CTE on messages_fts_v2 scoped to @accountID.
+	// This evaluates the composite GIN index ONCE for the account to find matching content hashes (1-2 ms),
+	// rather than joining messages_fts_v2 and scanning/detoasting tsvectors across every message in the mailbox.
 	query := fmt.Sprintf(`
-		WITH matched AS (
+		WITH fts_hits AS MATERIALIZED (
+			SELECT content_hash
+			FROM messages_fts_v2
+			WHERE account_id = @accountID
+			  AND text_body_tsv IS NOT NULL
+			  AND text_body_tsv @@ plainto_tsquery('simple', @%[5]s)
+		),
+		matched AS (
 			SELECT %[1]s, %[2]s
 			FROM messages m
 			LEFT JOIN message_state ms ON ms.message_id = m.id AND ms.mailbox_id = m.mailbox_id
@@ -686,15 +693,15 @@ func (db *Database) buildTextUnionQuery(criteria *imap.SearchCriteria, mailboxID
 			UNION
 			SELECT %[1]s, %[2]s
 			FROM messages m
-			`+ftsScopedJoin+`
+			JOIN fts_hits ON fts_hits.content_hash = m.content_hash
 			LEFT JOIN message_state ms ON ms.message_id = m.id AND ms.mailbox_id = m.mailbox_id
-			WHERE m.mailbox_id = @mailboxID AND m.expunged_at IS NULL AND (%[3]s) AND (%[5]s)
+			WHERE m.mailbox_id = @mailboxID AND m.expunged_at IS NULL AND (%[3]s)
 		)
 		SELECT %[6]s
 		FROM matched f
 		%[7]s
 		%[8]s`,
-		branchSelect, sortColumns, baseCond, headerCond, bodyCond, outerSelect, outerOrder, limitClause)
+		branchSelect, sortColumns, baseCond, headerCond, tsParam, outerSelect, outerOrder, limitClause)
 
 	return query, args, nil
 }

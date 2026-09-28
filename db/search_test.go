@@ -217,11 +217,12 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 
 		// Two indexable branches, UNIONed.
 		assert.Contains(t, query, "UNION")
-		// Body branch: FTS join + tsvector predicate.
-		// Body branch joins the PER-ACCOUNT table, scoped in the ON clause. The scope must
-		// never move into WHERE: this is a LEFT JOIN, and a WHERE-side account qual would
-		// drop every message that has no FTS row at all.
-		assert.Contains(t, query, "LEFT JOIN messages_fts_v2 mc ON mc.content_hash = m.content_hash AND mc.account_id = @accountID")
+		// Body branch: materialized fts_hits CTE + join.
+		// The FTS lookup is evaluated once for the account via the composite GIN,
+		// and the body branch joins fts_hits on content_hash.
+		assert.Contains(t, query, "WITH fts_hits AS MATERIALIZED")
+		assert.Contains(t, query, "WHERE account_id = @accountID")
+		assert.Contains(t, query, "JOIN fts_hits ON fts_hits.content_hash = m.content_hash")
 		assert.Contains(t, query, "text_body_tsv @@ plainto_tsquery('simple',")
 		// Header branch: trigram-indexable LIKE columns.
 		assert.Contains(t, query, "LOWER(m.subject) LIKE")
