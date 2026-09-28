@@ -308,7 +308,7 @@ END $$;
 -- itself reporting 0 rows twice in a row.
 -- ---------------------------------------------------------------------------------------
 DROP VIEW IF EXISTS fts_v2_verification;
-CREATE OR REPLACE FUNCTION fts_v2_verification(p_recent_ids bigint DEFAULT 1000000)
+CREATE OR REPLACE FUNCTION fts_v2_verification(p_recent_ids bigint DEFAULT 100000)
 RETURNS TABLE (
     v1_rows_est bigint, v2_rows_est bigint, v2_queued bigint, v2_queue_backlog bigint,
     recent_missing_pairs bigint, checked_from_id bigint,
@@ -329,12 +329,12 @@ BEGIN
         (SELECT count(*) FROM (
             SELECT DISTINCT m.content_hash, COALESCE(mb.account_id, m.account_id) AS account_id
             FROM messages m
-            JOIN messages_fts f ON f.content_hash = m.content_hash
             LEFT JOIN mailboxes mb ON mb.id = m.mailbox_id
             WHERE m.id > (SELECT from_id FROM bounds)
          ) want
          WHERE NOT EXISTS (SELECT 1 FROM messages_fts_v2 v
-                           WHERE v.content_hash = want.content_hash AND v.account_id = want.account_id)),
+                           WHERE v.content_hash = want.content_hash AND v.account_id = want.account_id)
+           AND EXISTS (SELECT 1 FROM messages_fts f WHERE f.content_hash = want.content_hash)),
         (SELECT from_id FROM bounds),
         (SELECT lo FROM fts_v2_backfill_state WHERE step = 'recent'),
         EXISTS (SELECT 1 FROM fts_v2_backfill_state WHERE step = 'rest'),
