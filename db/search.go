@@ -60,6 +60,14 @@ func isCriteriaSearchAll(criteria *imap.SearchCriteria) bool {
 
 // buildSearchCriteriaWithPrefix builds the SQL WHERE clause with configurable table prefix
 func (db *Database) buildSearchCriteriaWithPrefix(criteria *imap.SearchCriteria, paramPrefix string, paramCounter *int, tablePrefix string) (string, pgx.NamedArgs, error) {
+	return db.buildSearchCriteriaTree(criteria, paramPrefix, paramCounter, tablePrefix, nil)
+}
+
+// buildSearchCriteriaTree is buildSearchCriteriaWithPrefix with a choice of how full-text
+// leaves are tested. With hits nil they test the per-message messages_fts_v2 join
+// (ftsScopedJoin); with hits set they test a precomputed match set instead (see ftsHitSets),
+// and the query must join hits' sets in place of the FTS table.
+func (db *Database) buildSearchCriteriaTree(criteria *imap.SearchCriteria, paramPrefix string, paramCounter *int, tablePrefix string, hits *ftsHitSets) (string, pgx.NamedArgs, error) {
 	var conditions []string
 	args := pgx.NamedArgs{}
 
@@ -140,6 +148,10 @@ func (db *Database) buildSearchCriteriaWithPrefix(criteria *imap.SearchCriteria,
 	// Body full-text search
 	// Note: text_body_tsv is in messages_fts table, which is only available in complex query path
 	for _, bodyCriteria := range criteria.Body {
+		if hits != nil {
+			conditions = append(conditions, hits.leaf(bodyCriteria, args, nextParam))
+			continue
+		}
 		param := nextParam()
 		args[param] = bodyCriteria
 		// Handle case where FTS data may be cleaned up (text_body_tsv is NULL)
@@ -156,8 +168,14 @@ func (db *Database) buildSearchCriteriaWithPrefix(criteria *imap.SearchCriteria,
 	// (From/To/Cc/Subject) have dedicated indexed columns. The headers_tsv index was
 	// 7.5 GB (vs text_body_tsv at 1.2 GB) and caused 12+ second UPDATE queries.
 	for _, textCriteria := range criteria.Text {
-		param := nextParam()
-		args[param] = textCriteria
+		var bodyCond string
+		if hits != nil {
+			bodyCond = hits.leaf(textCriteria, args, nextParam)
+		} else {
+			param := nextParam()
+			args[param] = textCriteria
+			bodyCond = fmt.Sprintf("text_body_tsv IS NOT NULL AND text_body_tsv @@ plainto_tsquery('simple', @%s)", param)
+		}
 		likeParam := nextParam()
 		lowerText := strings.ToLower(textCriteria)
 		args[likeParam] = "%" + lowerText + "%"
@@ -166,14 +184,14 @@ func (db *Database) buildSearchCriteriaWithPrefix(criteria *imap.SearchCriteria,
 		// Note: text_body_tsv is in messages_fts table (complex query only)
 		// Note: *_sort columns are already lowercase, so no need for LOWER()
 		conditions = append(conditions, fmt.Sprintf(
-			"((text_body_tsv IS NOT NULL AND text_body_tsv @@ plainto_tsquery('simple', @%s)) "+
+			"((%s) "+
 				"OR LOWER(%ssubject) LIKE @%s "+
 				"OR %sfrom_email_sort LIKE @%s "+
 				"OR %sfrom_name_sort LIKE @%s "+
 				"OR %sto_email_sort LIKE @%s "+
 				"OR %sto_name_sort LIKE @%s "+
 				"OR %scc_email_sort LIKE @%s)",
-			param, datePrefix, likeParam,
+			bodyCond, datePrefix, likeParam,
 			datePrefix, likeParam, datePrefix, likeParam,
 			datePrefix, likeParam, datePrefix, likeParam,
 			datePrefix, likeParam))
@@ -295,7 +313,7 @@ func (db *Database) buildSearchCriteriaWithPrefix(criteria *imap.SearchCriteria,
 
 	// Recursive NOT
 	for _, notCriteria := range criteria.Not {
-		subCond, subArgs, err := db.buildSearchCriteriaWithPrefix(&notCriteria, paramPrefix, paramCounter, tablePrefix)
+		subCond, subArgs, err := db.buildSearchCriteriaTree(&notCriteria, paramPrefix, paramCounter, tablePrefix, hits)
 		if err != nil {
 			return "", nil, err
 		}
@@ -305,11 +323,11 @@ func (db *Database) buildSearchCriteriaWithPrefix(criteria *imap.SearchCriteria,
 
 	// Recursive OR
 	for _, orPair := range criteria.Or {
-		leftCond, leftArgs, err := db.buildSearchCriteriaWithPrefix(&orPair[0], paramPrefix, paramCounter, tablePrefix)
+		leftCond, leftArgs, err := db.buildSearchCriteriaTree(&orPair[0], paramPrefix, paramCounter, tablePrefix, hits)
 		if err != nil {
 			return "", nil, err
 		}
-		rightCond, rightArgs, err := db.buildSearchCriteriaWithPrefix(&orPair[1], paramPrefix, paramCounter, tablePrefix)
+		rightCond, rightArgs, err := db.buildSearchCriteriaTree(&orPair[1], paramPrefix, paramCounter, tablePrefix, hits)
 		if err != nil {
 			return "", nil, err
 		}
@@ -683,7 +701,7 @@ func (db *Database) buildTextUnionQuery(criteria *imap.SearchCriteria, mailboxID
 	bodyJoin := ftsScopedJoin
 	bodyCond := fmt.Sprintf("text_body_tsv IS NOT NULL AND text_body_tsv @@ plainto_tsquery('simple', @%s)", tsParam)
 	if prefilterBody {
-		withClause = "WITH " + fmt.Sprintf(ftsPrefilterCTE, tsParam) + ",\n"
+		withClause = "WITH " + ftsHitsCTE("fts_hits", tsParam) + ",\n"
 		bodyJoin = "JOIN fts_hits ON fts_hits.content_hash = m.content_hash"
 		bodyCond = "TRUE"
 	}
@@ -747,27 +765,10 @@ const (
 // a caller that has no count at all (User API, MULTISEARCH) passes 0 and gets the probe.
 const ftsCTEThreshold = 10000
 
-// ftsPrefilterTerm returns the single top-level full-text term of a search, if it has
-// exactly one and that term is not buried inside an OR/NOT subtree.
-//
-// The prefilter turns the FTS predicate into an INNER join against a materialised match
-// set, which is only equivalent to the original when the term is a required AND factor. A
-// term inside OR/NOT is not, and a second term would need a second match set, so both are
-// rejected -- the same conservatism canUseTextUnion applies.
-func ftsPrefilterTerm(c *imap.SearchCriteria) (term string, ok bool) {
-	if c == nil || hasNestedFTS(c) {
-		return "", false
-	}
-	switch {
-	case len(c.Body) == 1 && len(c.Text) == 0:
-		return c.Body[0], true
-	default:
-		return "", false
-	}
-}
-
-// canUseFTSPrefilter reports whether a search should be rewritten to evaluate its body term
-// once, account-scoped, instead of probing per message. See ftsCTEThreshold.
+// canUseFTSPrefilter reports whether a search should be rewritten to evaluate its full-text
+// terms once each, account-scoped, instead of probing the FTS table per message. See
+// ftsCTEThreshold for why the choice is made by mailbox size, and buildFTSPrefilterQuery for
+// the shape.
 func (db *Database) canUseFTSPrefilter(criteria *imap.SearchCriteria, needsSeqNumSearch bool, orderByClause string, mailboxMessageCount int) bool {
 	if needsSeqNumSearch || mailboxMessageCount < ftsCTEThreshold {
 		return false
@@ -775,45 +776,102 @@ func (db *Database) canUseFTSPrefilter(criteria *imap.SearchCriteria, needsSeqNu
 	if strings.Contains(strings.ToLower(orderByClause), "seqnum") {
 		return false
 	}
-	_, ok := ftsPrefilterTerm(criteria)
-	return ok
+	return criteriaContainsFTS(criteria)
 }
 
-// ftsPrefilterCTE is the account-scoped match set. MATERIALIZED is load-bearing: without it
+// ftsHitsCTE renders one account-scoped match set: the content hashes of the account's bodies
+// that match every given tsquery parameter. MATERIALIZED is load-bearing: without it
 // PostgreSQL inlines the subquery and is free to fall back to the per-message probe this
-// rewrite exists to avoid.
-const ftsPrefilterCTE = `fts_hits AS MATERIALIZED (
+// rewrite exists to avoid. "text_body_tsv IS NOT NULL" is what makes the PARTIAL composite GIN
+// usable, and a bound @accountID (int8, like the column) is what lets it scope by account.
+func ftsHitsCTE(name string, tsParams ...string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `%s AS MATERIALIZED (
 			SELECT content_hash
 			FROM messages_fts_v2
 			WHERE account_id = @accountID
-			  AND text_body_tsv IS NOT NULL
-			  AND text_body_tsv @@ plainto_tsquery('simple', @%s)
-		)`
+			  AND text_body_tsv IS NOT NULL`, name)
+	for _, p := range tsParams {
+		fmt.Fprintf(&b, "\n\t\t\t  AND text_body_tsv @@ plainto_tsquery('simple', @%s)", p)
+	}
+	b.WriteString("\n\t\t)")
+	return b.String()
+}
 
-// buildFTSPrefilterQuery builds the large-mailbox form of a single-BODY-term search: the
-// account's matching hashes are computed once and joined to the mailbox, rather than the
-// mailbox being scanned and the FTS table probed per row.
+// ftsHitSets gives each full-text leaf that is not a required AND factor its own match set:
+// a term inside OR or NOT, and every TEXT term, which ORs the body with the headers. Such a
+// leaf cannot be an inner join, so its set is LEFT JOINed and the leaf tests whether the
+// message's body was in it.
 //
-// Every non-FTS criterion is built as usual and applied to the messages side, so combined
-// searches (BODY + flags/dates/etc.) stay correct.
-func (db *Database) buildFTSPrefilterQuery(criteria *imap.SearchCriteria, mailboxID, accountID int64, innerSelect, outerSelect, orderByClause string, resultLimit int, paramCounter *int) (string, pgx.NamedArgs, error) {
-	term, ok := ftsPrefilterTerm(criteria)
+// That test is two-valued, exactly like the per-message form it replaces: a message whose
+// body did not match, or has no FTS row at all, gets FALSE and never NULL, so NOT keeps its
+// true negatives and TEXT keeps its header-only matches. A set holds at most one row per
+// content_hash (the table's key is (content_hash, account_id) and a set is one account's), so
+// the joins never duplicate a message. A term repeated in the tree reuses its set.
+type ftsHitSets struct {
+	byTerm map[string]string
+	ctes   []string
+	joins  []string
+}
+
+// leaf registers term's match set if it is new, binding its tsquery argument into args, and
+// returns the leaf's predicate.
+func (h *ftsHitSets) leaf(term string, args pgx.NamedArgs, nextParam func() string) string {
+	name, ok := h.byTerm[term]
 	if !ok {
-		return "", nil, fmt.Errorf("buildFTSPrefilterQuery: criteria are not prefilter-eligible")
+		if h.byTerm == nil {
+			h.byTerm = map[string]string{}
+		}
+		param := nextParam()
+		args[param] = term
+		name = fmt.Sprintf("fts_hits_%d", len(h.ctes)+1)
+		h.byTerm[term] = name
+		h.ctes = append(h.ctes, ftsHitsCTE(name, param))
+		h.joins = append(h.joins, fmt.Sprintf("LEFT JOIN %[1]s ON %[1]s.content_hash = m.content_hash", name))
+	}
+	return name + ".content_hash IS NOT NULL"
+}
+
+// buildFTSPrefilterQuery builds the large-mailbox form of a full-text search: every term is
+// evaluated once against the account's rows through the composite GIN, rather than the
+// mailbox being scanned and every message's vector detoasted and tested.
+//
+//   - Top-level BODY terms are required AND factors. They share one set, fts_hits, which
+//     the GIN intersects before touching the heap, and it is INNER joined.
+//   - Every other full-text leaf gets its own LEFT JOINed set (see ftsHitSets).
+//
+// The FTS table itself is never joined per message. Every non-FTS criterion is built as usual
+// and applied to the messages side, so combined searches (BODY + flags/dates/etc.) stay
+// correct.
+func (db *Database) buildFTSPrefilterQuery(criteria *imap.SearchCriteria, mailboxID, accountID int64, innerSelect, outerSelect, orderByClause string, resultLimit int, paramCounter *int) (string, pgx.NamedArgs, error) {
+	if !criteriaContainsFTS(criteria) {
+		return "", nil, fmt.Errorf("buildFTSPrefilterQuery: criteria have no full-text term")
 	}
 
-	// A shallow copy with the FTS term cleared is enough: buildSearchCriteriaWithPrefix
-	// only reads the criteria.
+	// A shallow copy with the required terms cleared is enough: buildSearchCriteriaTree only
+	// reads the criteria.
 	base := *criteria
 	base.Body = nil
-	baseCond, args, err := db.buildSearchCriteriaWithPrefix(&base, paramPrefix, paramCounter, "m")
+	hits := &ftsHitSets{}
+	baseCond, args, err := db.buildSearchCriteriaTree(&base, paramPrefix, paramCounter, "m", hits)
 	if err != nil {
 		return "", nil, err
 	}
 
-	*paramCounter++
-	tsParam := fmt.Sprintf("%s%d", paramPrefix, *paramCounter)
-	args[tsParam] = term
+	var ctes, joins []string
+	if len(criteria.Body) > 0 {
+		params := make([]string, len(criteria.Body))
+		for i, term := range criteria.Body {
+			*paramCounter++
+			params[i] = fmt.Sprintf("%s%d", paramPrefix, *paramCounter)
+			args[params[i]] = term
+		}
+		ctes = append(ctes, ftsHitsCTE("fts_hits", params...))
+		joins = append(joins, "JOIN fts_hits ON fts_hits.content_hash = m.content_hash")
+	}
+	ctes = append(ctes, hits.ctes...)
+	joins = append(joins, hits.joins...)
+
 	args["mailboxID"] = mailboxID
 	args["accountID"] = accountID
 
@@ -835,11 +893,11 @@ func (db *Database) buildFTSPrefilterQuery(criteria *imap.SearchCriteria, mailbo
 	}
 
 	query := fmt.Sprintf(`
-		WITH `+ftsPrefilterCTE+`,
+		WITH %s,
 		filtered_messages AS (
 			SELECT %s
 			FROM messages m
-			JOIN fts_hits ON fts_hits.content_hash = m.content_hash
+			%s
 			LEFT JOIN message_state ms ON ms.message_id = m.id AND ms.mailbox_id = m.mailbox_id
 			WHERE m.mailbox_id = @mailboxID AND m.expunged_at IS NULL AND (%s)
 			%s
@@ -847,7 +905,7 @@ func (db *Database) buildFTSPrefilterQuery(criteria *imap.SearchCriteria, mailbo
 		)
 		SELECT %s
 		FROM filtered_messages f
-		%s`, tsParam, innerSelect, baseCond, innerOrder, limitClause, outerSelect, outerOrder)
+		%s`, strings.Join(ctes, ",\n\t\t"), innerSelect, strings.Join(joins, "\n\t\t\t"), baseCond, innerOrder, limitClause, outerSelect, outerOrder)
 
 	return query, args, nil
 }

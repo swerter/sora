@@ -130,13 +130,13 @@ func TestCanUseFTSPrefilter(t *testing.T) {
 			"at and above the threshold the probe degrades to a full mailbox scan with a detoast per row"},
 		{"unknown mailbox size keeps the probe", body("invoice"), false, "", 0, false,
 			"callers with no count (User API, MULTISEARCH) must get the safe default"},
-		{"two body terms are rejected", body("a", "b"), false, "", 100000, false,
-			"each term would need its own match set"},
-		{"TEXT is rejected", &imap.SearchCriteria{Text: []string{"a"}}, false, "", 100000, false,
-			"TEXT means body OR headers; an inner join on body hits would lose header matches"},
-		{"nested FTS is rejected", &imap.SearchCriteria{
+		{"two body terms share one match set", body("a", "b"), false, "", 100000, true,
+			"required terms are intersected inside one account-scoped match set"},
+		{"TEXT gets its own match set", &imap.SearchCriteria{Text: []string{"a"}}, false, "", 100000, true,
+			"TEXT is body OR headers, so its body side is a LEFT JOINed match set, not an inner join"},
+		{"nested FTS gets its own match set", &imap.SearchCriteria{
 			Or: [][2]imap.SearchCriteria{{{Body: []string{"a"}}, {Body: []string{"b"}}}},
-		}, false, "", 100000, false, "an FTS term inside OR is not a required AND factor"},
+		}, false, "", 100000, true, "a term inside OR/NOT is tested against its own LEFT JOINed match set"},
 		{"seqnum search is rejected", body("invoice"), true, "", 100000, false,
 			"sequence numbers need the legacy CTE"},
 		{"seqnum ORDER BY is rejected", body("invoice"), false, "ORDER BY seqnum", 100000, false,
@@ -190,13 +190,69 @@ func TestBuildFTSPrefilterQuerySQL(t *testing.T) {
 	assert.True(t, sawTerm, "tsquery arg should preserve the original term case")
 }
 
-// Non-eligible criteria must be refused rather than silently mis-built: the prefilter is
-// an INNER join against a body-only match set, so applying it to anything but a single
-// required body term changes the result.
+// A search with no full-text term has nothing to prefilter and must be refused rather than
+// built into a query with an empty match set.
 func TestBuildFTSPrefilterQueryRefusesIneligibleCriteria(t *testing.T) {
 	var db *Database
 	paramCounter := 0
-	_, _, err := db.buildFTSPrefilterQuery(&imap.SearchCriteria{Text: []string{"a"}}, 42, 7,
+	_, _, err := db.buildFTSPrefilterQuery(&imap.SearchCriteria{Flag: []imap.Flag{imap.FlagSeen}}, 42, 7,
 		ftsLightBranchSelect, ftsLightOuterSelect, "", 100, &paramCounter)
 	require.Error(t, err)
+}
+
+// Terms that are not required AND factors -- inside OR or NOT, or TEXT (body OR headers) --
+// each get their own account-scoped match set, LEFT JOINed, and the leaf becomes a test of
+// whether the message's body was in it. Required top-level BODY terms are intersected in one
+// combined set, inner-joined, so the GIN can AND them before any heap is touched.
+func TestBuildFTSPrefilterQueryNestedTerms(t *testing.T) {
+	var db *Database
+	paramCounter := 0
+	criteria := &imap.SearchCriteria{
+		Body: []string{"alpha", "beta"},
+		Text: []string{"delta"},
+		Or: [][2]imap.SearchCriteria{{
+			{Header: []imap.SearchCriteriaHeaderField{{Key: "Subject", Value: "invoice"}}},
+			{Body: []string{"gamma"}},
+		}},
+		Not: []imap.SearchCriteria{{Body: []string{"gamma"}}},
+	}
+
+	query, args, err := db.buildFTSPrefilterQuery(criteria, 42, 7,
+		ftsLightBranchSelect+", "+textUnionSortColumnsLight, ftsLightOuterSelect, "", MaxSearchResults, &paramCounter)
+	require.NoError(t, err)
+
+	// The required terms: one combined set, inner-joined.
+	assert.Equal(t, 1, strings.Count(query, "fts_hits AS MATERIALIZED"))
+	assert.Regexp(t, `(?m)^\s*JOIN fts_hits ON fts_hits\.content_hash = m\.content_hash`, query,
+		"the required set is an INNER join; a LEFT join would stop it filtering")
+
+	// TEXT delta and the (deduplicated) gamma each get one LEFT JOINed set.
+	assert.Equal(t, 1, strings.Count(query, "fts_hits_1 AS MATERIALIZED"))
+	assert.Equal(t, 1, strings.Count(query, "fts_hits_2 AS MATERIALIZED"))
+	assert.NotContains(t, query, "fts_hits_3", "a repeated term must reuse its match set")
+	assert.Contains(t, query, "LEFT JOIN fts_hits_1 ON fts_hits_1.content_hash = m.content_hash")
+	assert.Contains(t, query, "LEFT JOIN fts_hits_2 ON fts_hits_2.content_hash = m.content_hash")
+
+	// Every match set is account-scoped and usable by the partial composite GIN; four terms,
+	// four tsqueries, and none of them evaluated per message.
+	assert.Equal(t, 3, strings.Count(query, "WHERE account_id = @accountID"))
+	assert.Equal(t, 3, strings.Count(query, "text_body_tsv IS NOT NULL"))
+	assert.Equal(t, 4, strings.Count(query, "text_body_tsv @@ plainto_tsquery('simple',"))
+	assert.NotContains(t, query, "messages_fts_v2 mc", "the per-message probe must be gone entirely")
+	assert.NotContains(t, query, "m.account_id = @accountID")
+
+	// delta is tested once (TEXT), gamma twice (inside OR and inside NOT).
+	assert.Equal(t, 1, strings.Count(query, "fts_hits_1.content_hash IS NOT NULL"))
+	assert.Equal(t, 2, strings.Count(query, "fts_hits_2.content_hash IS NOT NULL"))
+
+	assert.Equal(t, int64(7), args["accountID"])
+	terms := map[string]bool{}
+	for _, v := range args {
+		if s, ok := v.(string); ok {
+			terms[s] = true
+		}
+	}
+	for _, term := range []string{"alpha", "beta", "delta", "gamma"} {
+		assert.True(t, terms[term], "term %q must be bound", term)
+	}
 }
