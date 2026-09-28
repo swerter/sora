@@ -156,3 +156,53 @@ func TestDeliveryStagesBothFTSTables(t *testing.T) {
 		"NO per-account FTS row was staged, so this message will never be searchable by body. "+
 			"stageFTS logs and swallows this failure, so check the warning it emitted")
 }
+
+func TestRestageFTSSameAccountIsNoOp(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration test in short mode")
+	}
+
+	db, _, accountID, mailboxID := setupCleanerTestDatabase(t)
+	defer db.Close()
+
+	ctx := context.Background()
+	ts := time.Now().UnixNano()
+	contentHash := fmt.Sprintf("same_account_%d", ts)
+
+	// Destination account ALREADY has the FTS row (from initial delivery).
+	_, err := db.GetWritePool().Exec(ctx, `
+		INSERT INTO messages_fts_v2 (content_hash, account_id, text_body_tsv, sent_date)
+		VALUES ($1, $2, to_tsvector('simple', 'sameaccounttest'), now())
+	`, contentHash, accountID)
+	require.NoError(t, err)
+
+	// Insert message into mailbox
+	_, err = db.GetWritePool().Exec(ctx, `
+		WITH inserted AS (
+			INSERT INTO messages (account_id, mailbox_id, uid, content_hash, subject, sent_date,
+			                      internal_date, size, uploaded, s3_domain, s3_localpart,
+			                      message_id, body_structure, recipients_json, created_modseq)
+			VALUES ($1, $2, 9401, $3, 'Moved', now(), now(), 100, TRUE, 'domain', 'part', '<msg@example.com>',
+			        'body', '[]', nextval('messages_modseq'))
+			RETURNING id, mailbox_id
+		)
+		INSERT INTO message_state (message_id, mailbox_id, flags)
+		SELECT id, mailbox_id, 0 FROM inserted
+	`, accountID, mailboxID, contentHash)
+	require.NoError(t, err)
+
+	tx, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+
+	// Re-staging for an account that already has the row should return without error
+	require.NoError(t, db.restageFTS(ctx, tx, mailboxID, []int64{9401}))
+	require.NoError(t, tx.Commit(ctx))
+
+	// Ensure vector was not overwritten or nulled out
+	var hasVector bool
+	require.NoError(t, db.GetReadPool().QueryRow(ctx, `
+		SELECT text_body_tsv IS NOT NULL FROM messages_fts_v2 WHERE content_hash = $1 AND account_id = $2
+	`, contentHash, accountID).Scan(&hasVector))
+	assert.True(t, hasVector, "existing FTS vector must remain untouched")
+}
+

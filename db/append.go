@@ -223,8 +223,8 @@ func (db *Database) restagePendingUploads(ctx context.Context, tx pgx.Tx, mailbo
 // (content_hash, account_id), so a cross-account COPY or MOVE lands a message under an
 // account that has no row for that body: without this it would be silently unsearchable in
 // the destination, exactly as it would be unreadable without the pending_upload re-stage.
-// Same-account copies and every same-account move already have the row, and the ON CONFLICT
-// makes those a no-op.
+// Same-account copies and every same-account move already have the row, and the NOT EXISTS
+// filter makes those a zero-cost no-op that takes NO advisory locks.
 //
 // The new rows carry no text: the body was staged (or already indexed) when the source
 // message was delivered, so the FTS worker fills these by copying the finished vector from
@@ -235,32 +235,70 @@ func (db *Database) restageFTS(ctx context.Context, tx pgx.Tx, mailboxID int64, 
 	if len(newUIDs) == 0 {
 		return nil
 	}
-	// Acquire shared advisory locks on all distinct content_hashes for these messages
-	// so any concurrent orphan sweep for these hashes either skips them (if restage
-	// arrived first) or restage waits for the sweep to commit (if sweep arrived first)
-	// so the v2 insert's statement snapshot sees the deletion and inserts fresh.
-	if _, err := tx.Exec(ctx, `
-		SELECT pg_advisory_xact_lock_shared($1, hashtext(m.content_hash))
-		FROM (
-			SELECT DISTINCT m.content_hash
-			FROM messages m
-			WHERE m.mailbox_id = $2 AND m.uid = ANY($3) AND m.expunged_at IS NULL
-		) m`,
-		consts.SoraFTSOrphanSweepLockClassID, mailboxID, newUIDs); err != nil {
-		return fmt.Errorf("failed to acquire shared advisory lock for fts restage: %w", err)
-	}
 
-	_, err := tx.Exec(ctx, `
-		INSERT INTO messages_fts_v2 (content_hash, account_id, text_body, sent_date)
-		SELECT DISTINCT m.content_hash, m.account_id, NULL, m.sent_date
+	// Find only candidate pairs (content_hash, account_id) that do NOT already exist in
+	// messages_fts_v2, and for which indexed vector data exists in either v2 or v1.
+	// In the common same-account MOVE/COPY case (99.99%), the destination account already
+	// owns the FTS row from delivery, so this returns zero rows -- completely avoiding
+	// unnecessary advisory locks (which could exhaust the shared lock table on bulk moves)
+	// and avoiding redundant table writes.
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT m.content_hash, m.account_id, m.sent_date
 		FROM messages m
 		WHERE m.mailbox_id = $1 AND m.uid = ANY($2) AND m.expunged_at IS NULL
+		  AND NOT EXISTS (
+		      SELECT 1 FROM messages_fts_v2 v
+		      WHERE v.content_hash = m.content_hash AND v.account_id = m.account_id
+		  )
 		  AND (
 		      EXISTS (SELECT 1 FROM messages_fts_v2 s WHERE s.content_hash = m.content_hash)
 		      OR EXISTS (SELECT 1 FROM messages_fts f WHERE f.content_hash = m.content_hash)
-		  )
-		ON CONFLICT (content_hash, account_id) DO NOTHING`,
+		  )`,
 		mailboxID, newUIDs)
+	if err != nil {
+		return fmt.Errorf("failed to query missing fts rows for restage: %w", err)
+	}
+	defer rows.Close()
+
+	var missingHashes []string
+	var missingAccounts []int64
+	var missingDates []*time.Time
+
+	for rows.Next() {
+		var h string
+		var a int64
+		var d *time.Time
+		if err := rows.Scan(&h, &a, &d); err != nil {
+			return fmt.Errorf("failed to scan missing fts row: %w", err)
+		}
+		missingHashes = append(missingHashes, h)
+		missingAccounts = append(missingAccounts, a)
+		missingDates = append(missingDates, d)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating missing fts rows: %w", err)
+	}
+
+	// Same-account move/copy fast-path: destination account already has all FTS rows.
+	if len(missingHashes) == 0 {
+		return nil
+	}
+
+	// Acquire shared advisory locks ONLY on truly missing cross-account content_hashes so
+	// any concurrent orphan sweep for these hashes either skips them or we wait for sweep.
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock_shared($1, hashtext(h))
+		FROM unnest($2::text[]) AS h`,
+		consts.SoraFTSOrphanSweepLockClassID, missingHashes); err != nil {
+		return fmt.Errorf("failed to acquire shared advisory lock for fts restage: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO messages_fts_v2 (content_hash, account_id, text_body, sent_date)
+		SELECT d.content_hash, d.account_id, NULL, d.sent_date
+		FROM unnest($1::text[], $2::bigint[], $3::timestamptz[]) AS d(content_hash, account_id, sent_date)
+		ON CONFLICT (content_hash, account_id) DO NOTHING`,
+		missingHashes, missingAccounts, missingDates)
 	if err != nil {
 		return fmt.Errorf("failed to re-stage fts rows: %w", err)
 	}
