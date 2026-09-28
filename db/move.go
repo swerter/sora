@@ -35,7 +35,7 @@ func (db *Database) MoveMessages(ctx context.Context, tx pgx.Tx, ids *[]imap.UID
 	// Every unseen-mutating path (MOVE, EXPUNGE, STORE) acquires the mailbox_stats
 	// row first and message rows second, so they cannot deadlock against each other.
 	rows, err := tx.Query(ctx, `
-		SELECT id, uid FROM messages
+		SELECT id, uid, account_id FROM messages
 		WHERE mailbox_id = $1 AND uid = ANY($2) AND expunged_at IS NULL
 		ORDER BY uid
 		FOR UPDATE
@@ -49,14 +49,16 @@ func (db *Database) MoveMessages(ctx context.Context, tx pgx.Tx, ids *[]imap.UID
 	// Collect message IDs and source UIDs
 	var messageIDs []int64
 	var sourceUIDsForMap []imap.UID
+	crossAccount := false // any source row owned by another account: see restageFTS
 	for rows.Next() {
-		var messageID int64
+		var messageID, sourceAccountID int64
 		var sourceUID imap.UID
-		if err := rows.Scan(&messageID, &sourceUID); err != nil {
+		if err := rows.Scan(&messageID, &sourceUID, &sourceAccountID); err != nil {
 			return nil, fmt.Errorf("failed to scan message ID and UID: %w", err)
 		}
 		messageIDs = append(messageIDs, messageID)
 		sourceUIDsForMap = append(sourceUIDsForMap, sourceUID)
+		crossAccount = crossAccount || sourceAccountID != destAccountID
 	}
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating through source messages: %w", err)
@@ -225,8 +227,10 @@ func (db *Database) MoveMessages(ctx context.Context, tx pgx.Tx, ids *[]imap.UID
 	if err := db.restagePendingUploads(ctx, tx, destMailboxID, newUIDs, instanceID); err != nil {
 		return nil, err
 	}
-	if err := db.restageFTS(ctx, tx, destMailboxID, newUIDs); err != nil {
-		return nil, err
+	if crossAccount {
+		if err := db.restageFTS(ctx, tx, destMailboxID, newUIDs); err != nil {
+			return nil, err
+		}
 	}
 
 	// Mark the original messages as expunged in the source mailbox

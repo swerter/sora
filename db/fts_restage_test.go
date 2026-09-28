@@ -6,6 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emersion/go-imap/v2"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/migadu/sora/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -157,7 +161,67 @@ func TestDeliveryStagesBothFTSTables(t *testing.T) {
 			"stageFTS logs and swallows this failure, so check the warning it emitted")
 }
 
-func TestRestageFTSSameAccountIsNoOp(t *testing.T) {
+// insertRestageFixture inserts an uploaded message row directly, and when indexed is set, the
+// owning account's FTS row for its body with a finished vector.
+func insertRestageFixture(t *testing.T, ctx context.Context, q interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, accountID, mailboxID, uid int64, hash string, indexed bool) {
+	t.Helper()
+	_, err := q.Exec(ctx, `
+		WITH inserted AS (
+			INSERT INTO messages (account_id, mailbox_id, uid, content_hash, subject, sent_date,
+			                      internal_date, size, uploaded, s3_domain, s3_localpart,
+			                      message_id, body_structure, recipients_json, created_modseq)
+			VALUES ($1, $2, $3, $4, 'Restage', now(), now(), 100, TRUE, 'domain', 'part', $5,
+			        'body', '[]', nextval('messages_modseq'))
+			RETURNING id, mailbox_id
+		)
+		INSERT INTO message_state (message_id, mailbox_id, flags)
+		SELECT id, mailbox_id, 0 FROM inserted
+	`, accountID, mailboxID, uid, hash, fmt.Sprintf("<%s-%d@example.com>", hash, uid))
+	require.NoError(t, err)
+	if !indexed {
+		return
+	}
+	_, err = q.Exec(ctx, `
+		INSERT INTO messages_fts_v2 (content_hash, account_id, text_body_tsv, sent_date)
+		VALUES ($1, $2, to_tsvector('simple', 'restageneedle'), now())
+		ON CONFLICT DO NOTHING
+	`, hash, accountID)
+	require.NoError(t, err)
+}
+
+// createRestageMailbox creates a mailbox for the account and returns its id.
+func createRestageMailbox(t *testing.T, ctx context.Context, db *Database, accountID int64, name string) int64 {
+	t.Helper()
+	tx, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+	require.NoError(t, db.CreateMailbox(ctx, tx, accountID, name, nil))
+	require.NoError(t, tx.Commit(ctx))
+	mbox, err := db.GetMailboxByName(ctx, accountID, name)
+	require.NoError(t, err)
+	return mbox.ID
+}
+
+// ftsLocksHeld counts the FTS sweep-coordination advisory locks held by tx's backend.
+func ftsLocksHeld(t *testing.T, ctx context.Context, tx pgx.Tx) int {
+	t.Helper()
+	var n int
+	require.NoError(t, tx.QueryRow(ctx, `
+		SELECT count(*) FROM pg_locks
+		WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND classid::bigint = $1
+	`, int64(uint32(consts.SoraFTSOrphanSweepLockClassID))).Scan(&n))
+	return n
+}
+
+// A COPY or MOVE can land a message on an account whose FTS row for that body is an orphan:
+// the account held the body before, that message has since been purged, and the sweep has
+// not run yet. The row is present, so there is nothing to insert, yet the sweep is about to
+// delete it and cannot see the uncommitted message that now needs it. restageFTS must hold
+// the sweep off with its shared lock even though it inserts nothing; deciding "the row is
+// already there" without the lock is the race 30ece60 closed for delivery.
+func TestRestageFTSHoldsOffTheOrphanSweep(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration test in short mode")
 	}
@@ -166,43 +230,137 @@ func TestRestageFTSSameAccountIsNoOp(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	ts := time.Now().UnixNano()
-	contentHash := fmt.Sprintf("same_account_%d", ts)
+	hash := fmt.Sprintf("restage_orphan_%d", time.Now().UnixNano())
 
-	// Destination account ALREADY has the FTS row (from initial delivery).
+	// The orphan: an FTS row for this account that no message references.
 	_, err := db.GetWritePool().Exec(ctx, `
 		INSERT INTO messages_fts_v2 (content_hash, account_id, text_body_tsv, sent_date)
-		VALUES ($1, $2, to_tsvector('simple', 'sameaccounttest'), now())
-	`, contentHash, accountID)
+		VALUES ($1, $2, to_tsvector('simple', 'needle'), now())
+	`, hash, accountID)
 	require.NoError(t, err)
 
-	// Insert message into mailbox
-	_, err = db.GetWritePool().Exec(ctx, `
-		WITH inserted AS (
-			INSERT INTO messages (account_id, mailbox_id, uid, content_hash, subject, sent_date,
-			                      internal_date, size, uploaded, s3_domain, s3_localpart,
-			                      message_id, body_structure, recipients_json, created_modseq)
-			VALUES ($1, $2, 9401, $3, 'Moved', now(), now(), 100, TRUE, 'domain', 'part', '<msg@example.com>',
-			        'body', '[]', nextval('messages_modseq'))
-			RETURNING id, mailbox_id
-		)
-		INSERT INTO message_state (message_id, mailbox_id, flags)
-		SELECT id, mailbox_id, 0 FROM inserted
-	`, accountID, mailboxID, contentHash)
+	// T1 lands the copied message and re-stages, but has not committed.
+	t1, err := db.GetWritePool().Begin(ctx)
 	require.NoError(t, err)
+	defer t1.Rollback(ctx)
+	insertRestageFixture(t, ctx, t1, accountID, mailboxID, 9501, hash, false)
+	require.NoError(t, db.restageFTS(ctx, t1, mailboxID, []int64{9501}))
+
+	// T2, the orphan sweep, runs before T1 commits.
+	t2, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	defer t2.Rollback(ctx)
+	deleted, err := db.DeleteMessagesFTSByKeyBatch(ctx, t2, []FTSKey{{ContentHash: hash, AccountID: accountID}})
+	require.NoError(t, err)
+	require.NoError(t, t2.Commit(ctx))
+	require.NoError(t, t1.Commit(ctx))
+
+	var count int
+	require.NoError(t, db.GetReadPool().QueryRow(ctx,
+		`SELECT COUNT(*) FROM messages_fts_v2 WHERE content_hash = $1 AND account_id = $2`,
+		hash, accountID).Scan(&count))
+	t.Logf("deleted by sweep: %d, rows left for the copied message: %d", deleted, count)
+	assert.Equal(t, 1, count,
+		"the sweep deleted the FTS row of a message that was being copied in: it is now unsearchable by body")
+}
+
+// A same-account MOVE or COPY must take no FTS advisory locks. The shared lock is one entry
+// per distinct body in PostgreSQL's server-wide lock table (about 25,600 entries in
+// production), held until commit, and MOVE is not batched: moving a large folder within one
+// account would otherwise fill the table and fail unrelated transactions with
+// "out of shared memory".
+func TestSameAccountMoveCopyTakeNoFTSLocks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration test in short mode")
+	}
+
+	db, _, accountID, inboxID := setupCleanerTestDatabase(t)
+	defer db.Close()
+
+	ctx := context.Background()
+	archiveID := createRestageMailbox(t, ctx, db, accountID, "Archive")
+	base := time.Now().UnixNano()
+
+	const n = 20
+	uids := make([]imap.UID, 0, n)
+	for i := 0; i < n; i++ {
+		uid := int64(9601 + i)
+		insertRestageFixture(t, ctx, db.GetWritePool(), accountID, inboxID, uid,
+			fmt.Sprintf("restage_locks_%d_%d", base, i), true)
+		uids = append(uids, imap.UID(uid))
+	}
+
+	t.Run("MOVE", func(t *testing.T) {
+		tx, err := db.GetWritePool().Begin(ctx)
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+		moveUIDs := append([]imap.UID(nil), uids...)
+		moved, err := db.MoveMessages(ctx, tx, &moveUIDs, inboxID, archiveID, accountID, "domain", "part", "test-instance")
+		require.NoError(t, err)
+		require.Len(t, moved, n)
+		assert.Equal(t, 0, ftsLocksHeld(t, ctx, tx), "a same-account MOVE took one FTS lock per body")
+	})
+
+	t.Run("COPY", func(t *testing.T) {
+		tx, err := db.GetWritePool().Begin(ctx)
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+		copyUIDs := append([]imap.UID(nil), uids...)
+		copied, _, err := db.CopyMessages(ctx, tx, &copyUIDs, inboxID, archiveID, accountID, "domain", "part", "test-instance")
+		require.NoError(t, err)
+		require.Len(t, copied, n)
+		assert.Equal(t, 0, ftsLocksHeld(t, ctx, tx), "a same-account COPY took one FTS lock per body")
+	})
+}
+
+// A cross-account COPY or MOVE, through the real entry points, must still give the
+// destination account its own FTS row for the body. This guards the callers' decision to
+// skip the re-stage: getting "same account" wrong would make every moved or copied message
+// unsearchable by body for its new owner.
+func TestCrossAccountMoveCopyStageDestinationFTSRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration test in short mode")
+	}
+
+	db, _, ownerA, inboxA := setupCleanerTestDatabase(t)
+	defer db.Close()
+
+	ctx := context.Background()
+	emailB := fmt.Sprintf("restage_b_%d@example.com", time.Now().UnixNano())
+	txB, err := db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	_, err = db.CreateAccount(ctx, txB, CreateAccountRequest{Email: emailB, Password: "password123", IsPrimary: true, HashType: "bcrypt"})
+	require.NoError(t, err)
+	require.NoError(t, txB.Commit(ctx))
+	ownerB, err := db.GetAccountIDByAddress(ctx, emailB)
+	require.NoError(t, err)
+	sharedB := createRestageMailbox(t, ctx, db, ownerB, "Shared")
+
+	base := time.Now().UnixNano()
+	copyHash := fmt.Sprintf("restage_xcopy_%d", base)
+	moveHash := fmt.Sprintf("restage_xmove_%d", base)
+	insertRestageFixture(t, ctx, db.GetWritePool(), ownerA, inboxA, 9701, copyHash, true)
+	insertRestageFixture(t, ctx, db.GetWritePool(), ownerA, inboxA, 9702, moveHash, true)
 
 	tx, err := db.GetWritePool().Begin(ctx)
 	require.NoError(t, err)
-
-	// Re-staging for an account that already has the row should return without error
-	require.NoError(t, db.restageFTS(ctx, tx, mailboxID, []int64{9401}))
+	copyUIDs := []imap.UID{9701}
+	_, _, err = db.CopyMessages(ctx, tx, &copyUIDs, inboxA, sharedB, ownerB, "example.net", "b", "test-instance")
+	require.NoError(t, err)
 	require.NoError(t, tx.Commit(ctx))
 
-	// Ensure vector was not overwritten or nulled out
-	var hasVector bool
-	require.NoError(t, db.GetReadPool().QueryRow(ctx, `
-		SELECT text_body_tsv IS NOT NULL FROM messages_fts_v2 WHERE content_hash = $1 AND account_id = $2
-	`, contentHash, accountID).Scan(&hasVector))
-	assert.True(t, hasVector, "existing FTS vector must remain untouched")
-}
+	tx, err = db.GetWritePool().Begin(ctx)
+	require.NoError(t, err)
+	moveUIDs := []imap.UID{9702}
+	_, err = db.MoveMessages(ctx, tx, &moveUIDs, inboxA, sharedB, ownerB, "example.net", "b", "test-instance")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
 
+	for name, hash := range map[string]string{"COPY": copyHash, "MOVE": moveHash} {
+		var n int
+		require.NoError(t, db.GetReadPool().QueryRow(ctx,
+			`SELECT COUNT(*) FROM messages_fts_v2 WHERE content_hash = $1 AND account_id = $2`,
+			hash, ownerB).Scan(&n))
+		assert.Equal(t, 1, n, "cross-account %s left the message unsearchable by body for its new owner", name)
+	}
+}
