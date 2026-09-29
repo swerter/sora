@@ -53,6 +53,7 @@ type ImporterOptions struct {
 	Incremental          bool          // Use SQLite cache to skip already-imported messages (default: false = always read all)
 	MaxMessageSize       int64         // Maximum message size to import (bytes, 0 = use default)
 	PathsFile            string        // Path to a file containing a list of relative or absolute paths to import
+	FTSRetention         time.Duration // Skip the search row for messages sent before this window (0 = index all)
 }
 
 // resilientDB defines the interface for database operations needed by the importer.
@@ -1936,6 +1937,7 @@ func (i *Importer) insertBatchToDB(uploaded []uploadedMsg) ([]markedMessage, err
 			Recipients:           up.metadata.recipients,
 			PreservedUID:         up.metadata.preservedUID,
 			PreservedUIDValidity: up.metadata.preservedUIDValidity,
+			FTSRetention:         i.options.FTSRetention,
 		}
 		mailboxGroups[up.msg.mailbox] = append(mailboxGroups[up.msg.mailbox], groupedMsg{
 			opt:  opt,
@@ -2074,6 +2076,7 @@ func (i *Importer) insertBatchToDBWithTransaction(uploaded []uploadedMsg) ([]mar
 			Recipients:           up.metadata.recipients,
 			PreservedUID:         up.metadata.preservedUID,
 			PreservedUIDValidity: up.metadata.preservedUIDValidity,
+			FTSRetention:         i.options.FTSRetention,
 		})
 
 		if err != nil {
