@@ -44,7 +44,7 @@ func (db *Database) CopyMessages(ctx context.Context, tx pgx.Tx, uids *[]imap.UI
 	// The caller is responsible for beginning and committing/rolling back the transaction.
 
 	// Get the source message IDs and UIDs
-	rows, err := tx.Query(ctx, `SELECT id, uid FROM messages WHERE mailbox_id = $1 AND uid = ANY($2) AND expunged_at IS NULL ORDER BY uid`, srcMailboxID, uids)
+	rows, err := tx.Query(ctx, `SELECT id, uid, account_id FROM messages WHERE mailbox_id = $1 AND uid = ANY($2) AND expunged_at IS NULL ORDER BY uid`, srcMailboxID, uids)
 	if err != nil {
 		return nil, nil, consts.ErrInternalError
 	}
@@ -52,14 +52,16 @@ func (db *Database) CopyMessages(ctx context.Context, tx pgx.Tx, uids *[]imap.UI
 
 	var messageIDs []int64
 	var sourceUIDsForMap []imap.UID
+	crossAccount := false // any source row owned by another account: see restageFTS
 	for rows.Next() {
-		var messageID int64
+		var messageID, sourceAccountID int64
 		var sourceUID imap.UID
-		if err := rows.Scan(&messageID, &sourceUID); err != nil {
+		if err := rows.Scan(&messageID, &sourceUID, &sourceAccountID); err != nil {
 			return nil, nil, fmt.Errorf("failed to scan message ID and UID: %w", err)
 		}
 		messageIDs = append(messageIDs, messageID)
 		sourceUIDsForMap = append(sourceUIDsForMap, sourceUID)
+		crossAccount = crossAccount || sourceAccountID != destAccountID
 	}
 	if err = rows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("error iterating through source messages: %w", err)
@@ -186,8 +188,10 @@ func (db *Database) CopyMessages(ctx context.Context, tx pgx.Tx, uids *[]imap.UI
 	if err := db.restagePendingUploads(ctx, tx, destMailboxID, newUIDs, instanceID); err != nil {
 		return nil, nil, err
 	}
-	if err := db.restageFTS(ctx, tx, destMailboxID, newUIDs); err != nil {
-		return nil, nil, err
+	if crossAccount {
+		if err := db.restageFTS(ctx, tx, destMailboxID, newUIDs); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	return messageUIDMap, newMessageIDs, nil
@@ -223,8 +227,17 @@ func (db *Database) restagePendingUploads(ctx context.Context, tx pgx.Tx, mailbo
 // (content_hash, account_id), so a cross-account COPY or MOVE lands a message under an
 // account that has no row for that body: without this it would be silently unsearchable in
 // the destination, exactly as it would be unreadable without the pending_upload re-stage.
-// Same-account copies and every same-account move already have the row, and the ON CONFLICT
-// makes those a no-op.
+//
+// Callers skip it when every source row already belongs to the destination account. That
+// account's row for the body is then anchored by the source row itself, which stays in
+// messages (MOVE only expunges it, and the orphan sweep counts expunged rows), so the sweep
+// cannot delete the row and there is nothing to insert. The skip matters: the shared lock
+// below is one entry per distinct body in PostgreSQL's server-wide lock table, held until
+// commit, and a bulk same-account MOVE is the common case.
+//
+// Do not replace the lock with a "row already exists" pre-check. A row that exists can be an
+// orphan the sweep is about to delete, and the sweep cannot see the uncommitted message that
+// now needs it; TestRestageFTSHoldsOffTheOrphanSweep reproduces that loss.
 //
 // The new rows carry no text: the body was staged (or already indexed) when the source
 // message was delivered, so the FTS worker fills these by copying the finished vector from
@@ -255,10 +268,7 @@ func (db *Database) restageFTS(ctx context.Context, tx pgx.Tx, mailboxID int64, 
 		SELECT DISTINCT m.content_hash, m.account_id, NULL, m.sent_date
 		FROM messages m
 		WHERE m.mailbox_id = $1 AND m.uid = ANY($2) AND m.expunged_at IS NULL
-		  AND (
-		      EXISTS (SELECT 1 FROM messages_fts_v2 s WHERE s.content_hash = m.content_hash)
-		      OR EXISTS (SELECT 1 FROM messages_fts f WHERE f.content_hash = m.content_hash)
-		  )
+		  AND EXISTS (SELECT 1 FROM messages_fts_v2 s WHERE s.content_hash = m.content_hash)
 		ON CONFLICT (content_hash, account_id) DO NOTHING`,
 		mailboxID, newUIDs)
 	if err != nil {
@@ -292,10 +302,10 @@ type InsertMessageOptions struct {
 	Recipients           []helpers.Recipient
 	PreservedUID         *uint32       // Optional: preserved UID from import
 	PreservedUIDValidity *uint32       // Optional: preserved UIDVALIDITY from import
-	FTSRetention         time.Duration // Optional: skip creating messages_fts entirely for messages older than this
+	FTSRetention         time.Duration // Optional: skip creating messages_fts_v2 entirely for messages older than this
 }
 
-// shouldStageFTS reports whether a messages_fts row is worth creating. A zero
+// shouldStageFTS reports whether a messages_fts_v2 row is worth creating. A zero
 // retention means FTS data is kept indefinitely, so everything is staged. A
 // message already past the retention window is skipped: the row would only add
 // immediate work for the cleanup worker.
@@ -306,16 +316,7 @@ func shouldStageFTS(retention time.Duration, sentDate, now time.Time) bool {
 	return !sentDate.Before(now.Add(-retention))
 }
 
-// FTS staging SQL, shared by every insert path so the three call sites cannot drift.
-//
-// Two rows are written per staged message, and they are not redundant:
-//
-//	ftsStageV1SQL  the hash-keyed messages_fts row, exactly as before this change. It stays
-//	               dual-written until migration 000051 retires that table, so rolling this
-//	               release back needs no data work. That matters more than usual here:
-//	               text_body is nulled the moment its vector is computed (db/fts.go), so the
-//	               tsvector is the ONLY copy of that data and cannot be recomputed without
-//	               re-fetching and re-parsing every body from S3.
+// FTS staging SQL.
 //
 //	ftsStageV2SQL  the per-account messages_fts_v2 row that the composite GIN indexes. This
 //	               is what lets a body search be scoped to one account instead of scanning
@@ -328,11 +329,6 @@ func shouldStageFTS(retention time.Duration, sentDate, now time.Time) bool {
 // text again is pure waste: a newsletter delivered to 10k accounts would otherwise stage
 // 10k copies of the same 64 KB body.
 const (
-	ftsStageV1SQL = `
-		INSERT INTO messages_fts (content_hash, text_body, sent_date)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (content_hash) DO NOTHING`
-
 	// Every parameter is cast explicitly. In "INSERT ... SELECT $1, $2" PostgreSQL cannot
 	// infer a parameter's type from the target column, so $1 would be deduced as text in
 	// the select list and as varchar from its comparison inside the EXISTS -- "inconsistent
@@ -348,52 +344,37 @@ const (
 		ON CONFLICT (content_hash, account_id) DO NOTHING`
 )
 
-// stageFTS writes both FTS staging rows for a freshly inserted message.
+// stageFTS writes the FTS staging row for a freshly inserted message into messages_fts_v2.
 //
 // Best-effort by design: if this fails the message is still delivered and uploaded, it is
-// merely unsearchable by body, so each write sits in its own savepoint and neither can fail
+// merely unsearchable by body, so the write sits in its own savepoint and cannot fail
 // the caller.
-//
-// The two savepoints are deliberately INDEPENDENT. Rolling the v1 write back because the v2
-// write failed would defeat the entire point of dual-writing: v1 exists so that this release
-// can be rolled back without touching data that cannot be regenerated. A v2 problem must
-// therefore cost us v2 only, and leave the fallback intact.
 func stageFTS(ctx context.Context, tx pgx.Tx, contentHash string, accountID int64, textBody any, sentDate time.Time) {
-	stage := func(name string, fn func() error) {
-		savepoint := "fts_" + name
-		if _, err := tx.Exec(ctx, "SAVEPOINT "+savepoint); err != nil {
-			logger.Warn("Database: failed to create savepoint for fts insert", "savepoint", savepoint, "err", err)
-			return
-		}
-		if err := fn(); err != nil {
-			tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+savepoint)
-			logger.Warn("Database: failed to insert message fts payload (non-fatal, message will be unsearchable)",
-				"table", name, "content_hash", truncateHash(contentHash), "account_id", accountID, "err", err)
-			return
-		}
-		tx.Exec(ctx, "RELEASE SAVEPOINT "+savepoint)
+	savepoint := "fts_v2"
+	if _, err := tx.Exec(ctx, "SAVEPOINT "+savepoint); err != nil {
+		logger.Warn("Database: failed to create savepoint for fts insert", "savepoint", savepoint, "err", err)
+		return
 	}
 
-	stage("v1", func() error {
-		_, err := tx.Exec(ctx, ftsStageV1SQL, contentHash, textBody, sentDate)
-		return err
-	})
-
-	stage("v2", func() error {
-		// Acquire shared advisory lock on the content_hash as its own statement BEFORE
-		// the v2 insert. Any concurrent orphan sweep on this hash either skips it (if
-		// delivery holds the lock first) or delivery waits for the sweep to commit (if
-		// sweep holds it first), ensuring the v2 insert statement's snapshot is taken
-		// AFTER the sweep's deletion and inserts the row fresh.
-		// Runs inside the "v2" savepoint so that a lock error/timeout never aborts the
-		// enclosing delivery transaction.
-		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock_shared($1, hashtext($2))",
-			consts.SoraFTSOrphanSweepLockClassID, contentHash); err != nil {
-			return fmt.Errorf("shared advisory lock: %w", err)
-		}
-		_, err := tx.Exec(ctx, ftsStageV2SQL, contentHash, accountID, textBody, sentDate)
-		return err
-	})
+	// Acquire shared advisory lock on the content_hash as its own statement BEFORE
+	// the v2 insert. Any concurrent orphan sweep on this hash either skips it (if
+	// delivery holds the lock first) or delivery waits for the sweep to commit (if
+	// sweep holds it first), ensuring the v2 insert statement's snapshot is taken
+	// AFTER the sweep's deletion and inserts the row fresh.
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock_shared($1, hashtext($2))",
+		consts.SoraFTSOrphanSweepLockClassID, contentHash); err != nil {
+		tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+savepoint)
+		logger.Warn("Database: failed to acquire shared advisory lock for fts insert",
+			"content_hash", truncateHash(contentHash), "account_id", accountID, "err", err)
+		return
+	}
+	if _, err := tx.Exec(ctx, ftsStageV2SQL, contentHash, accountID, textBody, sentDate); err != nil {
+		tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+savepoint)
+		logger.Warn("Database: failed to insert message fts payload (non-fatal, message will be unsearchable)",
+			"content_hash", truncateHash(contentHash), "account_id", accountID, "err", err)
+		return
+	}
+	tx.Exec(ctx, "RELEASE SAVEPOINT "+savepoint)
 }
 
 func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *InsertMessageOptions, upload PendingUpload) (messageID int64, uid int64, err error) {
@@ -805,14 +786,14 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 	}
 
 	// ---- FTS STAGING QUEUE (best-effort, non-fatal) ----
-	// Insert into messages_fts AFTER the critical message row and pending_upload
+	// Insert into messages_fts_v2 AFTER the critical message row and pending_upload
 	// are secured. This safely enqueues the raw payloads for the background daemon
 	// to asynchronously perform the expensive to_tsvector() conversion. If this fails, the message is still
 	// delivered and uploaded to S3 — it just won't be FTS-searchable.
 	if shouldStageFTS(options.FTSRetention, options.SentDate, time.Now()) {
-		// Decide what to store in messages_fts.
+		// Decide what to store in messages_fts_v2.
 		// Skip very large bodies (>64KB) — the full content is always available in S3.
-		// text_body is staged in messages_fts, then processed by fts_worker.
+		// text_body is staged in messages_fts_v2, then processed by fts_worker.
 		const maxStoredBodySize = 64 * 1024 // 64 KB
 		var textBodyArg any = sanePlaintextBody
 
@@ -1127,7 +1108,7 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 	}
 
 	if shouldStageFTS(options.FTSRetention, options.SentDate, time.Now()) {
-		// Decide what to store in messages_fts.
+		// Decide what to store in messages_fts_v2.
 		// Skip very large bodies (>64KB) — the full content is always available in S3.
 		const maxStoredBodySize = 64 * 1024 // 64 KB
 		var textBodyArg any = sanePlaintextBody
@@ -1143,7 +1124,7 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 			metrics.LargeBodyStorageSkipped.Inc()
 		}
 
-		// Only insert when there is actual content. A missing messages_fts row is
+		// Only insert when there is actual content. A missing messages_fts_v2 row is
 		// expected for old/large messages and is handled gracefully downstream (unsearchable).
 		textBodyStr, _ := textBodyArg.(string)
 		if textBodyStr != "" {
@@ -1522,7 +1503,6 @@ func (d *Database) InsertMessagesBatch(
 					ftsHashesSeen[p.Opt.ContentHash] = struct{}{}
 					ftsHashesToLock = append(ftsHashesToLock, p.Opt.ContentHash)
 				}
-				batch.Queue(ftsStageV1SQL, p.Opt.ContentHash, textBodyArg, p.Opt.SentDate)
 				batch.Queue(ftsStageV2SQL, p.Opt.ContentHash, p.Opt.AccountID, textBodyArg, p.Opt.SentDate)
 			}
 		}
@@ -1573,14 +1553,6 @@ func (d *Database) InsertMessagesBatch(
 				textBodyStr = "..." // Mocked just to check if we queued it
 			}
 			if textBodyStr != "" {
-				// Two statements were queued per staged message (see stageFTS): the
-				// hash-keyed v1 row and the per-account v2 row. Both results must be
-				// drained here or every later result in the batch is read against the
-				// wrong statement.
-				_, err = br.Exec() // messages_fts
-				if err != nil {
-					return nil, nil, nil, fmt.Errorf("InsertMessagesBatch: failed messages_fts: %w", err)
-				}
 				_, err = br.Exec() // messages_fts_v2
 				if err != nil {
 					return nil, nil, nil, fmt.Errorf("InsertMessagesBatch: failed messages_fts_v2: %w", err)

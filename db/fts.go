@@ -19,18 +19,12 @@ import (
 // headers_tsv GIN index was 7.5 GB of Received-chain/DKIM noise that caused
 // 12+ second FTS update queries.
 //
-// TWO TABLES, ONE VECTOR
-//
-// messages_fts is keyed by content_hash alone and shared by every account holding that
-// body. messages_fts_v2 (migration 000050) holds one row per (content_hash, account_id) so
-// that a body search can be scoped to a single account through the composite GIN on
+// messages_fts_v2 (migration 000050) holds one row per (content_hash, account_id) so that a
+// body search can be scoped to a single account through the composite GIN on
 // (account_id, text_body_tsv), instead of scanning the whole corpus for a common term.
-//
-// The worker keeps both current until migration 000051 retires messages_fts, so that
-// rolling back the release that introduced v2 needs no data work. That matters more than
-// usual here: text_body is nulled the instant its vector is computed, so the tsvector is
-// the ONLY copy of that data -- it cannot be recomputed without re-fetching and re-parsing
-// every body from S3.
+// text_body is nulled the instant its vector is computed, so the tsvector is the ONLY copy
+// of that data: it cannot be recomputed without re-fetching and re-parsing every body from
+// S3.
 //
 // Tokenisation happens EXACTLY ONCE per content hash however many accounts hold it: one
 // anchor row is tokenised, and every other row copies the finished vector. A newsletter
@@ -68,10 +62,8 @@ func ftsTokenizeSQL(col string) string {
 }
 
 // ftsSourceVectorSQL is the vector the queued rows of content hash hashCol should copy: a
-// non-empty v2 vector, else a poisoned empty one (the body could not be tokenised, so no copy
-// of it can be), else the shared messages_fts vector. The last matters during the v1 soak: a
-// hash indexed before migration 000050 has its vector only there, and a per-account row
-// created afterwards (by a cross-account COPY, say) carries no text of its own to tokenise.
+// non-empty one, else a poisoned empty one (the body could not be tokenised, so no copy of it
+// can be).
 //
 // LIMIT 1 without ORDER BY stops at the first match. Ordering by length() instead detoasted
 // every vector the body already had, on every call: a newsletter indexed in 10,000 accounts
@@ -81,9 +73,7 @@ func ftsSourceVectorSQL(hashCol string) string {
 		(SELECT v.text_body_tsv FROM messages_fts_v2 v
 		  WHERE v.content_hash = ` + hashCol + ` AND length(v.text_body_tsv) > 0 LIMIT 1),
 		(SELECT v.text_body_tsv FROM messages_fts_v2 v
-		  WHERE v.content_hash = ` + hashCol + ` AND v.text_body_tsv IS NOT NULL LIMIT 1),
-		(SELECT f.text_body_tsv FROM messages_fts f
-		  WHERE f.content_hash = ` + hashCol + ` AND f.text_body_tsv IS NOT NULL LIMIT 1))`
+		  WHERE v.content_hash = ` + hashCol + ` AND v.text_body_tsv IS NOT NULL LIMIT 1))`
 }
 
 // ftsQueueItem is one polled row of the staging queue.
@@ -243,8 +233,8 @@ func (d *Database) indexChunk(ctx context.Context, tx pgx.Tx, chunk []ftsQueueIt
 }
 
 // tokenizeChunk is indexChunk's set-based path: tokenise every anchor whose hash has no
-// vector yet, in one statement; copy vectors onto every other queued row of those hashes;
-// then dual-write the shared messages_fts rows.
+// vector yet, in one statement; then copy vectors onto every other queued row of those
+// hashes.
 //
 // An anchor whose hash already carries a vector -- a body whose first copy was indexed
 // earlier -- is not tokenised again; the fan-out copies the existing vector onto it. A body
@@ -272,13 +262,7 @@ func (d *Database) tokenizeChunk(ctx context.Context, tx pgx.Tx, chunk []ftsQueu
 	resolved := int(tag.RowsAffected())
 
 	n, err := d.fanOutVectors(ctx, tx, hashes, outOfTime)
-	if err != nil {
-		return resolved, err
-	}
-	if err := d.copyVectorsToSharedTable(ctx, tx, hashes); err != nil {
-		return resolved + n, err
-	}
-	return resolved + n, nil
+	return resolved + n, err
 }
 
 // indexHash runs fn, which indexes one hash, inside its own savepoint.
@@ -318,16 +302,14 @@ func (d *Database) indexHash(ctx context.Context, tx pgx.Tx, hash string, fn fun
 }
 
 // tokenizeFromPendingText indexes a hash whose polled rows carry no text, from whichever
-// row of that hash still holds pending text and is not locked by another worker: a v2 row
-// first, else the shared messages_fts row. It reports found=false when every such row is
-// held by another worker, which is then resolving the hash itself.
+// row of that hash still holds pending text and is not locked by another worker. It reports
+// found=false when every such row is held by another worker, which is then resolving the
+// hash itself.
 //
 // Tokenising here, instead of leaving the textless rows queued until that text row's own
-// turn, matters twice over. The text may exist ONLY in messages_fts -- delivered by an
-// old-binary node during a rolling deploy, or its v2 stage failed -- and nothing polls that
-// table any more, so the rows would wait forever. And the queue is FIFO: textless rows that
-// sort ahead of their text row can fill a whole batch, which then resolves nothing, and the
-// worker stops for the tick with newer mail waiting behind them.
+// turn, keeps the FIFO queue moving: textless rows that sort ahead of their text row can fill
+// a whole batch, which then resolves nothing, and the worker stops for the tick with newer
+// mail waiting behind them.
 func (d *Database) tokenizeFromPendingText(ctx context.Context, tx pgx.Tx, hash string) (int, bool, error) {
 	var accountID int64
 	err := tx.QueryRow(ctx, `
@@ -336,35 +318,20 @@ func (d *Database) tokenizeFromPendingText(ctx context.Context, tx pgx.Tx, hash 
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED
 	`, hash).Scan(&accountID)
-	if err == nil {
-		n, err := d.tokenizeAndFanOut(ctx, tx, ftsQueueItem{Hash: hash, AccountID: accountID, HasText: true})
-		return n, true, err
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, fmt.Errorf("find pending v2 text for %s: %w", hash, err)
-	}
-
-	tag, err := tx.Exec(ctx, `
-		UPDATE messages_fts
-		SET text_body_tsv = `+ftsTokenizeSQL("text_body")+`, text_body = NULL
-		WHERE ctid IN (SELECT ctid FROM messages_fts
-		               WHERE content_hash = $1 AND text_body_tsv IS NULL AND text_body IS NOT NULL
-		               FOR UPDATE SKIP LOCKED)
-	`, hash)
-	if err != nil {
-		return 0, true, fmt.Errorf("tokenize v1 text: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}
-	n, err := d.fanOutVectors(ctx, tx, []string{hash}, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("find pending text for %s: %w", hash, err)
+	}
+	n, err := d.tokenizeAndFanOut(ctx, tx, ftsQueueItem{Hash: hash, AccountID: accountID, HasText: true})
 	return n, true, err
 }
 
-// tokenizeAndFanOut computes the vector for one hash exactly once and then propagates it:
-// to the anchor row, to every other v2 row of that hash in bounded chunks, and to the shared
-// messages_fts row (dual-write). It is the one-hash-at-a-time path, for a chunk that holds a
-// body PostgreSQL cannot tokenise and for textless rows whose text sits on another row.
+// tokenizeAndFanOut computes the vector for one hash exactly once and then propagates it to
+// every other queued row of that hash in bounded chunks. It is the one-hash-at-a-time path,
+// for a chunk that holds a body PostgreSQL cannot tokenise and for textless rows whose text
+// sits on another row.
 func (d *Database) tokenizeAndFanOut(ctx context.Context, tx pgx.Tx, item ftsQueueItem) (int, error) {
 	// The one and only to_tsvector call for this hash.
 	tag, err := tx.Exec(ctx, `
@@ -378,13 +345,7 @@ func (d *Database) tokenizeAndFanOut(ctx context.Context, tx pgx.Tx, item ftsQue
 	resolved := int(tag.RowsAffected())
 
 	n, err := d.fanOutVectors(ctx, tx, []string{item.Hash}, nil)
-	if err != nil {
-		return resolved, err
-	}
-	if err := d.copyVectorsToSharedTable(ctx, tx, []string{item.Hash}); err != nil {
-		return resolved + n, err
-	}
-	return resolved + n, nil
+	return resolved + n, err
 }
 
 // fanOutVectors copies each hash's vector (ftsSourceVectorSQL) onto that hash's queued v2
@@ -426,33 +387,6 @@ func (d *Database) fanOutVectors(ctx context.Context, tx pgx.Tx, hashes []string
 	}
 }
 
-// copyVectorsToSharedTable dual-writes the shared messages_fts rows of the given hashes by
-// COPYING their v2 vector, never by tokenising again. Retired with messages_fts in migration
-// 000051.
-//
-// SKIP LOCKED: the shared row may be held by another worker handling the same hash (or by
-// an old-binary worker during a rolling deploy), which is writing the same vector. Waiting
-// would only risk a deadlock or a lock timeout.
-func (d *Database) copyVectorsToSharedTable(ctx context.Context, tx pgx.Tx, hashes []string) error {
-	if _, err := tx.Exec(ctx, `
-		WITH target AS (
-			SELECT ctid, content_hash FROM messages_fts
-			WHERE content_hash = ANY($1) AND text_body_tsv IS NULL
-			FOR UPDATE SKIP LOCKED
-		), src AS (
-			SELECT h.content_hash, `+ftsSourceVectorSQL("h.content_hash")+` AS tsv
-			FROM (SELECT DISTINCT content_hash FROM target) h
-		)
-		UPDATE messages_fts f
-		SET text_body_tsv = s.tsv, text_body = NULL
-		FROM target g JOIN src s ON s.content_hash = g.content_hash
-		WHERE f.ctid = g.ctid AND s.tsv IS NOT NULL
-	`, hashes); err != nil {
-		return fmt.Errorf("dual-write messages_fts: %w", err)
-	}
-	return nil
-}
-
 // resolveTextlessHashes handles queued rows whose own text is gone -- the normal case for
 // the second and later accounts to receive a body, since only the first delivery stages the
 // text (see stageFTS in append.go).
@@ -460,8 +394,8 @@ func (d *Database) copyVectorsToSharedTable(ctx context.Context, tx pgx.Tx, hash
 // Three outcomes, and the middle one is why this cannot simply poison everything it cannot
 // resolve:
 //
-//   - a sibling already carries a computed vector (in either table) -> copy it;
-//   - no vector yet, but a sibling still carries pending text (in either table) -> tokenise
+//   - a sibling already carries a computed vector -> copy it;
+//   - no vector yet, but a sibling still carries pending text -> tokenise
 //     that text now and fan out (tokenizeFromPendingText), or leave the rows queued if every
 //     such sibling is held by another worker, which is indexing the hash itself. Poisoning
 //     here would blank out a message that was always perfectly indexable;
@@ -475,13 +409,9 @@ func (d *Database) resolveTextlessHashes(ctx context.Context, tx pgx.Tx, hashes 
 	rows, err := tx.Query(ctx, `
 		SELECT h.content_hash,
 		       EXISTS (SELECT 1 FROM messages_fts_v2 v
-		                WHERE v.content_hash = h.content_hash AND v.text_body_tsv IS NOT NULL)
-		    OR EXISTS (SELECT 1 FROM messages_fts f
-		                WHERE f.content_hash = h.content_hash AND f.text_body_tsv IS NOT NULL) AS has_vector,
+		                WHERE v.content_hash = h.content_hash AND v.text_body_tsv IS NOT NULL) AS has_vector,
 		       EXISTS (SELECT 1 FROM messages_fts_v2 v
-		                WHERE v.content_hash = h.content_hash AND v.text_body IS NOT NULL)
-		    OR EXISTS (SELECT 1 FROM messages_fts f
-		                WHERE f.content_hash = h.content_hash AND f.text_body IS NOT NULL) AS has_text
+		                WHERE v.content_hash = h.content_hash AND v.text_body IS NOT NULL) AS has_text
 		FROM unnest($1::text[]) AS h(content_hash)
 	`, hashes)
 	if err != nil {
@@ -548,7 +478,7 @@ func (d *Database) resolveTextlessHashes(ctx context.Context, tx pgx.Tx, hashes 
 	return resolved, nil
 }
 
-// poisonFTSHashes marks a hash unsearchable-but-done in both tables, so the queue drains.
+// poisonFTSHashes marks a hash unsearchable-but-done, so the queue drains.
 func (d *Database) poisonFTSHashes(ctx context.Context, tx pgx.Tx, hashes []string) error {
 	// SKIP LOCKED for the same reason as the fan-out: a row another worker holds is that
 	// worker's to resolve, and waiting for it is how batches deadlock.
@@ -560,15 +490,6 @@ func (d *Database) poisonFTSHashes(ctx context.Context, tx pgx.Tx, hashes []stri
 		               FOR UPDATE SKIP LOCKED)
 	`, hashes); err != nil {
 		return fmt.Errorf("failed to poison messages_fts_v2 rows: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE messages_fts
-		SET text_body_tsv = ''::tsvector, text_body = NULL
-		WHERE ctid IN (SELECT ctid FROM messages_fts
-		               WHERE content_hash = ANY($1) AND text_body_tsv IS NULL
-		               FOR UPDATE SKIP LOCKED)
-	`, hashes); err != nil {
-		return fmt.Errorf("failed to poison messages_fts rows: %w", err)
 	}
 	return nil
 }

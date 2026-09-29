@@ -817,9 +817,9 @@ func TestCleanerWorkflow_MovedMessageS3Preservation(t *testing.T) {
 
 	// Insert message content
 	_, err = tx2.Exec(ctx, `
-		INSERT INTO messages_fts (content_hash, text_body, text_body_tsv)
-		VALUES ($1, $2, to_tsvector('english', $2))
-	`, contentHash, messageBody)
+		INSERT INTO messages_fts_v2 (content_hash, account_id, text_body, text_body_tsv)
+		VALUES ($1, $2, $3, to_tsvector('english', $3))
+	`, contentHash, accountID, messageBody)
 	require.NoError(t, err)
 
 	// Insert message in INBOX (will be moved later)
@@ -936,13 +936,13 @@ func TestCleanerWorkflow_MovedMessageS3Preservation(t *testing.T) {
 
 	// - Message content should still exist (not cleaned up)
 	var contentExists int
-	err = db.GetReadPool().QueryRow(ctx, "SELECT COUNT(*) FROM messages_fts WHERE content_hash = $1", contentHash).Scan(&contentExists)
+	err = db.GetReadPool().QueryRow(ctx, "SELECT COUNT(*) FROM messages_fts_v2 WHERE content_hash = $1 AND account_id = $2", contentHash, accountID).Scan(&contentExists)
 	require.NoError(t, err)
 	assert.Equal(t, 1, contentExists, "Message content should still exist")
 
 	// - Verify we can still read the message data (S3 object would still be accessible)
 	var textBody *string
-	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM messages_fts WHERE content_hash = $1", contentHash).Scan(&textBody)
+	err = db.GetReadPool().QueryRow(ctx, "SELECT text_body FROM messages_fts_v2 WHERE content_hash = $1 AND account_id = $2", contentHash, accountID).Scan(&textBody)
 	require.NoError(t, err)
 	require.NotNil(t, textBody, "Message text_body should be accessible")
 	assert.Contains(t, *textBody, "This is the message body", "Message content should match")

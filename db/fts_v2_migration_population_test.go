@@ -109,7 +109,7 @@ func TestFTSv2MigrationNeverLeavesSearchEmpty(t *testing.T) {
 		fillLarge(t, database)
 		_, err := database.GetWritePool().Exec(context.Background(), string(upSQL))
 		require.Error(t, err, "migrating a large database with an empty messages_fts_v2 must fail, not silently empty body search")
-		assert.Contains(t, err.Error(), "docs/fts-v2-rollout.md")
+		assert.Contains(t, err.Error(), "scripts/fts_v2_backfill.sql")
 	})
 
 	t.Run("large database with a partial backfill is refused", func(t *testing.T) {

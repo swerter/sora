@@ -212,7 +212,7 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 		const branchSelect = "m.id, m.uid, m.mailbox_id, m.content_hash, m.created_modseq, ms.updated_modseq, m.expunged_modseq"
 		const outerSelect = "f.id, f.uid, f.mailbox_id, f.content_hash, f.created_modseq, f.updated_modseq, f.expunged_modseq, 0 as seqnum"
 
-		query, args, err := db.buildTextUnionQuery(criteria, 42, 7, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, &paramCounter)
+		query, args, err := db.buildTextUnionQuery(criteria, 42, 7, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, false, &paramCounter)
 		require.NoError(t, err)
 
 		// Two indexable branches, UNIONed.
@@ -223,6 +223,9 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 		// drop every message that has no FTS row at all.
 		assert.Contains(t, query, "LEFT JOIN messages_fts_v2 mc ON mc.content_hash = m.content_hash AND mc.account_id = @accountID")
 		assert.Contains(t, query, "text_body_tsv @@ plainto_tsquery('simple',")
+		// A small mailbox probes per message; materialising the account's whole match set
+		// to serve it is the 150x regression measured in tasks/fts-per-account-composite-gin.md 5.5.
+		assert.NotContains(t, query, "fts_hits")
 		// Header branch: trigram-indexable LIKE columns.
 		assert.Contains(t, query, "LOWER(m.subject) LIKE")
 		assert.Contains(t, query, "m.from_email_sort LIKE")
@@ -251,7 +254,6 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 	})
 
 	t.Run("non-Text filter is replicated into both branches", func(t *testing.T) {
-		paramCounter := 0
 		criteria := &imap.SearchCriteria{
 			Text: []string{"invoice"},
 			Flag: []imap.Flag{imap.FlagSeen},
@@ -259,14 +261,38 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 		const branchSelect = "m.id, m.uid, m.mailbox_id, m.content_hash, m.created_modseq, ms.updated_modseq, m.expunged_modseq"
 		const outerSelect = "f.id, f.uid, f.mailbox_id, f.content_hash, f.created_modseq, f.updated_modseq, f.expunged_modseq, 0 as seqnum"
 
-		query, _, err := db.buildTextUnionQuery(criteria, 7, 9, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, &paramCounter)
+		for _, prefilterBody := range []bool{false, true} {
+			paramCounter := 0
+			query, _, err := db.buildTextUnionQuery(criteria, 7, 9, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, prefilterBody, &paramCounter)
+			require.NoError(t, err)
+
+			// The \Seen base condition (ms.flags & 1) must appear once per UNION branch.
+			seenFlag := FlagToBitwise(imap.FlagSeen)
+			needle := fmt.Sprintf("(ms.flags & %d) != 0", seenFlag)
+			assert.Equal(t, 2, strings.Count(query, needle),
+				"non-Text base filter should be replicated into both UNION branches (prefilterBody=%v)", prefilterBody)
+		}
+	})
+
+	t.Run("large mailbox evaluates the body term once for the account", func(t *testing.T) {
+		paramCounter := 0
+		criteria := &imap.SearchCriteria{Text: []string{"Invoice"}}
+		const branchSelect = "m.id, m.uid, m.mailbox_id, m.content_hash, m.created_modseq, ms.updated_modseq, m.expunged_modseq"
+		const outerSelect = "f.id, f.uid, f.mailbox_id, f.content_hash, f.created_modseq, f.updated_modseq, f.expunged_modseq, 0 as seqnum"
+
+		query, args, err := db.buildTextUnionQuery(criteria, 42, 7, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, true, &paramCounter)
 		require.NoError(t, err)
 
-		// The \Seen base condition (ms.flags & 1) must appear once per UNION branch.
-		seenFlag := FlagToBitwise(imap.FlagSeen)
-		needle := fmt.Sprintf("(ms.flags & %d) != 0", seenFlag)
-		assert.Equal(t, 2, strings.Count(query, needle),
-			"non-Text base filter should be replicated into both UNION branches")
+		// MATERIALIZED is load-bearing: inlined, the planner reverts to the per-message probe.
+		assert.Contains(t, query, "WITH fts_hits AS MATERIALIZED")
+		assert.Contains(t, query, "WHERE account_id = @accountID")
+		assert.Contains(t, query, "text_body_tsv @@ plainto_tsquery('simple',")
+		assert.Contains(t, query, "JOIN fts_hits ON fts_hits.content_hash = m.content_hash")
+		assert.NotContains(t, query, "messages_fts_v2 mc", "the body branch must not also probe per message")
+		// The header branch is unchanged.
+		assert.Contains(t, query, "LOWER(m.subject) LIKE")
+		assert.Contains(t, query, "UNION")
+		assert.Equal(t, int64(7), args["accountID"])
 	})
 }
 
@@ -297,10 +323,10 @@ func TestTextUnionSearchResults(t *testing.T) {
 		_, err := db.GetWritePool().Exec(ctx, `
 			WITH inserted AS (
 				INSERT INTO messages
-				(account_id, mailbox_id, mailbox_path, uid, message_id, content_hash, s3_domain, s3_localpart,
+				(account_id, mailbox_id, mailbox_path, uid, message_id, in_reply_to, content_hash, s3_domain, s3_localpart,
 				 internal_date, size, subject, sent_date, body_structure, recipients_json, created_modseq,
 				 subject_sort, from_name_sort, from_email_sort, to_name_sort, to_email_sort, cc_email_sort)
-				VALUES ($1,$2,'INBOX',$3,$4,$5,'d',$6, now(), 100, $7, now(), $8, '[]'::jsonb, nextval('messages_modseq'),
+				VALUES ($1,$2,'INBOX',$3,$4,'',$5,'d',$6, now(), 100, $7, now(), $8, '[]'::jsonb, nextval('messages_modseq'),
 				        $9, '', '', '', '', '')
 				RETURNING id, mailbox_id
 			)
@@ -329,23 +355,56 @@ func TestTextUnionSearchResults(t *testing.T) {
 	pathCount := func(label string) float64 {
 		return testutil.ToFloat64(metrics.DBQueriesTotal.WithLabelValues(label, "success", "read"))
 	}
-	unionBefore := pathCount("search_messages_complex_text_union")
 
-	results, err := db.SearchMessagesWithCriteria(ctx, mailboxID, accountID, &imap.SearchCriteria{Text: []string{token}}, 0, 0)
-	require.NoError(t, err)
-
-	gotUIDs := map[imap.UID]bool{}
-	for _, r := range results {
-		gotUIDs[r.UID] = true
+	// The body branch has two shapes, picked by mailbox size (see ftsCTEThreshold). Both must
+	// return the same messages, and both must really run: no integration caller reports a
+	// mailbox this large, so this is the only place the large-mailbox SQL meets PostgreSQL.
+	shapes := []struct {
+		name         string
+		mailboxCount int
+		label        string
+	}{
+		{"small mailbox probes per message", ftsCTEThreshold - 1, "search_messages_complex_text_union"},
+		{"large mailbox evaluates the term once", ftsCTEThreshold, "search_messages_complex_text_union_prefilter"},
 	}
-	assert.Len(t, results, 3, "union should return header-only, body-only, and both-match messages, deduped")
-	assert.True(t, gotUIDs[1], "header-only match must be returned")
-	assert.True(t, gotUIDs[2], "body-only match must be returned")
-	assert.True(t, gotUIDs[3], "both-match must be returned exactly once")
-	assert.False(t, gotUIDs[4], "non-matching message must be excluded")
+	criteria := func() *imap.SearchCriteria { return &imap.SearchCriteria{Text: []string{token}} }
 
-	assert.Equal(t, 1.0, pathCount("search_messages_complex_text_union")-unionBefore,
-		"TEXT search should execute via the UNION path")
+	for _, shape := range shapes {
+		t.Run(shape.name, func(t *testing.T) {
+			check := func(t *testing.T, uids []imap.UID) {
+				t.Helper()
+				got := map[imap.UID]bool{}
+				for _, uid := range uids {
+					got[uid] = true
+				}
+				assert.Len(t, uids, 3, "union should return header-only, body-only, and both-match messages, deduped")
+				assert.True(t, got[1], "header-only match must be returned")
+				assert.True(t, got[2], "body-only match must be returned")
+				assert.True(t, got[3], "both-match must be returned exactly once")
+				assert.False(t, got[4], "non-matching message must be excluded")
+			}
+
+			before := pathCount(shape.label)
+			light, err := db.SearchMessagesWithCriteria(ctx, mailboxID, accountID, criteria(), 0, shape.mailboxCount)
+			require.NoError(t, err)
+			var uids []imap.UID
+			for _, r := range light {
+				uids = append(uids, r.UID)
+			}
+			check(t, uids)
+
+			full, err := db.GetMessagesWithCriteria(ctx, mailboxID, accountID, criteria(), 0, shape.mailboxCount)
+			require.NoError(t, err)
+			uids = uids[:0]
+			for _, m := range full {
+				uids = append(uids, m.UID)
+			}
+			check(t, uids)
+
+			assert.Equal(t, 2.0, pathCount(shape.label)-before,
+				"TEXT search should execute via %s", shape.label)
+		})
+	}
 }
 
 // Database test helpers for search tests

@@ -89,7 +89,7 @@ func TestInsertMessage_LargeFTSSkip(t *testing.T) {
 	// by checking that messages_fts row exists
 	var storedHash string
 	err = db.GetReadPool().QueryRow(ctx,
-		"SELECT content_hash FROM messages_fts WHERE content_hash = $1",
+		"SELECT content_hash FROM messages_fts_v2 WHERE content_hash = $1",
 		contentHash).Scan(&storedHash)
 	assert.NoError(t, err)
 	assert.Equal(t, contentHash, storedHash)
@@ -173,7 +173,7 @@ func TestInsertMessage_LargeBodyTruncation(t *testing.T) {
 	// Verify that text_body is truncated to exactly 64KB
 	var textBody, textBodyTSV *string
 	err = db.GetReadPool().QueryRow(ctx,
-		"SELECT text_body, text_body_tsv::text FROM messages_fts WHERE content_hash = $1",
+		"SELECT text_body, text_body_tsv::text FROM messages_fts_v2 WHERE content_hash = $1",
 		contentHash).Scan(&textBody, &textBodyTSV)
 	assert.NoError(t, err)
 	require.NotNil(t, textBody, "text_body should be truncated, not NULL")
@@ -259,7 +259,7 @@ func TestInsertMessage_NormalSizeStored(t *testing.T) {
 	// Verify that text_body is NULL and text_body_tsv is NOT NULL (stored)
 	var textBody, textBodyTSV *string
 	err = db.GetReadPool().QueryRow(ctx,
-		"SELECT text_body, text_body_tsv::text FROM messages_fts WHERE content_hash = $1",
+		"SELECT text_body, text_body_tsv::text FROM messages_fts_v2 WHERE content_hash = $1",
 		contentHash).Scan(&textBody, &textBodyTSV)
 	assert.NoError(t, err)
 	assert.NotNil(t, textBody, "text_body should NOT be NULL for normal-sized messages initially")

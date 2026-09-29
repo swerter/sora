@@ -31,7 +31,6 @@ func TestFTSTextlessRowsResolveFromPendingText(t *testing.T) {
 	cleanup := func(hash string) {
 		t.Cleanup(func() {
 			db.GetWritePool().Exec(context.Background(), `DELETE FROM messages_fts_v2 WHERE content_hash = $1`, hash)
-			db.GetWritePool().Exec(context.Background(), `DELETE FROM messages_fts WHERE content_hash = $1`, hash)
 		})
 	}
 	runBatch := func(limit int) int {
@@ -53,28 +52,6 @@ func TestFTSTextlessRowsResolveFromPendingText(t *testing.T) {
 		require.Equal(t, want, indexed, "every row of the body must carry its real vector")
 		require.Equal(t, 0, queued)
 	}
-
-	t.Run("text only in messages_fts", func(t *testing.T) {
-		// Delivered by an old-binary node (or its v2 stage failed): the only pending text is
-		// in the shared table, which the worker no longer polls.
-		hash := fmt.Sprintf("v1only_%d", time.Now().UnixNano())
-		cleanup(hash)
-		_, err := db.GetWritePool().Exec(ctx, `
-			INSERT INTO messages_fts (content_hash, text_body, sent_date) VALUES ($1, 'quarterly report', now())`, hash)
-		require.NoError(t, err)
-		stageV2(hash, accountID, nil, "1900-01-01")
-
-		n := runBatch(1)
-		require.Equal(t, 1, n, "the textless row must be resolved, not left queued forever")
-		requireIndexed(hash, 1)
-
-		var v1Text *string
-		var v1Lexemes int
-		require.NoError(t, db.GetWritePool().QueryRow(ctx, `
-			SELECT text_body, length(text_body_tsv) FROM messages_fts WHERE content_hash = $1`, hash).Scan(&v1Text, &v1Lexemes))
-		require.Nil(t, v1Text, "the shared row's text is consumed")
-		require.Greater(t, v1Lexemes, 0, "the shared row gets the same vector (dual-write)")
-	})
 
 	t.Run("textless rows ahead of their text row fill the batch", func(t *testing.T) {
 		// Two textless rows sort ahead of the one row carrying the text, and the batch holds
