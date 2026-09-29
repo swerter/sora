@@ -72,11 +72,11 @@ func TestFTSWorkerFanOutDeadlock(t *testing.T) {
 	}
 	results := make(chan outcome, 2)
 	go func() {
-		_, err := db.tokenizeAndFanOut(ctxA, txA, ftsQueueItem{Hash: hash, AccountID: a1, TextBody: "shared body"})
+		_, err := db.tokenizeAndFanOut(ctxA, txA, ftsQueueItem{Hash: hash, AccountID: a1, HasText: true})
 		results <- outcome{"A", err}
 	}()
 	go func() {
-		_, err := db.tokenizeAndFanOut(ctxB, txB, ftsQueueItem{Hash: hash, AccountID: a2, TextBody: "shared body"})
+		_, err := db.tokenizeAndFanOut(ctxB, txB, ftsQueueItem{Hash: hash, AccountID: a2, HasText: true})
 		results <- outcome{"B", err}
 	}()
 

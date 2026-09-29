@@ -4,13 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/migadu/sora/helpers"
 	"github.com/migadu/sora/logger"
 )
 
@@ -43,14 +41,56 @@ import (
 // All rows sharing a hash become ready the moment that hash is tokenised, and a widely
 // delivered body has one row per recipient account. Fanning out to all of them in one
 // statement would put an unbounded write, and an unbounded GIN maintenance burst, inside
-// the worker's 30 second batch context. The fan-out loops in bounded chunks instead.
+// the worker's 30 second batch context. The fan-out loops in bounded chunks instead, and
+// checks the batch's time budget between them.
 const ftsFanoutCap = 1000
+
+// ftsTokenizeChunk is how many bodies one tokenising statement takes.
+//
+// The worker used to send five statements per body. Over a ~20 ms path to the primary that
+// was most of its time: in production each worker indexed ~29 bodies per 20 s batch while a
+// single server-side loop managed ~139 a second, and the queue fell 14 hours behind. A
+// statement per chunk makes the round trips per batch independent of its size. The chunk is
+// also the unit of the time budget and of the savepoint, so it stays small enough to finish
+// well inside one budget and to keep a transaction's subtransactions far below the 64 that
+// overflow PostgreSQL's per-backend subxid cache.
+const ftsTokenizeChunk = 100
+
+// ftsTokenizeSQL is the one definition of how a body becomes a vector, applied to the SQL
+// expression col. The regexp drops every run of more than 100 characters between whitespace
+// or angle brackets -- base64 and hex blobs that to_tsvector burns CPU lexing into junk -- and
+// drops exactly what helpers.RemoveLongTokens drops (TestFTSTokenizeMatchesRemoveLongTokens),
+// so vectors are what the worker produced when it did this in Go. Doing it in SQL means a
+// body's text never leaves the database: the worker used to fetch every polled body and send
+// it straight back.
+func ftsTokenizeSQL(col string) string {
+	return "strip(to_tsvector('simple', regexp_replace(" + col + `, '[^ \t\n\r<>]{101,}', '', 'g')))`
+}
+
+// ftsSourceVectorSQL is the vector the queued rows of content hash hashCol should copy: a
+// non-empty v2 vector, else a poisoned empty one (the body could not be tokenised, so no copy
+// of it can be), else the shared messages_fts vector. The last matters during the v1 soak: a
+// hash indexed before migration 000050 has its vector only there, and a per-account row
+// created afterwards (by a cross-account COPY, say) carries no text of its own to tokenise.
+//
+// LIMIT 1 without ORDER BY stops at the first match. Ordering by length() instead detoasted
+// every vector the body already had, on every call: a newsletter indexed in 10,000 accounts
+// paid 10,000 decompressions for each new copy.
+func ftsSourceVectorSQL(hashCol string) string {
+	return `COALESCE(
+		(SELECT v.text_body_tsv FROM messages_fts_v2 v
+		  WHERE v.content_hash = ` + hashCol + ` AND length(v.text_body_tsv) > 0 LIMIT 1),
+		(SELECT v.text_body_tsv FROM messages_fts_v2 v
+		  WHERE v.content_hash = ` + hashCol + ` AND v.text_body_tsv IS NOT NULL LIMIT 1),
+		(SELECT f.text_body_tsv FROM messages_fts f
+		  WHERE f.content_hash = ` + hashCol + ` AND f.text_body_tsv IS NOT NULL LIMIT 1))`
+}
 
 // ftsQueueItem is one polled row of the staging queue.
 type ftsQueueItem struct {
 	Hash      string
 	AccountID int64
-	TextBody  string
+	HasText   bool
 }
 
 // ProcessFTSBatch processes up to 'limit' rows from the messages_fts_v2 staging queue.
@@ -59,10 +99,18 @@ type ftsQueueItem struct {
 // polled. The distinction is what stops the caller spinning: server/fts/worker.go loops while
 // this reports progress, and a row that is deliberately left queued (its hash's text is still
 // pending in another worker's batch) would otherwise be re-polled forever.
+//
+// Rows are indexed oldest first, a chunk of ftsTokenizeChunk bodies per statement. Nothing
+// here waits on a row another worker holds -- every cross-row write takes its targets FOR
+// UPDATE SKIP LOCKED -- so no lock order is needed, and the queue order is kept: when the
+// time budget runs out, what was indexed is the oldest mail. Sorting a batch by hash before
+// indexing it, as this once did, left the oldest body in production queued for 14 hours while
+// newer mail was indexed around it.
 func (d *Database) ProcessFTSBatch(ctx context.Context, tx pgx.Tx, limit int) (int, error) {
-	// FIFO over the queue index (created_at) WHERE text_body_tsv IS NULL.
+	// FIFO over the queue index (created_at) WHERE text_body_tsv IS NULL. The text itself is
+	// not fetched: it is tokenised where it lies.
 	rows, err := tx.Query(ctx, `
-		SELECT content_hash, account_id, text_body
+		SELECT content_hash, account_id, text_body IS NOT NULL
 		FROM messages_fts_v2
 		WHERE text_body_tsv IS NULL
 		ORDER BY created_at ASC
@@ -76,13 +124,9 @@ func (d *Database) ProcessFTSBatch(ctx context.Context, tx pgx.Tx, limit int) (i
 	var items []ftsQueueItem
 	for rows.Next() {
 		var item ftsQueueItem
-		var textBody *string
-		if err := rows.Scan(&item.Hash, &item.AccountID, &textBody); err != nil {
+		if err := rows.Scan(&item.Hash, &item.AccountID, &item.HasText); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("failed to scan messages_fts_v2: %w", err)
-		}
-		if textBody != nil {
-			item.TextBody = *textBody
 		}
 		items = append(items, item)
 	}
@@ -95,30 +139,36 @@ func (d *Database) ProcessFTSBatch(ctx context.Context, tx pgx.Tx, limit int) (i
 		return 0, nil
 	}
 
-	// Collapse to one entry per hash, keeping FIFO order. The first row carrying text
-	// becomes that hash's anchor: the single row we actually tokenise.
+	// Collapse to one entry per hash, in queue order. The first row carrying text becomes
+	// that hash's anchor: the single row that is actually tokenised.
 	var order []string
 	anchor := make(map[string]ftsQueueItem, len(items))
 	for _, item := range items {
-		if _, seen := anchor[item.Hash]; !seen {
+		cur, seen := anchor[item.Hash]
+		if !seen {
 			order = append(order, item.Hash)
 			anchor[item.Hash] = item
 			continue
 		}
-		if anchor[item.Hash].TextBody == "" && item.TextBody != "" {
+		if !cur.HasText && item.HasText {
 			anchor[item.Hash] = item
 		}
 	}
+	var anchors []ftsQueueItem
+	var noText []string
+	for _, hash := range order {
+		if item := anchor[hash]; item.HasText {
+			anchors = append(anchors, item)
+		} else {
+			// This hash's text lives on some other row (or nowhere at all). Classified
+			// and handled below, in one round trip for all such hashes.
+			noText = append(noText, hash)
+		}
+	}
 
-	// Lock order. Two workers can hold different rows of the same hash, and each touches
-	// the one shared messages_fts row per hash. Walking hashes in a fixed order means two
-	// batches sharing several hashes cannot take those shared rows in opposite orders.
-	sort.Strings(order)
-
-	// Time budget. Each hash costs several round trips (savepoint, tokenise, dual-write,
-	// fan-out), so a full batch can outlast the caller's deadline; when it did, the whole
+	// Time budget. A full batch can outlast the caller's deadline; when it did, the whole
 	// transaction rolled back and the same FIFO rows were polled again, forever. Stop
-	// starting new hashes once two thirds of the remaining time is spent and commit what is
+	// starting new chunks once two thirds of the remaining time is spent and commit what is
 	// done: rows polled but not reached are released at commit and polled again next batch.
 	outOfTime := func() bool { return false }
 	if deadline, ok := ctx.Deadline(); ok {
@@ -127,22 +177,12 @@ func (d *Database) ProcessFTSBatch(ctx context.Context, tx pgx.Tx, limit int) (i
 	}
 
 	resolved := 0
-	var noText []string
-	for _, hash := range order {
+	for start := 0; start < len(anchors); start += ftsTokenizeChunk {
 		if outOfTime() {
 			logger.Info("FTS: batch time budget spent, committing partial progress", "resolved", resolved)
 			return resolved, nil
 		}
-		item := anchor[hash]
-		if item.TextBody == "" {
-			// This hash's text lives on some other row (or nowhere at all). Classified
-			// and handled below, in one round trip for all such hashes.
-			noText = append(noText, hash)
-			continue
-		}
-		n, err := d.indexHash(ctx, tx, hash, func() (int, error) {
-			return d.tokenizeAndFanOut(ctx, tx, item)
-		})
+		n, err := d.indexChunk(ctx, tx, anchors[start:min(start+ftsTokenizeChunk, len(anchors))], outOfTime)
 		if err != nil {
 			return resolved, err
 		}
@@ -156,6 +196,89 @@ func (d *Database) ProcessFTSBatch(ctx context.Context, tx pgx.Tx, limit int) (i
 	resolved += n
 
 	return resolved, nil
+}
+
+// indexChunk indexes a chunk of anchors -- one queued, text-carrying row per content hash --
+// in a few set-based statements, inside one savepoint.
+//
+// A body PostgreSQL cannot tokenise fails the whole tokenising statement. The chunk is then
+// rolled back and redone one hash at a time through indexHash, which poisons just that body.
+// That path is slow, but it only runs for a chunk that holds a bad body.
+func (d *Database) indexChunk(ctx context.Context, tx pgx.Tx, chunk []ftsQueueItem, outOfTime func() bool) (int, error) {
+	if _, err := tx.Exec(ctx, "SAVEPOINT fts_chunk"); err != nil {
+		return 0, fmt.Errorf("failed to create savepoint for fts chunk: %w", err)
+	}
+	n, err := d.tokenizeChunk(ctx, tx, chunk, outOfTime)
+	if err == nil {
+		if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT fts_chunk"); err != nil {
+			return 0, fmt.Errorf("failed to release savepoint for fts chunk: %w", err)
+		}
+		return n, nil
+	}
+	if _, rerr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT fts_chunk"); rerr != nil {
+		return 0, fmt.Errorf("failed to roll back savepoint for fts chunk: %w", rerr)
+	}
+	if !isFTSDataError(err) {
+		return 0, fmt.Errorf("failed to index fts chunk: %w", err)
+	}
+
+	logger.Warn("FTS: a body in this chunk cannot be tokenised, isolating it", "chunk", len(chunk), "err", err)
+	resolved := 0
+	for _, item := range chunk {
+		if outOfTime() {
+			break
+		}
+		n, err := d.indexHash(ctx, tx, item.Hash, func() (int, error) {
+			return d.tokenizeAndFanOut(ctx, tx, item)
+		})
+		if err != nil {
+			return resolved, err
+		}
+		resolved += n
+	}
+	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT fts_chunk"); err != nil {
+		return resolved, fmt.Errorf("failed to release savepoint for fts chunk: %w", err)
+	}
+	return resolved, nil
+}
+
+// tokenizeChunk is indexChunk's set-based path: tokenise every anchor whose hash has no
+// vector yet, in one statement; copy vectors onto every other queued row of those hashes;
+// then dual-write the shared messages_fts rows.
+//
+// An anchor whose hash already carries a vector -- a body whose first copy was indexed
+// earlier -- is not tokenised again; the fan-out copies the existing vector onto it. A body
+// is tokenised at most once however many accounts hold it.
+func (d *Database) tokenizeChunk(ctx context.Context, tx pgx.Tx, chunk []ftsQueueItem, outOfTime func() bool) (int, error) {
+	hashes := make([]string, len(chunk))
+	accounts := make([]int64, len(chunk))
+	for i, item := range chunk {
+		hashes[i] = item.Hash
+		accounts[i] = item.AccountID
+	}
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE messages_fts_v2 t
+		SET text_body_tsv = `+ftsTokenizeSQL("t.text_body")+`, text_body = NULL
+		FROM unnest($1::text[], $2::bigint[]) AS a(content_hash, account_id)
+		WHERE t.content_hash = a.content_hash AND t.account_id = a.account_id
+		  AND t.text_body_tsv IS NULL AND t.text_body IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM messages_fts_v2 s
+		                  WHERE s.content_hash = t.content_hash AND s.text_body_tsv IS NOT NULL)
+	`, hashes, accounts)
+	if err != nil {
+		return 0, fmt.Errorf("tokenize: %w", err)
+	}
+	resolved := int(tag.RowsAffected())
+
+	n, err := d.fanOutVectors(ctx, tx, hashes, outOfTime)
+	if err != nil {
+		return resolved, err
+	}
+	if err := d.copyVectorsToSharedTable(ctx, tx, hashes); err != nil {
+		return resolved + n, err
+	}
+	return resolved + n, nil
 }
 
 // indexHash runs fn, which indexes one hash, inside its own savepoint.
@@ -206,135 +329,128 @@ func (d *Database) indexHash(ctx context.Context, tx pgx.Tx, hash string, fn fun
 // sort ahead of their text row can fill a whole batch, which then resolves nothing, and the
 // worker stops for the tick with newer mail waiting behind them.
 func (d *Database) tokenizeFromPendingText(ctx context.Context, tx pgx.Tx, hash string) (int, bool, error) {
-	var item ftsQueueItem
+	var accountID int64
 	err := tx.QueryRow(ctx, `
-		SELECT account_id, text_body FROM messages_fts_v2
+		SELECT account_id FROM messages_fts_v2
 		WHERE content_hash = $1 AND text_body_tsv IS NULL AND text_body IS NOT NULL
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED
-	`, hash).Scan(&item.AccountID, &item.TextBody)
+	`, hash).Scan(&accountID)
 	if err == nil {
-		item.Hash = hash
-		n, err := d.tokenizeAndFanOut(ctx, tx, item)
+		n, err := d.tokenizeAndFanOut(ctx, tx, ftsQueueItem{Hash: hash, AccountID: accountID, HasText: true})
 		return n, true, err
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, fmt.Errorf("find pending v2 text for %s: %w", hash, err)
 	}
 
-	var text string
-	err = tx.QueryRow(ctx, `
-		SELECT text_body FROM messages_fts
-		WHERE content_hash = $1 AND text_body_tsv IS NULL AND text_body IS NOT NULL
-		FOR UPDATE SKIP LOCKED
-	`, hash).Scan(&text)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, fmt.Errorf("find pending v1 text for %s: %w", hash, err)
-	}
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE messages_fts
-		SET text_body_tsv = strip(to_tsvector('simple', $1)), text_body = NULL
-		WHERE content_hash = $2
-	`, helpers.RemoveLongTokens(text, 100), hash); err != nil {
+		SET text_body_tsv = `+ftsTokenizeSQL("text_body")+`, text_body = NULL
+		WHERE ctid IN (SELECT ctid FROM messages_fts
+		               WHERE content_hash = $1 AND text_body_tsv IS NULL AND text_body IS NOT NULL
+		               FOR UPDATE SKIP LOCKED)
+	`, hash)
+	if err != nil {
 		return 0, true, fmt.Errorf("tokenize v1 text: %w", err)
 	}
-	n, err := d.fanOutVector(ctx, tx, hash)
+	if tag.RowsAffected() == 0 {
+		return 0, false, nil
+	}
+	n, err := d.fanOutVectors(ctx, tx, []string{hash}, nil)
 	return n, true, err
 }
 
 // tokenizeAndFanOut computes the vector for one hash exactly once and then propagates it:
-// to the anchor row, to the shared messages_fts row (dual-write), and to every other v2 row
-// of that hash in bounded chunks.
+// to the anchor row, to every other v2 row of that hash in bounded chunks, and to the shared
+// messages_fts row (dual-write). It is the one-hash-at-a-time path, for a chunk that holds a
+// body PostgreSQL cannot tokenise and for textless rows whose text sits on another row.
 func (d *Database) tokenizeAndFanOut(ctx context.Context, tx pgx.Tx, item ftsQueueItem) (int, error) {
-	// Remove pathological Base64/Hex blocks. PostgreSQL's to_tsvector burns tremendous CPU
-	// lexing continuous junk bytes; stripping it here in the background worker keeps the
-	// index lean without spending anything on the IMAP APPEND hot path.
-	safeBody := helpers.RemoveLongTokens(item.TextBody, 100)
-
 	// The one and only to_tsvector call for this hash.
 	tag, err := tx.Exec(ctx, `
 		UPDATE messages_fts_v2
-		SET text_body_tsv = strip(to_tsvector('simple', $1)), text_body = NULL
-		WHERE content_hash = $2 AND account_id = $3 AND text_body_tsv IS NULL
-	`, safeBody, item.Hash, item.AccountID)
+		SET text_body_tsv = `+ftsTokenizeSQL("text_body")+`, text_body = NULL
+		WHERE content_hash = $1 AND account_id = $2 AND text_body_tsv IS NULL AND text_body IS NOT NULL
+	`, item.Hash, item.AccountID)
 	if err != nil {
 		return 0, fmt.Errorf("tokenize: %w", err)
 	}
 	resolved := int(tag.RowsAffected())
 
-	// Dual-write the shared table by COPYING the vector we just computed, never by
-	// tokenising again. Retired with messages_fts in migration 000051.
-	//
-	// SKIP LOCKED: the shared row may be held by another worker handling the same hash (or
-	// by an old-binary worker during a rolling deploy), which is writing the same vector.
-	// Waiting would only risk a deadlock or a lock timeout.
-	if _, err := tx.Exec(ctx, `
-		UPDATE messages_fts f
-		SET text_body_tsv = v.text_body_tsv, text_body = NULL
-		FROM messages_fts_v2 v
-		WHERE f.ctid IN (SELECT ctid FROM messages_fts
-		                 WHERE content_hash = $1 AND text_body_tsv IS NULL
-		                 FOR UPDATE SKIP LOCKED)
-		  AND v.content_hash = $1 AND v.account_id = $2 AND v.text_body_tsv IS NOT NULL
-	`, item.Hash, item.AccountID); err != nil {
-		return resolved, fmt.Errorf("dual-write messages_fts: %w", err)
-	}
-
-	n, err := d.fanOutVector(ctx, tx, item.Hash)
+	n, err := d.fanOutVectors(ctx, tx, []string{item.Hash}, nil)
 	if err != nil {
 		return resolved, err
+	}
+	if err := d.copyVectorsToSharedTable(ctx, tx, []string{item.Hash}); err != nil {
+		return resolved + n, err
 	}
 	return resolved + n, nil
 }
 
-// fanOutVector copies a hash's finished vector onto its remaining per-account rows, in
-// chunks of ftsFanoutCap so one very widely delivered body cannot monopolise the batch.
-func (d *Database) fanOutVector(ctx context.Context, tx pgx.Tx, hash string) (int, error) {
+// fanOutVectors copies each hash's vector (ftsSourceVectorSQL) onto that hash's queued v2
+// rows, ftsFanoutCap rows per statement, until none are left or the time budget is spent.
+// Rows not reached stay queued, and a later batch finishes them.
+//
+// Targets are taken FOR UPDATE SKIP LOCKED. A queued row that another worker has polled
+// belongs to that worker, which resolves it itself; waiting for it instead is how two
+// workers fanning out the same hash deadlocked (each waiting for the row the other polled).
+func (d *Database) fanOutVectors(ctx context.Context, tx pgx.Tx, hashes []string, outOfTime func() bool) (int, error) {
+	if len(hashes) == 0 {
+		return 0, nil
+	}
 	total := 0
 	for {
-		// The source vector may live in either table. Preferring v2 and falling back to
-		// the shared messages_fts row matters during the transition: a hash indexed before
-		// migration 000050 has its vector in the old table, and a per-account row created
-		// afterwards (by a cross-account COPY, say) would otherwise sit queued forever --
-		// it carries no text of its own to tokenise and no v2 sibling to copy from. The two
-		// vectors are identical by construction, so which one wins is immaterial.
-		//
-		// Targets are taken FOR UPDATE SKIP LOCKED. A queued row that another worker has
-		// polled belongs to that worker, which resolves it itself; waiting for it instead is
-		// how two workers fanning out the same hash deadlocked (each waiting for the row the
-		// other polled). A non-empty source vector is preferred over a poisoned '' one.
 		tag, err := tx.Exec(ctx, `
-			WITH src AS (
-				SELECT COALESCE(
-					(SELECT v.text_body_tsv FROM messages_fts_v2 v
-					  WHERE v.content_hash = $1 AND v.text_body_tsv IS NOT NULL
-					  ORDER BY length(v.text_body_tsv) = 0 LIMIT 1),
-					(SELECT f.text_body_tsv FROM messages_fts f
-					  WHERE f.content_hash = $1 AND f.text_body_tsv IS NOT NULL LIMIT 1)
-				) AS tsv
-			), target AS (
-				SELECT ctid FROM messages_fts_v2
-				WHERE content_hash = $1 AND text_body_tsv IS NULL
+			WITH target AS (
+				SELECT ctid, content_hash FROM messages_fts_v2
+				WHERE content_hash = ANY($1) AND text_body_tsv IS NULL
 				LIMIT $2
 				FOR UPDATE SKIP LOCKED
+			), src AS (
+				SELECT h.content_hash, `+ftsSourceVectorSQL("h.content_hash")+` AS tsv
+				FROM (SELECT DISTINCT content_hash FROM target) h
 			)
 			UPDATE messages_fts_v2 t
-			SET text_body_tsv = (SELECT tsv FROM src), text_body = NULL
-			WHERE t.ctid IN (SELECT ctid FROM target)
-			  AND (SELECT tsv FROM src) IS NOT NULL
-		`, hash, ftsFanoutCap)
+			SET text_body_tsv = s.tsv, text_body = NULL
+			FROM target g JOIN src s ON s.content_hash = g.content_hash
+			WHERE t.ctid = g.ctid AND s.tsv IS NOT NULL
+		`, hashes, ftsFanoutCap)
 		if err != nil {
-			return total, fmt.Errorf("fan out %s: %w", hash, err)
+			return total, fmt.Errorf("fan out: %w", err)
 		}
 		n := int(tag.RowsAffected())
 		total += n
-		if n < ftsFanoutCap {
+		if n < ftsFanoutCap || (outOfTime != nil && outOfTime()) {
 			return total, nil
 		}
 	}
+}
+
+// copyVectorsToSharedTable dual-writes the shared messages_fts rows of the given hashes by
+// COPYING their v2 vector, never by tokenising again. Retired with messages_fts in migration
+// 000051.
+//
+// SKIP LOCKED: the shared row may be held by another worker handling the same hash (or by
+// an old-binary worker during a rolling deploy), which is writing the same vector. Waiting
+// would only risk a deadlock or a lock timeout.
+func (d *Database) copyVectorsToSharedTable(ctx context.Context, tx pgx.Tx, hashes []string) error {
+	if _, err := tx.Exec(ctx, `
+		WITH target AS (
+			SELECT ctid, content_hash FROM messages_fts
+			WHERE content_hash = ANY($1) AND text_body_tsv IS NULL
+			FOR UPDATE SKIP LOCKED
+		), src AS (
+			SELECT h.content_hash, `+ftsSourceVectorSQL("h.content_hash")+` AS tsv
+			FROM (SELECT DISTINCT content_hash FROM target) h
+		)
+		UPDATE messages_fts f
+		SET text_body_tsv = s.tsv, text_body = NULL
+		FROM target g JOIN src s ON s.content_hash = g.content_hash
+		WHERE f.ctid = g.ctid AND s.tsv IS NOT NULL
+	`, hashes); err != nil {
+		return fmt.Errorf("dual-write messages_fts: %w", err)
+	}
+	return nil
 }
 
 // resolveTextlessHashes handles queued rows whose own text is gone -- the normal case for
@@ -396,11 +512,11 @@ func (d *Database) resolveTextlessHashes(ctx context.Context, tx pgx.Tx, hashes 
 	}
 
 	resolved := 0
-	for _, hash := range copyable {
+	if len(copyable) > 0 {
 		if outOfTime() {
 			return resolved, nil
 		}
-		n, err := d.fanOutVector(ctx, tx, hash)
+		n, err := d.fanOutVectors(ctx, tx, copyable, outOfTime)
 		if err != nil {
 			return resolved, err
 		}
