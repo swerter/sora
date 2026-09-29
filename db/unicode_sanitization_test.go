@@ -190,13 +190,13 @@ func TestInsertMessage_BadUnicodeData(t *testing.T) {
 				assert.NotEmpty(t, storedMessageID, "Auto-generated message ID should not be empty")
 			}
 
-			// Verify messages_fts was stored (FTS indexing didn't crash)
+			// Verify messages_fts_v2 was stored (FTS indexing didn't crash)
 			var contentExists bool
 			err = db.GetReadPool().QueryRow(ctx,
-				"SELECT EXISTS(SELECT 1 FROM messages_fts WHERE content_hash = $1)",
+				"SELECT EXISTS(SELECT 1 FROM messages_fts_v2 WHERE content_hash = $1)",
 				contentHash).Scan(&contentExists)
 			require.NoError(t, err)
-			assert.True(t, contentExists, "messages_fts row should exist (FTS indexing succeeded)")
+			assert.True(t, contentExists, "messages_fts_v2 row should exist (FTS indexing succeeded)")
 
 			t.Logf("OK: message inserted with UID=%d, subject=%q", uid, storedSubject)
 		})

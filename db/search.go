@@ -146,7 +146,7 @@ func (db *Database) buildSearchCriteriaTree(criteria *imap.SearchCriteria, param
 	}
 
 	// Body full-text search
-	// Note: text_body_tsv is in messages_fts table, which is only available in complex query path
+	// Note: text_body_tsv is in messages_fts_v2, which is only joined in the complex query paths
 	for _, bodyCriteria := range criteria.Body {
 		if hits != nil {
 			conditions = append(conditions, hits.leaf(bodyCriteria, args, nextParam))
@@ -156,12 +156,12 @@ func (db *Database) buildSearchCriteriaTree(criteria *imap.SearchCriteria, param
 		args[param] = bodyCriteria
 		// Handle case where FTS data may be cleaned up (text_body_tsv is NULL)
 		// This ensures search still works but returns no results for cleaned messages
-		// Note: This column is in messages_fts table, only joined in complex query
+		// Note: This column is in messages_fts_v2, only joined in complex query
 		conditions = append(conditions, fmt.Sprintf("text_body_tsv IS NOT NULL AND text_body_tsv @@ plainto_tsquery('simple', @%s)", param))
 	}
 	// Text search - searches both headers and body (RFC 3501: TEXT matches header or body)
 	// We search:
-	//   1. text_body_tsv (FTS index on message body in messages_fts table)
+	//   1. text_body_tsv (FTS index on message body in messages_fts_v2)
 	//   2. Dedicated columns: subject, from/to/cc sort columns (indexed in messages table)
 	//
 	// Note: headers_tsv was removed in migration 000030 because all searchable headers
@@ -181,7 +181,7 @@ func (db *Database) buildSearchCriteriaTree(criteria *imap.SearchCriteria, param
 		args[likeParam] = "%" + lowerText + "%"
 
 		// Search across: body FTS, subject column, and recipient sort columns
-		// Note: text_body_tsv is in messages_fts table (complex query only)
+		// Note: text_body_tsv is in messages_fts_v2 (complex query only)
 		// Note: *_sort columns are already lowercase, so no need for LOWER()
 		conditions = append(conditions, fmt.Sprintf(
 			"((%s) "+
@@ -487,7 +487,7 @@ func buildNumSetCondition(numSet imap.NumSet, columnName string, paramPrefix str
 }
 
 // needsComplexQuery determines if the search criteria requires the complex CTE query
-// with ROW_NUMBER() and messages_fts JOIN, or if we can use the optimized simple query
+// with ROW_NUMBER() and messages_fts_v2 JOIN, or if we can use the optimized simple query
 func (db *Database) needsComplexQuery(criteria *imap.SearchCriteria, orderByClause string) bool {
 	// Need complex query for full-text search
 	if len(criteria.Body) > 0 || len(criteria.Text) > 0 {
@@ -585,13 +585,13 @@ func criteriaContainsFTS(c *imap.SearchCriteria) bool {
 
 // canUseTextUnion reports whether a search is eligible for the TEXT UNION rewrite.
 //
-// IMAP TEXT search expands to an OR that mixes messages_fts.text_body_tsv (reachable
+// IMAP TEXT search expands to an OR that mixes messages_fts_v2.text_body_tsv (reachable
 // only through the content_hash join) with LIKE filters on messages.* columns. A
 // single OR spanning two tables cannot be driven by any one index, so on a large
 // mailbox the planner degrades to a full mailbox scan with a per-row probe into
-// messages_fts (measured at 24s vs 13.6s for the UNION form). The rewrite splits the
+// the FTS table (measured at 24s vs 13.6s for the UNION form). The rewrite splits the
 // term into an indexable header branch (trigram indexes on messages) UNION an
-// indexable body branch (FTS GIN on messages_fts).
+// indexable body branch (FTS GIN on messages_fts_v2).
 //
 // Eligibility is intentionally conservative — exactly one top-level TEXT term, no
 // BODY term, and no FTS nested in OR/NOT — so the decomposition is a simple two-branch
@@ -1138,7 +1138,7 @@ func (db *Database) getMessagesQueryExecutor(ctx context.Context, mailboxID, acc
 	} else if db.canUseTextUnion(criteria, needsSeqNumSearch, orderByClause) {
 		// TEXT UNION path: split the single mixed-table TEXT OR into an indexable
 		// header branch (trigram indexes on messages) UNION an indexable body branch
-		// (FTS GIN on messages_fts), avoiding the full-mailbox-scan + per-row probe the
+		// (FTS GIN on messages_fts_v2), avoiding the full-mailbox-scan + per-row probe the
 		// combined OR forces on large mailboxes. See canUseTextUnion.
 		prefilterBody := mailboxMessageCount >= ftsCTEThreshold
 		finalQueryString, whereArgs, err = db.buildTextUnionQuery(criteria, mailboxID, accountID, ftsFullBranchSelect, textUnionSortColumnsFull, ftsFullOuterSelect, orderByClause, resultLimit, prefilterBody, &paramCounter)

@@ -103,17 +103,12 @@ func TestRestageFTSCreatesDestinationPair(t *testing.T) {
 	assert.True(t, hasVector, "the FTS worker must fan the existing vector out to the copied account's row")
 }
 
-// Delivery must write BOTH FTS tables. The v2 row is what search reads; the v1 row is the
-// rollback fallback that makes this release reversible without touching data that cannot be
-// regenerated.
+// Delivery must write messages_fts_v2. The v2 row is what search reads.
 //
 // This is a guard against a whole class of silent breakage: stageFTS swallows its own
 // errors by design (an unindexed message is still a delivered message), so a malformed
-// statement costs searchability with nothing but a log line to show for it. That is exactly
-// what happened once already -- "INSERT ... SELECT $1, $2" cannot infer parameter types from
-// the target columns, so the v2 statement failed to prepare and every delivery quietly
-// staged nothing.
-func TestDeliveryStagesBothFTSTables(t *testing.T) {
+// statement costs searchability with nothing but a log line to show for it.
+func TestDeliveryStagesFTSV2(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration test in short mode")
 	}
@@ -122,7 +117,7 @@ func TestDeliveryStagesBothFTSTables(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	contentHash := fmt.Sprintf("dualwrite_%d", time.Now().UnixNano())
+	contentHash := fmt.Sprintf("ftsv2_%d", time.Now().UnixNano())
 
 	tx, err := db.GetWritePool().Begin(ctx)
 	require.NoError(t, err)
@@ -135,8 +130,8 @@ func TestDeliveryStagesBothFTSTables(t *testing.T) {
 		S3Domain:      "domain",
 		S3Localpart:   "part",
 		Size:          100,
-		Subject:       "Dual write",
-		PlaintextBody: "dualwriteneedle in the body",
+		Subject:       "FTS v2 write",
+		PlaintextBody: "ftsv2needle in the body",
 		InternalDate:  time.Now(),
 		SentDate:      time.Now(),
 	}, PendingUpload{
@@ -148,14 +143,11 @@ func TestDeliveryStagesBothFTSTables(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit(ctx))
 
-	var v1, v2 int
-	require.NoError(t, db.GetReadPool().QueryRow(ctx,
-		`SELECT COUNT(*) FROM messages_fts WHERE content_hash = $1`, contentHash).Scan(&v1))
+	var v2 int
 	require.NoError(t, db.GetReadPool().QueryRow(ctx,
 		`SELECT COUNT(*) FROM messages_fts_v2 WHERE content_hash = $1 AND account_id = $2`,
 		contentHash, accountID).Scan(&v2))
 
-	assert.Equal(t, 1, v1, "the legacy hash-keyed row is the rollback fallback and must still be written")
 	assert.Equal(t, 1, v2,
 		"NO per-account FTS row was staged, so this message will never be searchable by body. "+
 			"stageFTS logs and swallows this failure, so check the warning it emitted")

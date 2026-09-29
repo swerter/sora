@@ -309,7 +309,7 @@ type CleanupConfig struct {
 	GracePeriod           string `toml:"grace_period"`
 	WakeInterval          string `toml:"wake_interval"`
 	MaxAgeRestriction     string `toml:"max_age_restriction"`
-	FTSRetention          string `toml:"fts_retention"` // How long to keep the messages_fts row (FTS vectors + raw headers)
+	FTSRetention          string `toml:"fts_retention"` // How long to keep a message's FTS vector (messages_fts_v2)
 	HealthStatusRetention string `toml:"health_status_retention"`
 	// InstanceLivenessThreshold is how long an uploader instance must be silent
 	// (no heartbeat, no lease on its own uploads) before the cleaner treats it as

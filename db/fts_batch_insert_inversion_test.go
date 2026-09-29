@@ -94,7 +94,7 @@ func TestFTSBatchInsertSkipsIndexUnderDefaultConfig(t *testing.T) {
 	countFTS := func(hash string) int {
 		var n int
 		require.NoError(t, database.GetReadPool().QueryRow(ctx,
-			"SELECT COUNT(*) FROM messages_fts WHERE content_hash = $1", hash).Scan(&n))
+			"SELECT COUNT(*) FROM messages_fts_v2 WHERE content_hash = $1", hash).Scan(&n))
 		return n
 	}
 	countMessages := func(hash string) int {

@@ -203,7 +203,7 @@ func (ts *TestServer) SetCleanup(cleanup func()) {
 }
 
 // FlushFTSQueue synchronously forces the FTS worker logic to process any pending
-// messages_fts rows so that subsequent SEARCH commands find newly appended messages.
+// messages_fts_v2 rows so that subsequent SEARCH commands find newly appended messages.
 func (ts *TestServer) FlushFTSQueue() error {
 	_, err := ts.ResilientDB.ProcessFTSBatchWithRetry(context.Background(), 5000)
 	return err

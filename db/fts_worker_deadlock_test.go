@@ -15,11 +15,11 @@ import (
 // Two worker instances (two nodes) each poll a different per-account row of the SAME body,
 // both still carrying text -- the state a newsletter delivered to many accounts is in until
 // the first tokenisation lands. Each holds FOR UPDATE on its polled row. Each then tokenises
-// its own row, updates the shared messages_fts row, and fans the vector out to every sibling
-// with a NULL vector -- which includes the row the OTHER worker holds.
+// its own row and fans the vector out to every sibling with a NULL vector -- which includes
+// the row the OTHER worker holds.
 //
-// Before the fan-out, the shared-row update and the poison took their targets FOR UPDATE
-// SKIP LOCKED, A waited for the row B held and B for the row A held: PostgreSQL aborted one
+// Before the fan-out and the poison took their targets FOR UPDATE SKIP LOCKED, A waited for
+// the row B held and B for the row A held: PostgreSQL aborted one
 // of them with 40P01, and ProcessFTSBatch then POISONED that body (see
 // TestFTSLockConflictNeverPoisonsGoodBody). Neither worker may wait on the other now.
 func TestFTSWorkerFanOutDeadlock(t *testing.T) {
@@ -34,10 +34,6 @@ func TestFTSWorkerFanOutDeadlock(t *testing.T) {
 	hash := fmt.Sprintf("deadlock_%d", time.Now().UnixNano())
 	a1, a2, a3 := accountID, accountID+3_000_000, accountID+3_000_001
 
-	// The shared row that dual-write always creates, still queued.
-	_, err := db.GetWritePool().Exec(ctx,
-		`INSERT INTO messages_fts (content_hash, text_body, sent_date) VALUES ($1, 'shared body', now())`, hash)
-	require.NoError(t, err)
 	// Three accounts received the body before any tokenisation happened, so all three rows
 	// carry text (ftsStageV2SQL omits text only when a sibling already has a vector).
 	for _, acct := range []int64{a1, a2, a3} {
@@ -125,9 +121,6 @@ func TestFTSLockConflictNeverPoisonsGoodBody(t *testing.T) {
 	hash := fmt.Sprintf("lockpoison_%d", time.Now().UnixNano())
 	a1, a2 := accountID, accountID+3_100_000
 
-	_, err := db.GetWritePool().Exec(ctx,
-		`INSERT INTO messages_fts (content_hash, text_body, sent_date) VALUES ($1, 'quarterly report attached', now())`, hash)
-	require.NoError(t, err)
 	// a1 is older, so a FIFO poll of one row takes it.
 	for i, acct := range []int64{a1, a2} {
 		_, err := db.GetWritePool().Exec(ctx, `
@@ -138,7 +131,6 @@ func TestFTSLockConflictNeverPoisonsGoodBody(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		db.GetWritePool().Exec(context.Background(), `DELETE FROM messages_fts_v2 WHERE content_hash = $1`, hash)
-		db.GetWritePool().Exec(context.Background(), `DELETE FROM messages_fts WHERE content_hash = $1`, hash)
 	})
 
 	// Worker B holds a2, and lets go shortly after A's lock timeout would fire.
@@ -179,9 +171,7 @@ func TestFTSLockConflictNeverPoisonsGoodBody(t *testing.T) {
 	}
 
 	rows, err := db.GetWritePool().Query(ctx, `
-		SELECT 'v2:' || account_id, COALESCE(length(text_body_tsv), -1) FROM messages_fts_v2 WHERE content_hash = $1
-		UNION ALL
-		SELECT 'v1', COALESCE(length(text_body_tsv), -1) FROM messages_fts WHERE content_hash = $1`, hash)
+		SELECT 'v2:' || account_id, COALESCE(length(text_body_tsv), -1) FROM messages_fts_v2 WHERE content_hash = $1`, hash)
 	require.NoError(t, err)
 	defer rows.Close()
 	seen := 0
@@ -193,7 +183,7 @@ func TestFTSLockConflictNeverPoisonsGoodBody(t *testing.T) {
 		require.Greater(t, lexemes, 0, "%s: a good body was poisoned (empty vector) or never indexed (%d)", who, lexemes)
 	}
 	require.NoError(t, rows.Err())
-	require.Equal(t, 3, seen)
+	require.Equal(t, 2, seen)
 }
 
 // Only a payload PostgreSQL cannot tokenise may be poisoned.
