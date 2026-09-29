@@ -1,4 +1,4 @@
--- Backfill messages_fts_v2 from messages_fts. Runbook: docs/fts-v2-rollout.md.
+-- Backfill messages_fts_v2 from messages_fts.
 --
 -- WHY THIS IS A DATA MIGRATION AND NOT A CACHE REBUILD
 --   text_body is nulled the moment its vector is computed (db/fts.go), so the tsvector in

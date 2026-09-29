@@ -43,7 +43,7 @@
 --   (db/search.go), so the partial predicate is matchable.
 --
 -- ON A LIVE PRODUCTION DATABASE, DO ALL OF THIS OUT-OF-BAND FIRST so this migration no-ops
--- (every statement below is IF NOT EXISTS). Full runbook in docs/fts-v2-rollout.md.
+-- (every statement below is IF NOT EXISTS). Full procedure in scripts/fts_v2_backfill.sql.
 -- Short form, all on the primary, direct (not via a transaction pooler):
 --
 --   1. CREATE EXTENSION IF NOT EXISTS btree_gin;
@@ -127,7 +127,7 @@ BEGIN
           INTO backfilled;
     END IF;
     IF NOT backfilled THEN
-        RAISE EXCEPTION 'messages_fts has more than 25000 rows and the out-of-band backfill has not completed (no ''rest'' or ''accept_partial'' in fts_v2_backfill_state). Run it first (docs/fts-v2-rollout.md): applying this migration now would leave body search missing existing mail.';
+        RAISE EXCEPTION 'messages_fts has more than 25000 rows and the out-of-band backfill has not completed (no ''rest'' or ''accept_partial'' in fts_v2_backfill_state). Run it first (scripts/fts_v2_backfill.sql): applying this migration now would leave body search missing existing mail.';
     END IF;
 END $$;
 
