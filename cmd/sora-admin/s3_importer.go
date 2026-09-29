@@ -46,6 +46,8 @@ type S3ImporterOptions struct {
 	// a lease key: a row left behind under an id no running instance answers to is
 	// reaped by the cleaner along with its message.
 	InstanceID string
+	// FTSRetention skips the search row for messages sent before this window (0 = index all).
+	FTSRetention time.Duration
 }
 
 // S3Importer handles the S3 import process
@@ -567,6 +569,7 @@ func (si *S3Importer) importS3Object(obj S3ObjectInfo) error {
 			References:    references,
 			BodyStructure: &bodyStructure,
 			Recipients:    recipients,
+			FTSRetention:  si.options.FTSRetention,
 		},
 		db.PendingUpload{
 			InstanceID:  hostname,

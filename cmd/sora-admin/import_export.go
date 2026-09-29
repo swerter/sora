@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/migadu/sora/helpers"
 	"github.com/migadu/sora/logger"
 	"github.com/migadu/sora/storage"
 )
@@ -59,6 +60,7 @@ func handleImportMaildir(ctx context.Context) {
 	endDate := fs.String("end-date", "", "Import only messages before this date (YYYY-MM-DD)")
 	incremental := fs.Bool("incremental", false, "Skip messages already marked as imported in SQLite cache")
 	pathsFile := fs.String("paths-file", "", "Path to a file containing a list of paths (relative to maildir root or absolute) to import")
+	ftsRetention := fs.String("fts-retention", "", "Index for body search only messages sent within this window, e.g. 180d (default: [cleanup] fts_retention; unset = index all)")
 
 	fs.Usage = func() {
 		fmt.Printf(`Import maildir from a given path
@@ -86,6 +88,9 @@ Options:
   --start-date string     Import only messages after this date (YYYY-MM-DD)
   --end-date string       Import only messages before this date (YYYY-MM-DD)
   --paths-file string     Path to a file containing paths to import (one per line)
+  --fts-retention string  Index for body search only messages sent within this window, e.g. 180d.
+                          Older messages are imported in full but are not body-searchable.
+                          (default: [cleanup] fts_retention from the config; unset = index all)
   --config string        Path to TOML configuration file (required)
 
 IMPORTANT: --maildir-path must point to a maildir root directory (containing cur/, new/, tmp/ subdirectories),
@@ -126,6 +131,9 @@ Examples:
 
   # Import with Sieve script
   sora-admin import maildir --email user@example.com --maildir-path /var/vmail/user/Maildir --sieve /path/to/user.sieve
+
+  # Import everything, but make only the last 6 months searchable by body
+  sora-admin import maildir --email user@example.com --maildir-path /var/vmail/user/Maildir --fts-retention 180d
 `)
 	}
 
@@ -175,6 +183,12 @@ Examples:
 		for i := range mailboxList {
 			mailboxList[i] = strings.TrimSpace(mailboxList[i])
 		}
+	}
+
+	ftsRetentionParsed, err := resolveImportFTSRetention(*ftsRetention)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Connect to resilient database
@@ -228,6 +242,7 @@ Examples:
 		Incremental:          *incremental,
 		MaxMessageSize:       globalConfig.GetImportMessageLimit(),
 		PathsFile:            *pathsFile,
+		FTSRetention:         ftsRetentionParsed,
 	}
 
 	importer, err := NewImporter(ctx, *maildirPath, *email, *jobs, rdb, s3, options)
@@ -256,6 +271,7 @@ func handleImportS3(ctx context.Context) {
 	cleanupDB := fs.Bool("cleanup-db", true, "Cleanup temporary database when done")
 	importDelay := fs.Duration("import-delay", 0, "Delay between imports to control rate")
 	continuationToken := fs.String("continuation-token", "", "S3 continuation token to resume from")
+	ftsRetention := fs.String("fts-retention", "", "Index for body search only messages sent within this window, e.g. 180d (default: [cleanup] fts_retention; unset = index all)")
 
 	// Parse the flags
 	if err := fs.Parse(os.Args[3:]); err != nil {
@@ -266,6 +282,10 @@ func handleImportS3(ctx context.Context) {
 	// Validate required flags
 	if *email == "" {
 		logger.Fatal("--email is required (e.g., 'user@example.com')")
+	}
+	ftsRetentionParsed, err := resolveImportFTSRetention(*ftsRetention)
+	if err != nil {
+		logger.Fatalf("%v", err)
 	}
 
 	// Connect to resilient database
@@ -304,7 +324,8 @@ func handleImportS3(ctx context.Context) {
 		Workers:           *workers,
 		// Resolved the same way the server on this host resolves it, so a row this
 		// import leaves in pending_uploads is owned by an instance that still exists.
-		InstanceID: globalConfig.InstanceID(),
+		InstanceID:   globalConfig.InstanceID(),
+		FTSRetention: ftsRetentionParsed,
 	}
 
 	importer, err := NewS3Importer(rdb, s3, options)
@@ -532,4 +553,18 @@ Examples:
 
 Use 'sora-admin export <subcommand> --help' for detailed help.
 `)
+}
+
+// resolveImportFTSRetention returns the window within which an import indexes messages for
+// body search: the --fts-retention flag if given, else [cleanup] fts_retention from the
+// config, which is what the server applies to delivered mail. Zero indexes everything.
+func resolveImportFTSRetention(flagValue string) (time.Duration, error) {
+	if flagValue == "" {
+		return globalConfig.Cleanup.GetFTSRetentionWithDefault(), nil
+	}
+	d, err := helpers.ParseDuration(flagValue)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid --fts-retention %q: use a duration such as 180d or 4320h", flagValue)
+	}
+	return d, nil
 }
