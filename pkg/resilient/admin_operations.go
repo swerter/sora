@@ -273,15 +273,63 @@ func (rd *ResilientDatabase) InsertMessagesFromImporterBatchWithRetry(ctx contex
 	return res.rowIDs, res.uids, res.hashes, nil
 }
 
+// CleanupSoftDeletedAccountsWithRetry hard-deletes the next batch of accounts soft-deleted
+// longer than gracePeriod ago: their messages are expunged and their mailboxes and other
+// dependents removed, leaving the account and credential rows for the S3 cleanup and the
+// final deletion. Each account is processed on its own, in bounded steps that each commit
+// (see db.HardDeleteAccountStep), so no account is a poison pill for the batch: a large one
+// drains over as many steps as it needs, and one that fails is logged and left for the
+// next cycle while the rest of the batch proceeds. Returns the number of accounts finished.
 func (rd *ResilientDatabase) CleanupSoftDeletedAccountsWithRetry(ctx context.Context, gracePeriod time.Duration) (int64, error) {
-	op := func(ctx context.Context, tx pgx.Tx) (any, error) {
-		return rd.getOperationalDatabaseForOperation(ctx, true).CleanupSoftDeletedAccounts(ctx, tx, gracePeriod)
+	const batchLimit = 50
+
+	listOp := func(ctx context.Context) (any, error) {
+		return rd.getOperationalDatabaseForOperation(ctx, false).ListSoftDeletedAccountsForHardDelete(ctx, gracePeriod, batchLimit)
 	}
-	result, err := rd.executeWriteInTxWithRetry(ctx, cleanupRetryConfig, timeoutWrite, op)
+	listed, err := rd.executeReadWithRetry(ctx, cleanupRetryConfig, timeoutRead, listOp)
 	if err != nil {
 		return 0, err
 	}
-	return result.(int64), nil
+	accountIDs := listed.([]int64)
+
+	var done int64
+	for _, accountID := range accountIDs {
+		if ctx.Err() != nil {
+			return done, ctx.Err()
+		}
+		if err := rd.hardDeleteAccountChunked(ctx, accountID, mailboxPurgeBatchSize); err != nil {
+			logger.Warn("Cleanup: failed to hard delete soft-deleted account; will retry next cycle",
+				"component", "CLEANUP", "account_id", accountID, "error", err)
+			continue
+		}
+		done++
+	}
+	if done > 0 {
+		logger.Info("cleaned up soft-deleted accounts that exceeded grace period", "count", done)
+	}
+	return done, nil
+}
+
+func (rd *ResilientDatabase) hardDeleteAccountChunked(ctx context.Context, accountID int64, batchSize int) error {
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var done bool
+		op := func(ctx context.Context, tx pgx.Tx) (any, error) {
+			stepDone, err := rd.getOperationalDatabaseForOperation(ctx, true).HardDeleteAccountStep(ctx, tx, accountID, batchSize)
+			done = stepDone
+			return nil, err
+		}
+		// Each step is bounded, so the normal write timeout is the right budget.
+		if _, err := rd.executeWriteInTxWithRetry(ctx, writeRetryConfig, timeoutWrite, op); err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+		// A step that is not done always expunged rows, so this loop cannot spin.
+	}
 }
 
 // ListSoftDeletedMailboxesWithRetry reads the next batch of tombstoned mailboxes to purge.

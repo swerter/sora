@@ -17,3 +17,9 @@ func (rd *ResilientDatabase) RestoreMessagesChunkedForTest(ctx context.Context, 
 func (rd *ResilientDatabase) PurgeMailboxChunkedForTest(ctx context.Context, mailboxID, accountID int64, batchSize int) error {
 	return rd.purgeMailboxChunked(ctx, mailboxID, accountID, batchSize)
 }
+
+// HardDeleteAccountChunkedForTest exposes the chunked hard delete of one soft-deleted
+// account with a caller-chosen batch size, so a handful of messages spans several steps.
+func (rd *ResilientDatabase) HardDeleteAccountChunkedForTest(ctx context.Context, accountID int64, batchSize int) error {
+	return rd.hardDeleteAccountChunked(ctx, accountID, batchSize)
+}

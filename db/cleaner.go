@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"sort"
@@ -660,6 +661,23 @@ func (d *Database) PruneOldMessageVectors(ctx context.Context, tx pgx.Tx, retent
 // reclaimed by the orphan sweep, which has to scan the whole table to find them. The
 // per-account index makes the direct delete possible.
 func (d *Database) DeleteFTSRowsForAccount(ctx context.Context, tx pgx.Tx, accountID int64, limit int) (int64, error) {
+	// The caller found the account on the read pool, possibly a while ago. The rows are
+	// the only copy of the account's search data (text_body is nulled once vectorised),
+	// so re-check on the primary, holding the account row against `accounts restore`
+	// for the duration of this batch, that the account is really going away. A restored
+	// account, or one the replica misreported, keeps its rows: report zero so the loop ends.
+	var ready bool
+	err := tx.QueryRow(ctx, `SELECT `+accountFinalizableSQL("a")+` FROM accounts a WHERE a.id = $1 FOR SHARE`, accountID).Scan(&ready)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to check account %d before fts row deletion: %w", accountID, err)
+	}
+	if !ready {
+		return 0, nil
+	}
+
 	tag, err := tx.Exec(ctx, `
 		WITH doomed AS (
 			SELECT ctid FROM messages_fts_v2
@@ -856,57 +874,37 @@ func (d *Database) DeleteMessagesFTSByKeyBatch(ctx context.Context, tx pgx.Tx, k
 	return tag.RowsAffected(), nil
 }
 
-// CleanupSoftDeletedAccounts permanently deletes accounts that have been soft-deleted
-// for longer than the grace period
-func (d *Database) CleanupSoftDeletedAccounts(ctx context.Context, tx pgx.Tx, gracePeriod time.Duration) (int64, error) {
+// ListSoftDeletedAccountsForHardDelete returns up to limit accounts soft-deleted at least
+// gracePeriod ago that still hold mailboxes, oldest first: the ones HardDeleteAccountStep
+// has not finished with. An account it has finished with has no mailboxes left but stays
+// soft-deleted until its expunged messages are reaped (another grace period) and it is
+// finalized; selecting it again would take one of the slots, and enough of them would
+// starve every newer account.
+//
+// This is a fast, read-only query. The hard delete of each account is performed by the
+// caller in bounded steps, each in its own transaction — see
+// ResilientDatabase.CleanupSoftDeletedAccountsWithRetry.
+func (d *Database) ListSoftDeletedAccountsForHardDelete(ctx context.Context, gracePeriod time.Duration, limit int) ([]int64, error) {
 	threshold := time.Now().Add(-gracePeriod).UTC()
 
-	// Get accounts that have been soft-deleted longer than the grace period
-	rows, err := tx.Query(ctx, `
-		SELECT id 
-		FROM accounts 
-		WHERE deleted_at IS NOT NULL AND deleted_at < $1
-		ORDER BY deleted_at ASC
-		LIMIT 50
-	`, threshold)
+	rows, err := d.GetReadPoolWithContext(ctx).Query(ctx, `
+		SELECT a.id
+		FROM accounts a
+		WHERE a.deleted_at IS NOT NULL AND a.deleted_at < $1
+		AND EXISTS (SELECT 1 FROM mailboxes WHERE account_id = a.id)
+		ORDER BY a.deleted_at ASC
+		LIMIT $2
+	`, threshold, limit)
 	if err != nil {
-		return 0, fmt.Errorf("failed to query soft-deleted accounts: %w", err)
+		return nil, fmt.Errorf("failed to query soft-deleted accounts: %w", err)
 	}
 	defer rows.Close()
 
-	var accountsToDelete []int64
-	for rows.Next() {
-		var accountID int64
-		if err := rows.Scan(&accountID); err != nil {
-			return 0, fmt.Errorf("failed to scan account ID for cleanup: %w", err)
-		}
-		accountsToDelete = append(accountsToDelete, accountID)
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect soft-deleted account ids: %w", err)
 	}
-
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return 0, fmt.Errorf("error iterating soft-deleted accounts: %w", err)
-	}
-
-	if len(accountsToDelete) == 0 {
-		return 0, nil
-	}
-
-	// Perform the first stage of deletion in a single batch transaction
-	if err := d.HardDeleteAccounts(ctx, tx, accountsToDelete); err != nil {
-		// If the batch fails, we can't be sure which accounts were processed.
-		// Log the error and return. The next run will pick them up.
-		logger.Error("failed to hard delete account batch", "err", err)
-		return 0, err
-	}
-
-	totalDeleted := int64(len(accountsToDelete))
-
-	if totalDeleted > 0 {
-		logger.Info("cleaned up soft-deleted accounts that exceeded grace period", "count", totalDeleted)
-	}
-
-	return totalDeleted, nil
+	return ids, nil
 }
 
 // SoftDeletedMailbox identifies a tombstoned mailbox awaiting background hard-deletion.
@@ -950,37 +948,22 @@ func (d *Database) ListSoftDeletedMailboxes(ctx context.Context, gracePeriod tim
 	return result, rows.Err()
 }
 
-// HardDeleteAccounts performs the first stage of permanent deletion for a batch of accounts.
-// It expunges all their messages and deletes associated data like mailboxes, sieve scripts, etc.
-// It does NOT delete the account or credential rows themselves, as they are needed for S3 cleanup.
+// HardDeleteAccounts performs the first stage of permanent deletion for a batch of accounts
+// in one transaction, without bounds: it expunges all their messages and deletes associated
+// data like mailboxes, sieve scripts, etc. It does NOT delete the account or credential rows
+// themselves, as they are needed for S3 cleanup.
+//
+// The cleaner does not use this: a batch is O(messages) against a fixed write deadline,
+// and it rolls back whole, so one large account would be retried every cycle and never
+// progress. It runs HardDeleteAccountStep instead. This stays for callers that know the
+// accounts are small, and for tests.
 func (d *Database) HardDeleteAccounts(ctx context.Context, tx pgx.Tx, accountIDs []int64) error {
 	if len(accountIDs) == 0 {
 		return nil
 	}
 
-	// Get all mailbox IDs for the accounts being deleted to lock them in a consistent order.
-	var mailboxIDs []int64
-	rows, err := tx.Query(ctx, "SELECT id FROM mailboxes WHERE account_id = ANY($1)", accountIDs)
-	if err != nil {
-		return fmt.Errorf("failed to query mailbox IDs for locking: %w", err)
-	}
-	mailboxIDs, err = pgx.CollectRows(rows, pgx.RowTo[int64])
-	if err != nil {
-		return fmt.Errorf("failed to collect mailbox IDs for locking: %w", err)
-	}
-
-	// Sort the IDs to ensure a consistent lock acquisition order.
-	sort.Slice(mailboxIDs, func(i, j int) bool { return mailboxIDs[i] < mailboxIDs[j] })
-
-	// Lock the mailbox rows (ascending id, deterministic) before expunging their
-	// messages. This serializes against concurrent EXPUNGE/STORE/MOVE on the same
-	// mailboxes (which lock the mailbox row first too — see lockMailboxStats),
-	// keeping unseen_count maintenance race-free, and replaces the previous
-	// pg_advisory lock to avoid the global advisory-keyspace collision.
-	if len(mailboxIDs) > 0 {
-		if _, err := tx.Exec(ctx, "SELECT 1 FROM mailboxes WHERE id = ANY($1) ORDER BY id FOR UPDATE", mailboxIDs); err != nil {
-			return fmt.Errorf("failed to acquire locks for account deletion: %w", err)
-		}
+	if err := lockAccountMailboxes(ctx, tx, accountIDs); err != nil {
+		return err
 	}
 
 	// Mark all messages as expunged BEFORE deleting their mailboxes. Order matters:
@@ -990,7 +973,7 @@ func (d *Database) HardDeleteAccounts(ctx context.Context, tx pgx.Tx, accountIDs
 	// violates mailbox_stats_mailbox_id_fkey and aborts the whole purge transaction.
 	// Expunging first means the SET NULL pass only touches already-expunged rows, which the
 	// trigger ignores. This also signals the next cleanup phase to remove the S3 objects.
-	_, err = tx.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		UPDATE messages
 		SET expunged_at = now(), expunged_modseq = nextval('messages_modseq')
 		WHERE account_id = ANY($1) AND expunged_at IS NULL
@@ -999,7 +982,94 @@ func (d *Database) HardDeleteAccounts(ctx context.Context, tx pgx.Tx, accountIDs
 		return fmt.Errorf("failed to expunge messages for batch deletion: %w", err)
 	}
 
-	// Use = ANY($1) for efficient batch operations
+	return deleteAccountDependents(ctx, tx, accountIDs)
+}
+
+// HardDeleteAccountStep is one bounded step of the hard delete of a soft-deleted account:
+// expunge up to limit of its live messages and, once none is left, delete its mailboxes,
+// sieve scripts, vacation responses and pending uploads and report done. Each step
+// commits on its own, so a large account drains in a bounded number of bounded steps and
+// progress is durable; the account is safe to leave between steps because nothing can
+// log in to or deliver into a soft-deleted account.
+//
+// Every step locks the accounts row and re-checks that it is still soft-deleted, so an
+// `accounts restore` that ran since the caller's (read-pool) listing stops the hard delete
+// before it touches a message; that step reports done with nothing changed. limit <= 0
+// means unlimited.
+func (d *Database) HardDeleteAccountStep(ctx context.Context, tx pgx.Tx, accountID int64, limit int) (bool, error) {
+	var softDeleted bool
+	err := tx.QueryRow(ctx, `SELECT deleted_at IS NOT NULL FROM accounts WHERE id = $1 FOR UPDATE`, accountID).Scan(&softDeleted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to lock account %d for hard deletion: %w", accountID, err)
+	}
+	if !softDeleted {
+		return true, nil
+	}
+
+	if err := lockAccountMailboxes(ctx, tx, []int64{accountID}); err != nil {
+		return false, err
+	}
+
+	// LIMIT NULL is "no limit" in PostgreSQL, so one statement serves both the bounded
+	// and the unlimited caller. Expunge before deleting mailboxes, for the reason given
+	// in HardDeleteAccounts.
+	var limitArg any
+	if limit > 0 {
+		limitArg = limit
+	}
+	expunged, err := tx.Exec(ctx, `
+		UPDATE messages
+		SET expunged_at = now(), expunged_modseq = nextval('messages_modseq')
+		WHERE id IN (
+			SELECT id FROM messages
+			WHERE account_id = $1 AND expunged_at IS NULL
+			LIMIT $2
+		)
+	`, accountID, limitArg)
+	if err != nil {
+		return false, fmt.Errorf("failed to expunge messages of account %d: %w", accountID, err)
+	}
+	if expunged.RowsAffected() > 0 {
+		// More may remain; the caller commits this step and comes back.
+		return false, nil
+	}
+
+	if err := deleteAccountDependents(ctx, tx, []int64{accountID}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// lockAccountMailboxes locks the mailbox rows of the accounts (ascending id, deterministic)
+// before their messages are expunged. This serializes against concurrent EXPUNGE/STORE/MOVE
+// on the same mailboxes (which lock the mailbox row first too — see lockMailboxStats),
+// keeping unseen_count maintenance race-free, and replaces the previous pg_advisory lock
+// to avoid the global advisory-keyspace collision.
+func lockAccountMailboxes(ctx context.Context, tx pgx.Tx, accountIDs []int64) error {
+	rows, err := tx.Query(ctx, "SELECT id FROM mailboxes WHERE account_id = ANY($1)", accountIDs)
+	if err != nil {
+		return fmt.Errorf("failed to query mailbox IDs for locking: %w", err)
+	}
+	mailboxIDs, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return fmt.Errorf("failed to collect mailbox IDs for locking: %w", err)
+	}
+	if len(mailboxIDs) == 0 {
+		return nil
+	}
+	sort.Slice(mailboxIDs, func(i, j int) bool { return mailboxIDs[i] < mailboxIDs[j] })
+	if _, err := tx.Exec(ctx, "SELECT 1 FROM mailboxes WHERE id = ANY($1) ORDER BY id FOR UPDATE", mailboxIDs); err != nil {
+		return fmt.Errorf("failed to acquire locks for account deletion: %w", err)
+	}
+	return nil
+}
+
+// deleteAccountDependents removes what the accounts row must be free of before it can be
+// finalized, mailboxes last. Every message of the accounts must already be expunged.
+func deleteAccountDependents(ctx context.Context, tx pgx.Tx, accountIDs []int64) error {
 	batchOps := []struct {
 		tableName string
 		query     string
@@ -1009,29 +1079,45 @@ func (d *Database) HardDeleteAccounts(ctx context.Context, tx pgx.Tx, accountIDs
 		{"pending_uploads", "DELETE FROM pending_uploads WHERE account_id = ANY($1)"},
 		{"mailboxes", "DELETE FROM mailboxes WHERE account_id = ANY($1)"},
 	}
-
 	for _, op := range batchOps {
 		if _, err := tx.Exec(ctx, op.query, accountIDs); err != nil {
 			return fmt.Errorf("failed to batch delete from %s: %w", op.tableName, err)
 		}
 	}
-
 	return nil
 }
 
+// accountFinalizableSQL is the SQL predicate "this accounts row can be deleted": it is
+// soft-deleted, and nothing that would block the DELETE is left. messages.account_id is
+// ON DELETE RESTRICT and mailboxes.account_id has no ON DELETE action at all, so either
+// kind of row makes the DELETE fail with SQLSTATE 23503 and, since the finalize is one
+// batch, takes every other account in the batch down with it. A never-used account is
+// the usual way to get here: it has no messages, but keeps its mailboxes until
+// HardDeleteAccounts runs.
+//
+// Every query that decides finalization uses this one predicate: the candidate scan on
+// the read pool, the FTS drain and the finalize itself on the primary, so they cannot
+// disagree.
+func accountFinalizableSQL(alias string) string {
+	return alias + `.deleted_at IS NOT NULL
+		AND NOT EXISTS (SELECT 1 FROM messages WHERE account_id = ` + alias + `.id)
+		AND NOT EXISTS (SELECT 1 FROM mailboxes WHERE account_id = ` + alias + `.id)`
+}
+
 // GetDanglingAccountsForFinalDeletion finds accounts that are marked as deleted and have no
-// messages left. Once all messages (and their corresponding S3 objects) are cleaned up,
-// the account's master record is safe to be permanently removed.
+// messages or mailboxes left. Once HardDeleteAccounts has removed the mailboxes and all
+// messages (and their corresponding S3 objects) are cleaned up, the account's master
+// record is safe to be permanently removed.
 func (d *Database) GetDanglingAccountsForFinalDeletion(ctx context.Context, limit int, deletedBefore time.Time) ([]int64, error) {
 	// deletedBefore keeps the grace period: an account with no messages (never used,
 	// or already fully reaped) used to be finalized on the very next tick, so `accounts
 	// restore` could not undo a mistaken delete of an empty account.
+	//
 	rows, err := d.GetReadPool().Query(ctx, `
 		SELECT a.id
 		FROM accounts a
-		WHERE a.deleted_at IS NOT NULL
-		AND a.deleted_at < $2
-		AND NOT EXISTS (SELECT 1 FROM messages WHERE account_id = a.id)
+		WHERE a.deleted_at < $2
+		AND `+accountFinalizableSQL("a")+`
 		LIMIT $1
 	`, limit, deletedBefore)
 	if err != nil {
@@ -1057,10 +1143,15 @@ func (d *Database) FinalizeAccountDeletions(ctx context.Context, tx pgx.Tx, acco
 		return 0, nil
 	}
 
-	// Lock the rows and re-check they are still soft-deleted: `accounts restore` may
-	// have run between the (read-pool) scan and now, and a restored account must not
-	// be finalized. Only the ids that pass go on.
-	rows, err := tx.Query(ctx, "SELECT id FROM accounts WHERE id = ANY($1) AND deleted_at IS NOT NULL FOR UPDATE", accountIDs)
+	// Lock the rows and re-check on the primary that each is still finalizable: `accounts
+	// restore` may have run between the (read-pool) scan and now, and a restored account
+	// must not be finalized; and the scan may have read a lagging replica, in which case
+	// an account that still holds rows would fail the whole batch and be picked again
+	// next cycle. Only the ids that pass go on; the caller reports the rest.
+	rows, err := tx.Query(ctx, `
+		SELECT a.id FROM accounts a
+		WHERE a.id = ANY($1) AND `+accountFinalizableSQL("a")+`
+		FOR UPDATE`, accountIDs)
 	if err != nil {
 		return 0, fmt.Errorf("failed to lock accounts for finalization: %w", err)
 	}

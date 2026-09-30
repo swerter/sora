@@ -556,7 +556,6 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 		return fmt.Errorf("failed to list dangling accounts for final deletion: %w", err)
 	}
 
-	finalizedAccountCount = int64(len(danglingAccounts))
 	if len(danglingAccounts) > 0 {
 		logger.Info("Cleanup: Found dangling accounts for final deletion", "count", len(danglingAccounts))
 
@@ -585,9 +584,17 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 		deletedCount, err := w.rdb.FinalizeAccountDeletionsWithRetry(ctx, danglingAccounts)
 		if err != nil {
 			logger.Error("Cleanup: Failed to finalize deletion of account batch", "error", err)
-		} else if deletedCount > 0 {
-			logger.Info("Cleanup: Finalized deletion of dangling accounts", "count", deletedCount)
+		} else {
 			finalizedAccountCount = deletedCount
+			if deletedCount > 0 {
+				logger.Info("Cleanup: Finalized deletion of dangling accounts", "count", deletedCount)
+			}
+			// The finalize re-checks each candidate on the primary and skips any that
+			// was restored meanwhile or that a lagging replica misreported. A skip is
+			// expected now and then; the same accounts skipped every cycle is not.
+			if skipped := int64(len(danglingAccounts)) - deletedCount; skipped > 0 {
+				logger.Warn("Cleanup: Skipped dangling accounts that were no longer finalizable", "count", skipped)
+			}
 		}
 	}
 

@@ -43,7 +43,8 @@ func TestAccountFinalizeHonoursGraceAndRestore(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, contains(ids), "an account soft-deleted seconds ago must wait out the grace period")
 
-	// Past the grace period: a candidate.
+	// Past the grace period, once HardDeleteAccounts has removed its mailboxes: a candidate.
+	hardDeleteAccount(t, db, accountID)
 	ids, err = db.GetDanglingAccountsForFinalDeletion(ctx, 100000, time.Now().Add(time.Minute))
 	require.NoError(t, err)
 	require.True(t, contains(ids), "an empty account past the grace period is finalized")
