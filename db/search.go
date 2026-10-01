@@ -176,25 +176,13 @@ func (db *Database) buildSearchCriteriaTree(criteria *imap.SearchCriteria, param
 			args[param] = textCriteria
 			bodyCond = fmt.Sprintf("text_body_tsv IS NOT NULL AND text_body_tsv @@ plainto_tsquery('simple', @%s)", param)
 		}
-		likeParam := nextParam()
-		lowerText := strings.ToLower(textCriteria)
-		args[likeParam] = "%" + lowerText + "%"
+		termParam := nextParam()
+		args[termParam] = strings.ToLower(textCriteria)
 
 		// Search across: body FTS, subject column, and recipient sort columns
 		// Note: text_body_tsv is in messages_fts_v2 (complex query only)
-		// Note: *_sort columns are already lowercase, so no need for LOWER()
-		conditions = append(conditions, fmt.Sprintf(
-			"((%s) "+
-				"OR LOWER(%ssubject) LIKE @%s "+
-				"OR %sfrom_email_sort LIKE @%s "+
-				"OR %sfrom_name_sort LIKE @%s "+
-				"OR %sto_email_sort LIKE @%s "+
-				"OR %sto_name_sort LIKE @%s "+
-				"OR %scc_email_sort LIKE @%s)",
-			bodyCond, datePrefix, likeParam,
-			datePrefix, likeParam, datePrefix, likeParam,
-			datePrefix, likeParam, datePrefix, likeParam,
-			datePrefix, likeParam))
+		conditions = append(conditions, fmt.Sprintf("((%s) OR %s)",
+			bodyCond, headerSubstringCond(datePrefix, "@"+termParam)))
 	}
 
 	// State prefix for fields moved to message_state
@@ -247,8 +235,8 @@ func (db *Database) buildSearchCriteriaTree(criteria *imap.SearchCriteria, param
 		switch lowerKey {
 		case "subject":
 			param := nextParam()
-			args[param] = "%" + lowerValue + "%"
-			conditions = append(conditions, fmt.Sprintf("LOWER(%ssubject) LIKE @%s", datePrefix, param))
+			args[param] = lowerValue
+			conditions = append(conditions, substringCond(fmt.Sprintf("LOWER(%ssubject)", datePrefix), "@"+param))
 		case "message-id":
 			param := nextParam()
 			// if the message ID is wrapped in <messageId>, we need to remove the brackets
@@ -266,31 +254,31 @@ func (db *Database) buildSearchCriteriaTree(criteria *imap.SearchCriteria, param
 			// Threading clients search it for a containing Message-ID, so match
 			// as a substring against the dedicated column added in migration 000036.
 			param := nextParam()
-			args[param] = "%" + lowerValue + "%"
-			conditions = append(conditions, fmt.Sprintf(`LOWER(%s"references") LIKE @%s`, datePrefix, param))
+			args[param] = lowerValue
+			conditions = append(conditions, substringCond(fmt.Sprintf(`LOWER(%s"references")`, datePrefix), "@"+param))
 		case "from":
 			param := nextParam()
 			// Support partial matching on both email address and display name
 			// This allows searching for "peter" to find "peter@whatever.com" or "Peter Smith"
 			// Note: *_sort columns are already lowercase
-			args[param] = "%" + lowerValue + "%"
-			conditions = append(conditions, fmt.Sprintf(
-				"(%sfrom_email_sort LIKE @%s OR %sfrom_name_sort LIKE @%s)",
-				datePrefix, param, datePrefix, param))
+			args[param] = lowerValue
+			conditions = append(conditions, fmt.Sprintf("(%s OR %s)",
+				substringCond(datePrefix+"from_email_sort", "@"+param),
+				substringCond(datePrefix+"from_name_sort", "@"+param)))
 		case "to":
 			param := nextParam()
 			// Support partial matching on both email address and display name
 			// Note: *_sort columns are already lowercase
-			args[param] = "%" + lowerValue + "%"
-			conditions = append(conditions, fmt.Sprintf(
-				"(%sto_email_sort LIKE @%s OR %sto_name_sort LIKE @%s)",
-				datePrefix, param, datePrefix, param))
+			args[param] = lowerValue
+			conditions = append(conditions, fmt.Sprintf("(%s OR %s)",
+				substringCond(datePrefix+"to_email_sort", "@"+param),
+				substringCond(datePrefix+"to_name_sort", "@"+param)))
 		case "cc":
 			param := nextParam()
 			// Support partial email matching using indexed cc_email_sort column
 			// Note: CC doesn't have a name_sort column, only email
-			args[param] = "%" + lowerValue + "%"
-			conditions = append(conditions, fmt.Sprintf("%scc_email_sort LIKE @%s", datePrefix, param))
+			args[param] = lowerValue
+			conditions = append(conditions, substringCond(datePrefix+"cc_email_sort", "@"+param))
 		case "bcc", "reply-to":
 			// BCC and Reply-To don't have dedicated sort columns, fall back to JSONB search
 			recipientJSONParam := nextParam()
@@ -527,7 +515,7 @@ func (db *Database) needsComplexQuery(criteria *imap.SearchCriteria, orderByClau
 }
 
 // needsIndexScanBiasBuster checks if the target query contains unstructured text filters
-// (such as LIKE '%...%' or FTS) that benefit from Postgres's bitmap heap scanning over
+// (header substring tests or FTS) that benefit from Postgres's bitmap heap scanning over
 // falling back to a naive backward streaming index scan.
 func (db *Database) needsIndexScanBiasBuster(criteria *imap.SearchCriteria) bool {
 	if criteria == nil {
@@ -586,12 +574,13 @@ func criteriaContainsFTS(c *imap.SearchCriteria) bool {
 // canUseTextUnion reports whether a search is eligible for the TEXT UNION rewrite.
 //
 // IMAP TEXT search expands to an OR that mixes messages_fts_v2.text_body_tsv (reachable
-// only through the content_hash join) with LIKE filters on messages.* columns. A
+// only through the content_hash join) with substring filters on messages.* columns. A
 // single OR spanning two tables cannot be driven by any one index, so on a large
 // mailbox the planner degrades to a full mailbox scan with a per-row probe into
 // the FTS table (measured at 24s vs 13.6s for the UNION form). The rewrite splits the
-// term into an indexable header branch (trigram indexes on messages) UNION an
-// indexable body branch (FTS GIN on messages_fts_v2).
+// term into a header branch, a filtered scan of the mailbox's own rows (see
+// substringCond for why it is deliberately not index-driven), UNION an indexable body
+// branch (FTS GIN on messages_fts_v2) that can be prefiltered per account.
 //
 // Eligibility is intentionally conservative — exactly one top-level TEXT term, no
 // BODY term, and no FTS nested in OR/NOT — so the decomposition is a simple two-branch
@@ -615,10 +604,10 @@ func (db *Database) canUseTextUnion(criteria *imap.SearchCriteria, needsSeqNumSe
 }
 
 // buildTextSearchBranches binds the arguments for a single IMAP TEXT term, split for the
-// UNION rewrite. It returns the header predicate, which matches the indexed messages.* sort
-// columns, and the name of the tsquery parameter, from which buildTextUnionQuery builds the
-// body branch in whichever shape the mailbox size calls for. Together the two branches are
-// semantically identical to the combined OR produced for criteria.Text.
+// UNION rewrite. It returns the header predicate, which matches the messages.* subject and
+// sort columns, and the name of the tsquery parameter, from which buildTextUnionQuery builds
+// the body branch in whichever shape the mailbox size calls for. Together the two branches
+// are semantically identical to the combined OR produced for criteria.Text.
 func buildTextSearchBranches(text string, args pgx.NamedArgs, paramPrefix string, paramCounter *int) (headerCond, tsParam string) {
 	next := func() string {
 		*paramCounter++
@@ -626,18 +615,50 @@ func buildTextSearchBranches(text string, args pgx.NamedArgs, paramPrefix string
 	}
 	tsParam = next()
 	args[tsParam] = text
-	likeParam := next()
-	args[likeParam] = "%" + strings.ToLower(text) + "%"
+	termParam := next()
+	args[termParam] = strings.ToLower(text)
 
-	headerCond = fmt.Sprintf(
-		"(LOWER(m.subject) LIKE @%[1]s "+
-			"OR m.from_email_sort LIKE @%[1]s "+
-			"OR m.from_name_sort LIKE @%[1]s "+
-			"OR m.to_email_sort LIKE @%[1]s "+
-			"OR m.to_name_sort LIKE @%[1]s "+
-			"OR m.cc_email_sort LIKE @%[1]s)",
-		likeParam)
-	return headerCond, tsParam
+	return headerSubstringCond("m.", "@"+termParam), tsParam
+}
+
+// substringCond returns a predicate that is true when expr contains the string bound to
+// placeholder as a literal substring, which is what IMAP SEARCH header matching is
+// (RFC 3501 §6.4.4). It is deliberately written as strpos() and not as LIKE '%term%':
+//
+//   - LIKE on these columns is served by the corpus-wide trigram GINs from migration 000034,
+//     and the planner's GIN cost model is off by three orders of magnitude for them. A
+//     production SEARCH FROM on a 777-message mailbox was planned as BitmapAnd(mailbox
+//     index, BitmapOr(from_email_sort_trgm, from_name_sort_trgm)) at an estimated cost of
+//     1106, and read 452,581 index pages (3.5 GB) in 70 s to find the 10k candidates across
+//     every mailbox in the cluster, 420 of which were in the mailbox. The same query with
+//     strpos filtered the mailbox's own rows in 744 pages and 0.26 s, cold. The trigram
+//     cost is corpus-wide matches times trigrams in the pattern (an address decomposes
+//     into ~20) and does not depend on the mailbox at all, so it can never be bounded by
+//     the owner's data. strpos is not indexable, which forces the planner onto a mailbox
+//     index and bounds the scan by the mailbox, the same principle FTS v2 applies to
+//     bodies (see ftsCTEThreshold).
+//   - LIKE treats % and _ in the user's term as wildcards and the terms were never
+//     escaped, so SEARCH FROM "100%" matched every message. strpos compares literally.
+//
+// expr must already be lowercased (the *_sort columns are stored lowercased; wrap anything
+// else in LOWER()) and the caller binds the lowercased term. A NULL expr yields NULL, which
+// WHERE treats as false, exactly as LIKE did.
+func substringCond(expr, placeholder string) string {
+	return fmt.Sprintf("strpos(%s, %s) > 0", expr, placeholder)
+}
+
+// headerSubstringCond is the TEXT header predicate: the bound term as a substring of any
+// searchable header column (subject plus the from/to/cc sort columns). prefix is the
+// messages table alias with its trailing dot, or "" when the columns are unqualified.
+func headerSubstringCond(prefix, placeholder string) string {
+	return "(" + strings.Join([]string{
+		substringCond(fmt.Sprintf("LOWER(%ssubject)", prefix), placeholder),
+		substringCond(prefix+"from_email_sort", placeholder),
+		substringCond(prefix+"from_name_sort", placeholder),
+		substringCond(prefix+"to_email_sort", placeholder),
+		substringCond(prefix+"to_name_sort", placeholder),
+		substringCond(prefix+"cc_email_sort", placeholder),
+	}, " OR ") + ")"
 }
 
 // Sort columns carried through the UNION CTE (in addition to each branch's data
@@ -915,7 +936,7 @@ func (db *Database) buildFTSPrefilterQuery(criteria *imap.SearchCriteria, mailbo
 // The account scope MUST sit in the JOIN ON clause and never in the WHERE clause. These
 // queries LEFT JOIN the FTS table, and several do so unconditionally: THREAD joins it for
 // every search including THREAD ALL, and the User API mailbox search ORs the FTS predicate
-// with header LIKE predicates. A WHERE-side "mc.account_id = @accountID" is NULL for a
+// with header substring predicates. A WHERE-side "mc.account_id = @accountID" is NULL for a
 // message that has no FTS row at all, which silently degrades the LEFT JOIN to an inner
 // join and drops that message from the result.
 //
@@ -1136,10 +1157,10 @@ func (db *Database) getMessagesQueryExecutor(ctx context.Context, mailboxID, acc
 		metricsLabel = "search_messages_simple"
 
 	} else if db.canUseTextUnion(criteria, needsSeqNumSearch, orderByClause) {
-		// TEXT UNION path: split the single mixed-table TEXT OR into an indexable
-		// header branch (trigram indexes on messages) UNION an indexable body branch
-		// (FTS GIN on messages_fts_v2), avoiding the full-mailbox-scan + per-row probe the
-		// combined OR forces on large mailboxes. See canUseTextUnion.
+		// TEXT UNION path: split the single mixed-table TEXT OR into a mailbox-scoped
+		// header branch UNION an indexable body branch (FTS GIN on messages_fts_v2),
+		// avoiding the full-mailbox-scan + per-row probe the combined OR forces on large
+		// mailboxes. See canUseTextUnion.
 		prefilterBody := mailboxMessageCount >= ftsCTEThreshold
 		finalQueryString, whereArgs, err = db.buildTextUnionQuery(criteria, mailboxID, accountID, ftsFullBranchSelect, textUnionSortColumnsFull, ftsFullOuterSelect, orderByClause, resultLimit, prefilterBody, &paramCounter)
 		if err != nil {

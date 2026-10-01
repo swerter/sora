@@ -265,7 +265,7 @@ func (db *Database) SearchMessagesInMailbox(ctx context.Context, accountID int64
 		FROM messages m
 		JOIN mailboxes mb ON m.mailbox_id = mb.id
 		-- Account-scoped in the JOIN ON clause, never in WHERE: this is a LEFT JOIN whose
-		-- FTS predicate sits inside an OR with header LIKE predicates, so a WHERE-side
+		-- FTS predicate sits inside an OR with header substring predicates, so a WHERE-side
 		-- account qual would drop every message that has no FTS row (bodies over 64KB are
 		-- never staged, empty bodies are skipped, retention prunes old rows) even when its
 		-- subject or sender matched.
@@ -273,13 +273,15 @@ func (db *Database) SearchMessagesInMailbox(ctx context.Context, accountID int64
 		       ON mf.content_hash = m.content_hash AND mf.account_id = $4
 		LEFT JOIN message_state ms ON ms.message_id = m.id AND ms.mailbox_id = m.mailbox_id
 		WHERE m.mailbox_id = $1 AND m.expunged_at IS NULL
+		-- Header matching is strpos(), not LIKE: see substringCond in search.go. The
+		-- corpus-wide trigram indexes make LIKE on these columns a cluster-wide scan.
 		AND (
-			LOWER(m.subject) LIKE LOWER($2)
-			OR m.from_email_sort LIKE LOWER($2)
-			OR m.from_name_sort LIKE LOWER($2)
-			OR m.to_email_sort LIKE LOWER($2)
-			OR m.to_name_sort LIKE LOWER($2)
-			OR m.cc_email_sort LIKE LOWER($2)
+			strpos(LOWER(m.subject), $2) > 0
+			OR strpos(m.from_email_sort, $2) > 0
+			OR strpos(m.from_name_sort, $2) > 0
+			OR strpos(m.to_email_sort, $2) > 0
+			OR strpos(m.to_name_sort, $2) > 0
+			OR strpos(m.cc_email_sort, $2) > 0
 			-- 'simple' matches how the vector was built (db/fts.go). Without it this used
 			-- default_text_search_config, so on a stemming configuration a search for
 			-- "running" looked up the lexeme "run" and never matched.
@@ -290,8 +292,7 @@ func (db *Database) SearchMessagesInMailbox(ctx context.Context, accountID int64
 		LIMIT 100
 	`
 
-	searchPattern := "%" + query + "%"
-	rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, searchQuery, mailbox.ID, searchPattern, query, mailbox.AccountID)
+	rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, searchQuery, mailbox.ID, strings.ToLower(query), query, mailbox.AccountID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search messages: %w", err)
 	}

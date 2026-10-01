@@ -108,7 +108,7 @@ func TestBuildSearchHeaderConditions(t *testing.T) {
 		{
 			name:        "References maps to the references column",
 			header:      imap.SearchCriteriaHeaderField{Key: "References", Value: "<parent@example.com>"},
-			wantContain: `LOWER(m."references") LIKE`,
+			wantContain: `strpos(LOWER(m."references"), @`,
 		},
 		{
 			name:        "non-indexed header matches nothing",
@@ -226,10 +226,12 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 		// A small mailbox probes per message; materialising the account's whole match set
 		// to serve it is the 150x regression measured in tasks/fts-per-account-composite-gin.md 5.5.
 		assert.NotContains(t, query, "fts_hits")
-		// Header branch: trigram-indexable LIKE columns.
-		assert.Contains(t, query, "LOWER(m.subject) LIKE")
-		assert.Contains(t, query, "m.from_email_sort LIKE")
-		assert.Contains(t, query, "m.cc_email_sort LIKE")
+		// Header branch: literal substring tests on the mailbox's own rows. Never LIKE,
+		// which the planner would route through the corpus-wide trigram GINs (substringCond).
+		assert.Contains(t, query, "strpos(LOWER(m.subject), @")
+		assert.Contains(t, query, "strpos(m.from_email_sort, @")
+		assert.Contains(t, query, "strpos(m.cc_email_sort, @")
+		assert.NotContains(t, query, " LIKE ")
 		// Outer query orders the deduped CTE (bias-busted) and limits.
 		assert.Contains(t, query, "FROM matched f")
 		assert.Contains(t, query, "ORDER BY f.uid + 0 DESC")
@@ -237,20 +239,20 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 		// Sort columns carried in the CTE for ORDER BY.
 		assert.Contains(t, query, "m.subject_sort")
 
-		// Args: mailbox, tsquery term (original case), and lowercased LIKE pattern.
+		// Args: mailbox, tsquery term (original case), and the lowercased literal term.
 		assert.Equal(t, int64(42), args["mailboxID"])
 		assert.Equal(t, int64(7), args["accountID"], "the FTS join is account-scoped and needs the owner bound")
-		var sawTerm, sawLike bool
+		var sawTerm, sawSubstring bool
 		for _, v := range args {
 			if v == "Invoice" {
 				sawTerm = true
 			}
-			if v == "%invoice%" {
-				sawLike = true
+			if v == "invoice" {
+				sawSubstring = true
 			}
 		}
 		assert.True(t, sawTerm, "tsquery arg should preserve original term case")
-		assert.True(t, sawLike, "LIKE arg should be lowercased and wildcard-wrapped")
+		assert.True(t, sawSubstring, "substring arg should be lowercased and bound literally, not wildcard-wrapped")
 	})
 
 	t.Run("non-Text filter is replicated into both branches", func(t *testing.T) {
@@ -290,7 +292,7 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 		assert.Contains(t, query, "JOIN fts_hits ON fts_hits.content_hash = m.content_hash")
 		assert.NotContains(t, query, "messages_fts_v2 mc", "the body branch must not also probe per message")
 		// The header branch is unchanged.
-		assert.Contains(t, query, "LOWER(m.subject) LIKE")
+		assert.Contains(t, query, "strpos(LOWER(m.subject), @")
 		assert.Contains(t, query, "UNION")
 		assert.Equal(t, int64(7), args["accountID"])
 	})
