@@ -44,6 +44,9 @@ type AdminConfig struct {
 	HTTPAPIKey                string                       `toml:"http_api_key"`                  // HTTP API key for authentication
 	HTTPAPIInsecureSkipVerify bool                         `toml:"http_api_insecure_skip_verify"` // Skip TLS cert verification. Default: auto (loopback addr -> skip; remote -> verify).
 	Relay                     config.RelayConfig           `toml:"relay"`
+	// Sieve is read so scripts stored by the admin tools (sieve put, import-maildir
+	// --sieve-path) are validated against the same extension set delivery compiles with.
+	Sieve config.SieveConfig `toml:"sieve"`
 	// Cluster is decoded for display commands (config show masks its secret_key). It
 	// plays no part in instance identity: the upload lease key comes from
 	// uploader.instance_id, deliberately decoupled from the gossip node name.

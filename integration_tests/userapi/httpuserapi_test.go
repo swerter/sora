@@ -31,6 +31,16 @@ type TestContext struct {
 	TestUser   common.TestAccount
 }
 
+// accountID resolves the test user's account id.
+func (tc *TestContext) accountID(t *testing.T) int64 {
+	t.Helper()
+	id, err := tc.RDB.GetAccountIDByAddressWithRetry(context.Background(), tc.TestUser.Email)
+	if err != nil {
+		t.Fatalf("lookup test account: %v", err)
+	}
+	return id
+}
+
 // setupTestServer creates a test HTTP server with all dependencies
 func setupTestServer(t *testing.T) *TestContext {
 	t.Helper()
@@ -848,6 +858,47 @@ if header :contains "Subject" "[SPAM]" {
 			t.Fatalf("Expected status 200, got %d: %s", resp.StatusCode, string(body))
 		}
 		t.Logf("Successfully activated filter")
+	})
+
+	t.Run("CreateInvalidFilter", func(t *testing.T) {
+		// ManageSieve PUTSCRIPT refuses a script delivery cannot compile; so
+		// must this, or every rule in it is silently lost at delivery.
+		resp := tc.makeRequest(t, "PUT", "/user/filters/broken", map[string]string{
+			"script": "require [\"enclose\"];\nkeep;\n",
+		})
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("Expected status 400 for a script that does not compile, got %d: %s", resp.StatusCode, string(body))
+		}
+		if !strings.Contains(string(body), "validation failed") {
+			t.Fatalf("error does not say why: %s", string(body))
+		}
+		if _, err := tc.RDB.GetScriptByNameWithRetry(context.Background(), "broken", tc.accountID(t)); err == nil {
+			t.Fatal("the rejected script was stored")
+		}
+	})
+
+	t.Run("ActivateFilterThatNoLongerCompiles", func(t *testing.T) {
+		// A stored script can predate a change to the enabled extensions.
+		ctx := context.Background()
+		accountID := tc.accountID(t)
+		if _, err := tc.RDB.CreateScriptWithRetry(ctx, accountID, "stale", "require [\"enclose\"];\nkeep;\n"); err != nil {
+			t.Fatalf("plant stale script: %v", err)
+		}
+		resp := tc.makeRequest(t, "POST", "/user/filters/stale/activate", nil)
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("Expected status 400 activating a script that does not compile, got %d: %s", resp.StatusCode, string(body))
+		}
+		stale, err := tc.RDB.GetScriptByNameWithRetry(ctx, "stale", accountID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stale.Active {
+			t.Fatal("a script that does not compile was activated")
+		}
 	})
 
 	t.Run("GetCapabilities", func(t *testing.T) {

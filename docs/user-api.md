@@ -709,6 +709,12 @@ Create a new filter or update an existing one.
 }
 ```
 
+**Errors:**
+- `400 Bad Request` - Invalid script name, or the script does not compile against the
+  extensions reported by `GET /user/filters/capabilities` (the error says why). A script
+  that does not compile is never stored: delivery would skip it whole.
+- `413 Request Entity Too Large` - Script exceeds `max_script_size`
+
 **Example:**
 ```bash
 curl -X PUT http://localhost:8081/user/filters/spam-filter \
@@ -786,6 +792,11 @@ Set a filter script as the active script. Only one script can be active at a tim
   "message": "Filter activated successfully"
 }
 ```
+
+**Errors:**
+- `400 Bad Request` - The stored script no longer compiles against the current
+  extensions (it may predate a configuration change); it is left inactive
+- `404 Not Found` - No script of that name
 
 **Example:**
 ```bash

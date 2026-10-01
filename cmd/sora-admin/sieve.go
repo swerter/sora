@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/migadu/sora/consts"
+	"github.com/migadu/sora/server/sieveengine"
 )
 
 // handleSieveCommand handles the 'sieve' command
@@ -252,6 +253,13 @@ Examples:
 	accountID, err := rdb.GetAccountIDByEmailWithRetry(ctx, *email)
 	if err != nil {
 		fmt.Printf("Failed to find account: %v\n", err)
+		os.Exit(1)
+	}
+
+	// A script delivery cannot compile is skipped whole, so refuse it here as
+	// ManageSieve would.
+	if err := sieveengine.ValidateScript(string(scriptContent), globalConfig.Sieve.EnabledExtensions); err != nil {
+		fmt.Printf("Script validation failed: %v\n", err)
 		os.Exit(1)
 	}
 

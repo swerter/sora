@@ -160,6 +160,12 @@ func (s *Server) handlePutFilter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refuse what delivery could not run, as ManageSieve PUTSCRIPT does.
+	if err := sieveengine.ValidateScript(req.Script, s.sieveExtensions); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Script validation failed: "+err.Error())
+		return
+	}
+
 	// Create or update script
 	script, err := s.rdb.CreateOrUpdateScriptWithRetry(ctx, accountID, name, req.Script)
 	if err != nil {
@@ -238,6 +244,24 @@ func (s *Server) handleActivateFilter(w http.ResponseWriter, r *http.Request) {
 
 	if name == "" {
 		s.writeError(w, http.StatusBadRequest, "Script name is required")
+		return
+	}
+
+	// A stored script may predate a change to the enabled extensions; activating
+	// one delivery cannot run would silently lose every rule in it (ManageSieve
+	// SETACTIVE checks too).
+	script, err := s.rdb.GetScriptByNameWithRetry(ctx, name, accountID)
+	if err != nil {
+		if errors.Is(err, consts.ErrDBNotFound) {
+			s.writeError(w, http.StatusNotFound, "Script not found")
+			return
+		}
+		logger.Warn("HTTP Mail API: Error retrieving Sieve script", "name", s.name, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to activate script")
+		return
+	}
+	if err := sieveengine.ValidateScript(script.Script, s.sieveExtensions); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Script validation failed: "+err.Error())
 		return
 	}
 

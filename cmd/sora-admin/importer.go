@@ -30,6 +30,7 @@ import (
 	"github.com/migadu/sora/helpers"
 	"github.com/migadu/sora/pkg/resilient"
 	"github.com/migadu/sora/server"
+	"github.com/migadu/sora/server/sieveengine"
 	_ "modernc.org/sqlite"
 )
 
@@ -46,6 +47,7 @@ type ImporterOptions struct {
 	Dovecot              bool
 	ImportDelay          time.Duration // Delay between imports to control rate
 	SievePath            string        // Path to Sieve script file to import
+	SieveExtensions      []string      // [sieve] enabled_extensions the script is validated against (empty = default set)
 	PreserveUIDs         bool          // Preserve UIDs from dovecot-uidlist files
 	TestMode             bool          // Skip S3 uploads for testing (messages stored in DB only)
 	BatchSize            int           // Number of messages to process in each batch (default: 20)
@@ -645,6 +647,11 @@ func (i *Importer) importSieveScript() error {
 		return fmt.Errorf("failed to read Sieve script file: %w", err)
 	}
 
+	// A script delivery cannot compile is skipped whole, so it must not become
+	// the active script. It is still stored, so the user can see and fix it
+	// through ManageSieve, and the mail import goes on.
+	compileErr := sieveengine.ValidateScript(string(scriptContent), i.options.SieveExtensions)
+
 	// Get user context for database operations
 	address, err := server.NewAddress(i.email)
 	if err != nil {
@@ -689,6 +696,16 @@ func (i *Importer) importSieveScript() error {
 		logger.Info("Created new Sieve script", "name", scriptName)
 	default:
 		return fmt.Errorf("failed to check for existing script by name: %w", err)
+	}
+
+	if compileErr != nil {
+		// The name may be the previously active script's: deactivate so the
+		// broken content never runs.
+		if err := i.rdb.SetScriptActiveWithRetry(i.ctx, script.ID, user.AccountID(), false); err != nil {
+			return fmt.Errorf("failed to deactivate Sieve script: %w", err)
+		}
+		logger.Warn("Sieve script does not compile; imported but left inactive", "name", scriptName, "user", i.email, "error", compileErr)
+		return nil
 	}
 
 	// Activate the script
