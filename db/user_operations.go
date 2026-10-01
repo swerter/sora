@@ -256,6 +256,15 @@ func (db *Database) SearchMessagesInMailbox(ctx context.Context, accountID int64
 		return nil, consts.ErrMailboxNotFound
 	}
 
+	// Header matching form is chosen by mailbox size, as for IMAP SEARCH (see headerMatch):
+	// the trigram GINs make a LIKE on a small mailbox a cluster-wide scan, and a strpos scan
+	// of a very large mailbox reads more heap than the trigram probe does.
+	messageCount, _, err := db.GetMailboxMessageCountAndSizeSum(ctx, mailbox.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read mailbox size for search: %w", err)
+	}
+	hm := headerMatchFor(messageCount)
+
 	searchQuery := `
 		SELECT
 			m.id, m.uid, m.mailbox_id, COALESCE(m.subject, ''), m.sent_date, m.internal_date,
@@ -273,15 +282,8 @@ func (db *Database) SearchMessagesInMailbox(ctx context.Context, accountID int64
 		       ON mf.content_hash = m.content_hash AND mf.account_id = $4
 		LEFT JOIN message_state ms ON ms.message_id = m.id AND ms.mailbox_id = m.mailbox_id
 		WHERE m.mailbox_id = $1 AND m.expunged_at IS NULL
-		-- Header matching is strpos(), not LIKE: see substringCond in search.go. The
-		-- corpus-wide trigram indexes make LIKE on these columns a cluster-wide scan.
 		AND (
-			strpos(LOWER(m.subject), $2) > 0
-			OR strpos(m.from_email_sort, $2) > 0
-			OR strpos(m.from_name_sort, $2) > 0
-			OR strpos(m.to_email_sort, $2) > 0
-			OR strpos(m.to_name_sort, $2) > 0
-			OR strpos(m.cc_email_sort, $2) > 0
+			__HEADER_COND__
 			-- 'simple' matches how the vector was built (db/fts.go). Without it this used
 			-- default_text_search_config, so on a stemming configuration a search for
 			-- "running" looked up the lexeme "run" and never matched.
@@ -292,7 +294,8 @@ func (db *Database) SearchMessagesInMailbox(ctx context.Context, accountID int64
 		LIMIT 100
 	`
 
-	rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, searchQuery, mailbox.ID, strings.ToLower(query), query, mailbox.AccountID)
+	searchQuery = strings.Replace(searchQuery, "__HEADER_COND__", hm.headerCond("m.", "$2"), 1)
+	rows, err := db.GetReadPoolWithContext(ctx).Query(ctx, searchQuery, mailbox.ID, hm.bind(query), query, mailbox.AccountID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search messages: %w", err)
 	}

@@ -212,7 +212,7 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 		const branchSelect = "m.id, m.uid, m.mailbox_id, m.content_hash, m.created_modseq, ms.updated_modseq, m.expunged_modseq"
 		const outerSelect = "f.id, f.uid, f.mailbox_id, f.content_hash, f.created_modseq, f.updated_modseq, f.expunged_modseq, 0 as seqnum"
 
-		query, args, err := db.buildTextUnionQuery(criteria, 42, 7, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, false, &paramCounter)
+		query, args, err := db.buildTextUnionQuery(criteria, 42, 7, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, false, headerMatchScan, &paramCounter)
 		require.NoError(t, err)
 
 		// Two indexable branches, UNIONed.
@@ -265,7 +265,7 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 
 		for _, prefilterBody := range []bool{false, true} {
 			paramCounter := 0
-			query, _, err := db.buildTextUnionQuery(criteria, 7, 9, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, prefilterBody, &paramCounter)
+			query, _, err := db.buildTextUnionQuery(criteria, 7, 9, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, prefilterBody, headerMatchScan, &paramCounter)
 			require.NoError(t, err)
 
 			// The \Seen base condition (ms.flags & 1) must appear once per UNION branch.
@@ -282,7 +282,7 @@ func TestBuildTextUnionQuerySQL(t *testing.T) {
 		const branchSelect = "m.id, m.uid, m.mailbox_id, m.content_hash, m.created_modseq, ms.updated_modseq, m.expunged_modseq"
 		const outerSelect = "f.id, f.uid, f.mailbox_id, f.content_hash, f.created_modseq, f.updated_modseq, f.expunged_modseq, 0 as seqnum"
 
-		query, args, err := db.buildTextUnionQuery(criteria, 42, 7, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, true, &paramCounter)
+		query, args, err := db.buildTextUnionQuery(criteria, 42, 7, branchSelect, textUnionSortColumnsLight, outerSelect, "", MaxSearchResults, true, headerMatchScan, &paramCounter)
 		require.NoError(t, err)
 
 		// MATERIALIZED is load-bearing: inlined, the planner reverts to the per-message probe.
