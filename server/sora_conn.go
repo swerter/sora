@@ -170,12 +170,14 @@ type SoraConn struct {
 	lastActivity        time.Time
 	sessionStart        time.Time
 	lastThroughputCheck time.Time
-	bytesTransferred    int64
-	// Slowloris protection: rolling window tracking
-	throughputHistory           [3]int64 // Last 3 minutes of throughput measurements
-	throughputHistoryIndex      int      // Current position in ring buffer
-	consecutiveSlowMinutes      int      // Counter for consecutive slow periods
-	throughputCheckingSuspended bool     // True when in IDLE mode (IMAP)
+	// Slowloris protection: bytes moved in the current measurement window, per
+	// direction. The direction matters: a window with client bytes in and no
+	// server bytes out is a command that never completed (the slowloris
+	// signature); a window with any server output is a command that did.
+	bytesRead                   int64
+	bytesWritten                int64
+	consecutiveStalledWindows   int  // Consecutive windows with input but no completed command
+	throughputCheckingSuspended bool // True when in IDLE mode (IMAP)
 
 	// JA4 TLS fingerprinting
 	ja4Fingerprint string
@@ -239,7 +241,6 @@ func NewSoraConn(conn net.Conn, config SoraConnConfig) *SoraConn {
 		lastActivity:        now,
 		sessionStart:        now,
 		lastThroughputCheck: now,
-		bytesTransferred:    0,
 		ja4Fingerprint:      config.InitialJA4,
 		proxyInfo:           config.InitialProxyInfo,
 		protocol:            config.Protocol,
@@ -280,7 +281,8 @@ func (c *SoraConn) checkTimeouts(now time.Time) {
 	idleTime := now.Sub(c.lastActivity)
 	sessionDuration := now.Sub(c.sessionStart)
 	throughputDuration := now.Sub(c.lastThroughputCheck)
-	bytesTransferred := c.bytesTransferred
+	bytesRead := c.bytesRead
+	bytesWritten := c.bytesWritten
 	username := c.username
 	suspended := c.throughputCheckingSuspended
 	c.mu.RUnlock()
@@ -300,58 +302,43 @@ func (c *SoraConn) checkTimeouts(now time.Time) {
 		return
 	}
 
-	// Check minimum throughput (protects against slowloris attacks)
-	// IMPROVED: Uses 3-minute rolling average and requires 2 consecutive slow periods
-	// Skip if throughput checking is suspended (e.g., during IMAP IDLE)
+	// Slowloris protection. A slowloris holds a connection by feeding the
+	// command parser bytes that never complete a command, so the signature is
+	// a whole window of client input with no server output. Raw bytes per
+	// minute alone are NOT the signal: a client that completes a tiny command
+	// every few seconds (Alpine's NOOP poll, any client without IDLE) moves
+	// well under 512 bytes/min and is healthy, and a silent client is the idle
+	// timer's business. Measuring volume alone cut every Alpine session four
+	// minutes in as "too slow" (2026-10-01).
+	//
+	// Rules per window, once the two-minute post-handshake grace is over:
+	//   - any server output: a command completed, stall count resets;
+	//   - client input under the threshold and no output: a stalled window;
+	//   - no bytes either way: left to the idle timeout, count unchanged.
+	// Two consecutive stalled windows disconnect.
+	// Skipped while suspended (IMAP IDLE), where client silence is expected.
 	if c.minBytesPerMinute > 0 && throughputDuration >= time.Minute {
 		if suspended {
 			// Throughput checking is suspended - skip check
 			return
 		}
-		sessionDurationSinceStart := now.Sub(c.sessionStart)
 
-		// Only enforce throughput after the first 2 minutes of the session
-		// to allow time for TLS handshake, greeting, and initial authentication
-		if sessionDurationSinceStart >= 2*time.Minute {
-			minutesElapsed := throughputDuration.Minutes()
-			bytesPerMinute := int64(float64(bytesTransferred) / minutesElapsed)
+		if sessionDuration >= 2*time.Minute {
+			bytesPerMinute := int64(float64(bytesRead+bytesWritten) / throughputDuration.Minutes())
 
-			// Add current measurement to rolling history
 			c.mu.Lock()
-			c.throughputHistory[c.throughputHistoryIndex] = bytesPerMinute
-			c.throughputHistoryIndex = (c.throughputHistoryIndex + 1) % 3
-
-			// Calculate average over last 3 measurements (or fewer if we don't have 3 yet)
-			var sum int64
-			var count int
-			for i := 0; i < 3; i++ {
-				if c.throughputHistory[i] > 0 {
-					sum += c.throughputHistory[i]
-					count++
-				}
+			switch {
+			case bytesWritten > 0:
+				c.consecutiveStalledWindows = 0
+			case bytesRead > 0 && bytesPerMinute < c.minBytesPerMinute:
+				c.consecutiveStalledWindows++
 			}
-			avgBytesPerMin := int64(0)
-			if count > 0 {
-				avgBytesPerMin = sum / int64(count)
-			}
-
-			// Check if current measurement is slow
-			if bytesPerMinute < c.minBytesPerMinute {
-				c.consecutiveSlowMinutes++
-			} else {
-				c.consecutiveSlowMinutes = 0
-			}
-
-			consecutiveSlow := c.consecutiveSlowMinutes
+			stalled := c.consecutiveStalledWindows
 			c.mu.Unlock()
 
-			// Disconnect only if:
-			// 1. Average over 3 minutes is below threshold, AND
-			// 2. We've had 2 consecutive slow minutes
-			// This reduces false positives for legitimate users
-			if avgBytesPerMin < c.minBytesPerMinute && consecutiveSlow >= 2 {
+			if stalled >= 2 {
 				remoteAddr := c.remoteAddr
-				logger.Info("Connection closed - timeout", "proto", c.protocol, "remote", remoteAddr, "user", username, "reason", "slow_throughput", "bytes_per_min_avg", int(avgBytesPerMin), "bytes_per_min_current", int(bytesPerMinute), "required", c.minBytesPerMinute, "consecutive_slow", consecutiveSlow)
+				logger.Info("Connection closed - timeout", "proto", c.protocol, "remote", remoteAddr, "user", username, "reason", "slow_throughput", "bytes_read", bytesRead, "bytes_written", bytesWritten, "bytes_per_min", bytesPerMinute, "required", c.minBytesPerMinute, "stalled_windows", stalled)
 				metrics.ConnectionTimeoutsTotal.WithLabelValues(c.protocol, c.serverName, c.hostname, "slow_throughput").Inc()
 
 				// Call timeout handler before closing (if provided)
@@ -364,11 +351,7 @@ func (c *SoraConn) checkTimeouts(now time.Time) {
 			}
 		}
 
-		// Reset throughput counters for next measurement period
-		c.mu.Lock()
-		c.lastThroughputCheck = now
-		c.bytesTransferred = 0
-		c.mu.Unlock()
+		c.openNextThroughputWindow(now, bytesRead, bytesWritten)
 	}
 
 	// Check idle timeout
@@ -384,6 +367,24 @@ func (c *SoraConn) checkTimeouts(now time.Time) {
 
 		c.Close()
 		return
+	}
+}
+
+// openNextThroughputWindow starts a new measurement window at now. It
+// subtracts what the check observed (seenRead/seenWritten) rather than
+// zeroing, so bytes that landed between the snapshot and this call are not
+// lost. A Suspend/Resume that zeroed the counters in that gap would drive
+// them negative; clamp so the next window starts from zero instead of having
+// to earn the deficit back before its input counts.
+func (c *SoraConn) openNextThroughputWindow(now time.Time, seenRead, seenWritten int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastThroughputCheck = now
+	if c.bytesRead -= seenRead; c.bytesRead < 0 {
+		c.bytesRead = 0
+	}
+	if c.bytesWritten -= seenWritten; c.bytesWritten < 0 {
+		c.bytesWritten = 0
 	}
 }
 
@@ -410,7 +411,7 @@ func (c *SoraConn) Read(b []byte) (int, error) {
 	if n > 0 {
 		c.mu.Lock()
 		c.lastActivity = time.Now()
-		c.bytesTransferred += int64(n)
+		c.bytesRead += int64(n)
 		c.mu.Unlock()
 	}
 
@@ -424,7 +425,7 @@ func (c *SoraConn) Write(b []byte) (int, error) {
 	if n > 0 {
 		c.mu.Lock()
 		c.lastActivity = time.Now()
-		c.bytesTransferred += int64(n)
+		c.bytesWritten += int64(n)
 		c.mu.Unlock()
 	}
 
@@ -478,7 +479,8 @@ func (c *SoraConn) SetProxyInfo(info *ProxyProtocolInfo) {
 func (c *SoraConn) SuspendThroughputChecking() {
 	c.mu.Lock()
 	c.throughputCheckingSuspended = true
-	c.bytesTransferred = 0 // Reset counter as well
+	c.bytesRead = 0 // Reset counters as well
+	c.bytesWritten = 0
 	c.mu.Unlock()
 	logger.Info("Throughput checking suspended", "proto", c.protocol, "remote", c.remoteAddr)
 }
@@ -488,12 +490,10 @@ func (c *SoraConn) SuspendThroughputChecking() {
 func (c *SoraConn) ResumeThroughputChecking() {
 	c.mu.Lock()
 	c.throughputCheckingSuspended = false
-	c.bytesTransferred = 0             // Reset counter for fresh start
+	c.bytesRead = 0 // Reset counters for fresh start
+	c.bytesWritten = 0
 	c.lastThroughputCheck = time.Now() // Reset timing
-	c.consecutiveSlowMinutes = 0       // Clear slow minute counter
-	// Clear throughput history
-	c.throughputHistory = [3]int64{}
-	c.throughputHistoryIndex = 0
+	c.consecutiveStalledWindows = 0    // Clear stall counter
 	c.mu.Unlock()
 	logger.Info("Throughput checking resumed", "proto", c.protocol, "remote", c.remoteAddr)
 }

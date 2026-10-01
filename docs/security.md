@@ -171,10 +171,11 @@ All protocol servers (IMAP, POP3, ManageSieve, LMTP) and their proxy variants im
    - Protects against: Connections that stay open indefinitely by sending minimal activity
    - Triggered when: Total session duration exceeds the limit, regardless of activity
 
-3. **Minimum Throughput Enforcement** (`min_bytes_per_minute`): Closes connections transferring data too slowly
-   - Default: `512` bytes/minute (0.5 KB/min)
-   - Protects against: Slowloris attacks where attackers send data byte-by-byte to tie up connections
-   - Triggered when: Average data transfer rate falls below the threshold over a 1-minute window
+3. **Slowloris Guard** (`min_bytes_per_minute`): Closes connections that feed the command parser without ever completing a command
+   - Default: `0` (disabled); `512` bytes/minute recommended
+   - Protects against: Slowloris attacks where attackers send a command byte-by-byte to tie up connections
+   - Triggered when: Two consecutive one-minute windows each had client input below the threshold and no server output (no command completed), starting two minutes after the handshake
+   - Not triggered by: Clients that complete small commands at any rate (a NOOP poll every 15 seconds moves ~170 bytes/min and is fine), silent sessions (those are the idle timeout's job), or IMAP sessions in IDLE
 
 #### Configuration Example
 
@@ -197,7 +198,7 @@ min_bytes_per_minute = 512
 
 #### Important Considerations
 
-- **Set to `0`**: Uses default values (5m idle, 30m session, 512 bytes/min)
+- **Set to `0`**: Uses default values (5m idle, 30m session); for `min_bytes_per_minute`, `0` disables the guard
 - **Set to `-1`**: Disables that specific protection (not recommended for production)
 - **Proxy timeout coordination**: When using proxies with backends that have PROXY protocol enabled, ensure the proxy's `command_timeout` is **longer** than the backend's `proxy_protocol_timeout` (typically 5s) to prevent the proxy from timing out while waiting for backend PROXY protocol negotiation
 
