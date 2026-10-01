@@ -23,33 +23,34 @@ func TestBuildSearchCriteria_TextSearch(t *testing.T) {
 			searchText: "alice",
 			expectedInQuery: []string{
 				"text_body_tsv",             // Body FTS
-				"LOWER(m.subject) LIKE",     // Subject column (with table prefix)
-				"from_email_sort LIKE",      // From email
-				"from_name_sort LIKE",       // From name
-				"to_email_sort LIKE",        // To email
-				"to_name_sort LIKE",         // To name
-				"cc_email_sort LIKE",        // Cc email
+				"strpos(LOWER(m.subject),",  // Subject column (with table prefix)
+				"strpos(m.from_email_sort,", // From email
+				"strpos(m.from_name_sort,",  // From name
+				"strpos(m.to_email_sort,",   // To email
+				"strpos(m.to_name_sort,",    // To name
+				"strpos(m.cc_email_sort,",   // Cc email
 				"plainto_tsquery('simple',", // FTS query function
 			},
 			unexpectedInQuery: []string{
 				"recipients_json::text", // Should NOT use JSON text casting (fragile)
 				"headers_tsv",           // Should NOT use headers_tsv (removed in migration 000030)
+				" LIKE ",                // Header matching must not be LIKE: it is served by the corpus-wide trigram GINs (see substringCond)
 			},
 		},
 		{
 			name:       "TEXT search with email address",
 			searchText: "user@example.com",
 			expectedInQuery: []string{
-				"from_email_sort LIKE",
-				"to_email_sort LIKE",
+				"strpos(m.from_email_sort,",
+				"strpos(m.to_email_sort,",
 			},
 		},
 		{
 			name:       "TEXT search with partial name",
 			searchText: "Smith",
 			expectedInQuery: []string{
-				"from_name_sort LIKE",
-				"to_name_sort LIKE",
+				"strpos(m.from_name_sort,",
+				"strpos(m.to_name_sort,",
 			},
 		},
 	}
