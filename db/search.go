@@ -664,10 +664,12 @@ const (
 )
 
 // headerScanMaxMailboxSize is the mailbox size up to which header criteria scan the mailbox
-// (headerMatchScan). The scan measured ~0.43 heap pages per row at ~160 µs per cold page on
-// the production primary: 50k rows is ~21k pages, ~3.5 s cold, a tenth of the read
-// query_timeout. Above it the mailbox is large enough that reading it costs more than the
-// trigram probe does for all but cluster-wide common terms.
+// (headerMatchScan). Measured at the threshold on the production primary, cold cache: a
+// 54,147-row mailbox searched for a term matching nothing (every row read and rejected,
+// the scan's worst case) took 35,336 heap pages and 2.9 s, a tenth of the read
+// query_timeout. Pages per row vary with how clustered the mailbox's rows are (0.43 on the
+// 534k mailbox, 0.65 here). Above the threshold the mailbox is large enough that reading
+// it costs more than the trigram probe does for all but cluster-wide common terms.
 const headerScanMaxMailboxSize = 50000
 
 // headerMatchFor picks the header predicate form for a mailbox of the given size.
