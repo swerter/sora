@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The hash-keyed messages_fts table is retired: nothing reads or writes it, and migration
-// 000051 drops it. Application code that still names it would fail with "relation does not
+// The hash-keyed messages_fts table is retired: nothing reads or writes it, and a later migration
+// drops it. Application code that still names it would fail with "relation does not
 // exist" once the table is gone -- on every delivery, MOVE, COPY or worker batch that
 // reached it. This guard catches such a reference before it ships.
 //
