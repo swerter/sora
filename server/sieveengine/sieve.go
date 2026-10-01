@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-message"
+	msieve "github.com/migadu/go-managesieve/managesieve"
 	"github.com/migadu/go-sieve"
 	"github.com/migadu/go-sieve/interp"
 	"github.com/migadu/sora/helpers"
@@ -59,6 +60,19 @@ func SetScriptExecutionTimeout(d time.Duration) {
 // Excludes security-sensitive extensions like editheader.
 // The canonical list is maintained in server/managesieve/capabilities.go
 var DefaultSieveExtensions = managesieve.DefaultEnabledExtensions
+
+// EffectiveExtensions resolves a configured [sieve] enabled_extensions list to
+// the set scripts are compiled with and advertised as: the default set when
+// nothing is configured, otherwise the configured names the engine supports,
+// as ManageSieve already filters them. Every ingress path and every
+// capability report must go through here, or one of them drifts.
+func EffectiveExtensions(configured []string) []string {
+	if len(configured) == 0 {
+		return DefaultSieveExtensions
+	}
+	valid, _ := msieve.FilterExtensions(configured)
+	return valid
+}
 
 // HeaderEdit represents a header modification from editheader extension
 type HeaderEdit struct {

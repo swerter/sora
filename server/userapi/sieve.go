@@ -292,19 +292,14 @@ func containsInvalidChars(s string) bool {
 
 // handleGetCapabilities returns the Sieve capabilities supported by the server
 func (s *Server) handleGetCapabilities(w http.ResponseWriter, _ *http.Request) {
-	// The set delivery compiles scripts with: the configured [sieve]
-	// enabled_extensions, or the default set, exactly as ManageSieve advertises.
-	extensions := s.sieveExtensions
-	if len(extensions) == 0 {
-		extensions = sieveengine.DefaultSieveExtensions
-	}
+	// The set delivery compiles scripts with, exactly as ManageSieve advertises it.
 	capabilities := map[string]any{
 		"implementation":  "Sora Mail Server",
 		"version":         "1.0",
-		"extensions":      extensions,
+		"extensions":      sieveengine.EffectiveExtensions(s.sieveExtensions),
 		"notify_methods":  []string{},
-		"max_redirects":   4,
-		"max_script_size": 65536, // 64KB default
+		"max_redirects":   s.maxRedirectHops, // 0: unlimited
+		"max_script_size": maxSieveScriptSize,
 	}
 
 	s.writeJSON(w, http.StatusOK, capabilities)

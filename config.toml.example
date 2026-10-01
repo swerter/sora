@@ -757,7 +757,7 @@ default_rights = "lrswipkxtea"   # Default ACL rights for shared mailbox creator
 [sieve]
 # List of enabled SIEVE extensions (empty = use safe defaults)
 #
-# Default (empty = 22 safe extensions, editheader disabled for security):
+# Default (empty = 21 safe extensions, editheader disabled for security):
 # - Core: fileinto, envelope, encoded-character
 # - Comparators: comparator-i;octet, comparator-i;ascii-casemap, comparator-i;ascii-numeric, comparator-i;unicode-casemap
 # - Common: imap4flags, variables, relational, vacation, copy, regex, date, index, mailbox, subaddress, body

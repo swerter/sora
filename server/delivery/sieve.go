@@ -91,13 +91,10 @@ type StandardSieveExecutor struct {
 	SieveExtensions []string
 }
 
-// sieveExtensions resolves the extension set to compile with, falling back to the
-// default set exactly as server/lmtp does when nothing is configured.
+// sieveExtensions resolves the extension set to compile with, exactly as
+// server/lmtp does.
 func (s *StandardSieveExecutor) sieveExtensions() []string {
-	if len(s.SieveExtensions) == 0 {
-		return sieveengine.DefaultSieveExtensions
-	}
-	return s.SieveExtensions
+	return sieveengine.EffectiveExtensions(s.SieveExtensions)
 }
 
 // ExecuteSieve executes Sieve scripts and returns the outcome for this delivery. It

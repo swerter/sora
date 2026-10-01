@@ -51,9 +51,11 @@ func TestGetCapabilitiesReportsTheCompiledSet(t *testing.T) {
 	})
 
 	t.Run("configured set", func(t *testing.T) {
-		configured := []string{"fileinto", "vacation", "editheader"}
-		if got := capabilities(t, configured); !slices.Equal(got, configured) {
-			t.Fatalf("got %v, want the configured set %v", got, configured)
+		// A name the engine does not know is dropped, as ManageSieve drops it.
+		configured := []string{"fileinto", "vacation", "editheader", "enotify"}
+		want := []string{"fileinto", "vacation", "editheader"}
+		if got := capabilities(t, configured); !slices.Equal(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
 		}
 	})
 }
