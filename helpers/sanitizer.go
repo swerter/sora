@@ -265,6 +265,22 @@ func RemoveLongTokens(s string, maxTokenLen int) string {
 	return buf.String()
 }
 
+// Byte bounds for the header columns that idx_messages_mailbox_headers (migration 000052)
+// carries as INCLUDE columns so that header searches and SORT are served index-only. A btree
+// index tuple cannot exceed 2704 bytes, and an INSERT whose row would produce a larger tuple
+// FAILS, so every carried text column must be bounded before it is written. Worst case with
+// these bounds: 600 + 600 + 5*200 = 2200 bytes of text plus ~130 bytes of fixed columns and
+// headers, under the limit. Changing a bound upward requires re-checking that sum; existing
+// rows above a bound make CREATE INDEX fail (see the migration's runbook).
+//
+// The bounds affect only pathological headers: production avg_width is 48 bytes for subject
+// and 3-26 bytes for the sort columns. A truncated subject is still shown in listings and
+// matched by SEARCH on its first 600 bytes; FETCH ENVELOPE does not read this column.
+const (
+	MaxSubjectBytes    = 600 // messages.subject and messages.subject_sort
+	MaxSortColumnBytes = 200 // messages.{from,to}_{email,name}_sort, cc_email_sort
+)
+
 // TruncateUTF8Safe safely truncates a UTF-8 string to a maximum byte length without cutting a multibyte rune in half.
 func TruncateUTF8Safe(s string, maxBytes int) string {
 	if len(s) <= maxBytes {

@@ -1,0 +1,54 @@
+-- Covering index for header SEARCH and SORT: every column the lightweight search projection
+-- and its header/date/size/uid criteria reference, keyed by mailbox and partial on live rows,
+-- so the statements in db/search.go run as an Index Only Scan over ~200 bytes per message
+-- instead of filtering ~3.5 KB heap rows (body_structure is inline).
+--
+-- Why (measured on the production primary, 2026-10-01, cold cache): SEARCH FROM <address> on
+-- a 777-message mailbox was planned through the corpus-wide trigram GINs (estimated cost
+-- 1106, actual 452,581 pages / 70 s, a cluster-wide scan). With strpos() instead of LIKE the
+-- planner filters the mailbox's own rows, but on the largest mailbox (534k rows) that is
+-- 230,370 heap pages / 38 s, over the 30 s read query_timeout. With this index the same
+-- statement reads the mailbox's index entries only (~11k pages for 534k rows), and
+-- `SORT (DATE) ALL` over a whole mailbox becomes index-only as well.
+--
+-- Column rules. A btree tuple is limited to 2704 bytes and an INSERT over the limit FAILS,
+-- so the text columns here are bounded at write time (helpers.MaxSubjectBytes = 600 for
+-- subject and subject_sort, helpers.MaxSortColumnBytes = 200 for the five address/name
+-- sort columns; worst case 2200 bytes of text + ~130 fixed). Expression columns are useless
+-- here: the planner never considers index expressions for index-only scans, so the columns
+-- must be plain. TestHeaderIndexCoversLightweightSearch asserts the INCLUDE list covers every
+-- messages.* column the lightweight search can reference (recipients_json, "references",
+-- message_id and in_reply_to are deliberate exceptions: rare criteria with their own paths).
+--
+-- Production runbook (do NOT let the migration build this on a large table; a plain CREATE
+-- INDEX holds a SHARE lock on messages for the whole build, blocking delivery for hours):
+--   0. Deploy the application version that bounds the columns (sortColumnsFor in db/append.go)
+--      BEFORE anything else, so no new row can exceed the bounds.
+--   1. Count and fix existing rows over the bounds (full heap scan; run off-peak):
+--        SELECT count(*) FILTER (WHERE octet_length(subject) > 600 OR octet_length(subject_sort) > 600) AS long_subject,
+--               count(*) FILTER (WHERE octet_length(from_email_sort) > 200 OR octet_length(from_name_sort) > 200
+--                                OR octet_length(to_email_sort) > 200 OR octet_length(to_name_sort) > 200
+--                                OR octet_length(cc_email_sort) > 200) AS long_sort
+--        FROM messages WHERE expunged_at IS NULL;
+--      and for each offending row UPDATE the column to its UTF-8-safe prefix (left() on a
+--      text value is character-based: use substring(convert_from(substring(convert_to(col,
+--      'UTF8') from 1 for N), 'UTF8') ...) or fix from the application). CREATE INDEX fails
+--      on the first oversized row, so this must be complete first.
+--   2. CREATE INDEX CONCURRENTLY idx_messages_mailbox_headers ON messages (mailbox_id)
+--        INCLUDE (id, uid, content_hash, created_modseq, expunged_modseq, internal_date, sent_date, size,
+--                 subject, subject_sort, from_email_sort, from_name_sort, to_email_sort, to_name_sort, cc_email_sort)
+--        WHERE expunged_at IS NULL;
+--      Expected size ~45-65 GB on 210M rows (local fixture: ~210 bytes per row). It replaces
+--      the six *_trgm GINs (70 GB, maintained on every insert with fastupdate off), which a
+--      later migration drops once pg_stat_user_indexes shows their scans have stopped.
+--   3. Deploy the application version that searches with strpos() for every mailbox size.
+--   4. Run this migration; the statement below is IF NOT EXISTS and no-ops.
+--
+-- Index-only scans depend on the visibility map. messages already has per-table autovacuum
+-- settings (scale factor 0.01); keep them, since the uploader's `uploaded = TRUE` UPDATE is
+-- non-HOT and clears the bit on every new row's page until the next vacuum.
+
+CREATE INDEX IF NOT EXISTS idx_messages_mailbox_headers ON messages (mailbox_id)
+  INCLUDE (id, uid, content_hash, created_modseq, expunged_modseq, internal_date, sent_date, size,
+           subject, subject_sort, from_email_sort, from_name_sort, to_email_sort, to_name_sort, cc_email_sort)
+  WHERE expunged_at IS NULL;
