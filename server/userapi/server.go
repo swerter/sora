@@ -49,6 +49,7 @@ type Server struct {
 	tlsKeyFile                 string
 	tlsVerify                  bool
 	proxyReader                *server.ProxyProtocolReader
+	sieveExtensions            []string
 }
 
 // ServerOptions holds configuration options for the HTTP Mail API server
@@ -78,6 +79,10 @@ type ServerOptions struct {
 	ProxyProtocolTimeout        string
 	ProxyProtocolTrustedProxies []string
 	TrustedNetworks             []string // Fallback if trusted proxies empty
+	// SieveExtensions is the configured [sieve] enabled_extensions set (empty = the
+	// default set), the one delivery compiles a user's script with. The capabilities
+	// endpoint reports it, so a client offers only rules that will run.
+	SieveExtensions []string
 }
 
 // minJWTSecretLength is the minimum accepted JWT signing secret length. RFC 7518
@@ -190,6 +195,7 @@ func New(rdb *resilient.ResilientDatabase, options ServerOptions) (*Server, erro
 	s := &Server{
 		name:                       options.Name,
 		addr:                       options.Addr,
+		sieveExtensions:            options.SieveExtensions,
 		jwtSecret:                  options.JWTSecret,
 		maxConnections:             options.MaxConnections,
 		tokenDuration:              options.TokenDuration,

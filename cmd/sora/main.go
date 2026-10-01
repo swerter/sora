@@ -2415,6 +2415,7 @@ func startDynamicHTTPUserAPIServer(ctx context.Context, deps *serverDependencies
 		ProxyProtocolTimeout:        serverConfig.GetProxyProtocolTimeoutWithDefault(),
 		ProxyProtocolTrustedProxies: deps.config.Servers.TrustedNetworks,
 		TrustedNetworks:             deps.config.Servers.TrustedNetworks,
+		SieveExtensions:             deps.config.Sieve.EnabledExtensions,
 	}
 
 	srv := mailapi.Start(ctx, deps.resilientDB, options, errChan)

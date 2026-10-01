@@ -111,6 +111,27 @@ func SieveRawMessageCases() []SieveRawMessageCase {
 			Mailbox: "Archive",
 		},
 		{
+			// RFC 5703: the shape attachment filters take, and what Dovecot
+			// migrations bring along (`require "mime"` used to fail to
+			// compile, which skipped the user's whole script).
+			Name:    "attachment content type via header mime anychild",
+			Script:  `require ["mime", "fileinto"]; if header :mime :anychild :contenttype "Content-Type" "application/pdf" { fileinto "Archive"; }`,
+			Message: invoice,
+			Mailbox: "Archive",
+		},
+		{
+			Name:    "attachment filename via foreverypart",
+			Script:  `require ["mime", "foreverypart", "fileinto"]; foreverypart { if header :mime :param "filename" :matches "Content-Disposition" "*.pdf" { fileinto "Archive"; break; } }`,
+			Message: invoice,
+			Mailbox: "Archive",
+		},
+		{
+			Name:    "attachment filename absent via foreverypart",
+			Script:  `require ["mime", "foreverypart", "fileinto"]; foreverypart { if header :mime :param "filename" :matches "Content-Disposition" "*.exe" { fileinto "Archive"; break; } }`,
+			Message: invoice,
+			Mailbox: "INBOX",
+		},
+		{
 			Name:   "body text of a base64 single-part message",
 			Script: `require ["body", "fileinto"]; if body :contains "hello world" { fileinto "Archive"; }`,
 			Message: func(to, subject string) string {

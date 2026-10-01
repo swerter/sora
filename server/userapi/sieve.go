@@ -9,6 +9,7 @@ import (
 	"github.com/migadu/sora/logger"
 
 	"github.com/migadu/sora/consts"
+	"github.com/migadu/sora/server/sieveengine"
 )
 
 // SieveScriptResponse represents a Sieve script in API responses
@@ -291,28 +292,16 @@ func containsInvalidChars(s string) bool {
 
 // handleGetCapabilities returns the Sieve capabilities supported by the server
 func (s *Server) handleGetCapabilities(w http.ResponseWriter, _ *http.Request) {
-	// Return the Sieve capabilities
-	// These are the extensions supported by the server
+	// The set delivery compiles scripts with: the configured [sieve]
+	// enabled_extensions, or the default set, exactly as ManageSieve advertises.
+	extensions := s.sieveExtensions
+	if len(extensions) == 0 {
+		extensions = sieveengine.DefaultSieveExtensions
+	}
 	capabilities := map[string]any{
-		"implementation": "Sora Mail Server",
-		"version":        "1.0",
-		"extensions": []string{
-			"fileinto",
-			"reject",
-			"envelope",
-			"body",
-			"vacation",
-			"imap4flags",
-			"relational",
-			"comparator-i;ascii-numeric",
-			"subaddress",
-			"copy",
-			"mailbox",
-			"date",
-			"index",
-			"variables",
-			"editheader",
-		},
+		"implementation":  "Sora Mail Server",
+		"version":         "1.0",
+		"extensions":      extensions,
 		"notify_methods":  []string{},
 		"max_redirects":   4,
 		"max_script_size": 65536, // 64KB default
