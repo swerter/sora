@@ -10,7 +10,7 @@ func TestMessageBody(t *testing.T) {
 	tests := []struct {
 		name string
 		msg  string
-		want *string // nil: no body
+		want *string
 	}{
 		{"CRLF", "Subject: a\r\nFrom: b\r\n\r\nbody\r\n", ptr("body\r\n")},
 		{"bare LF", "Subject: a\nFrom: b\n\nbody\n", ptr("body\n")},
@@ -19,9 +19,9 @@ func TestMessageBody(t *testing.T) {
 		{"blank line inside body is not the separator", "Subject: a\r\n\r\none\r\n\r\ntwo", ptr("one\r\n\r\ntwo")},
 		{"empty body", "Subject: a\r\n\r\n", ptr("")},
 		{"no header block", "\r\nbody", ptr("body")},
-		{"headers only", "Subject: a\r\nFrom: b\r\n", nil},
-		{"no line ending", "Subject: a", nil},
-		{"empty", "", nil},
+		{"headers only", "Subject: a\r\nFrom: b\r\n", ptr("")},
+		{"no line ending", "Subject: a", ptr("")},
+		{"empty", "", ptr("")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

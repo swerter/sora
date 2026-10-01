@@ -516,14 +516,16 @@ func (m *SieveMessage) BodyRaw() ([]byte, bool, error) {
 	return m.Body, m.Body != nil, nil
 }
 
-// messageBody returns the octets after the blank line that ends msg's header block,
-// or nil when there is no blank line (a headers-only message has no body). Lines may
-// end in CRLF or bare LF, and the two may be mixed.
+// messageBody returns the octets after the blank line that ends msg's header block.
+// A message with no blank line has no body; it is reported as an empty one, so body
+// tests see "" rather than no body at all (LMTP accepts such a message with a
+// warning, and an empty body is what delivery saw for it before). Lines may end in
+// CRLF or bare LF, and the two may be mixed.
 func messageBody(msg []byte) []byte {
 	for i := 0; i < len(msg); {
 		n := bytes.IndexByte(msg[i:], '\n')
 		if n < 0 {
-			return nil
+			break
 		}
 		line := msg[i : i+n]
 		i += n + 1
@@ -531,7 +533,7 @@ func messageBody(msg []byte) []byte {
 			return msg[i:]
 		}
 	}
-	return nil
+	return []byte{}
 }
 
 // ApplyHeaderEdits applies header modifications to raw message bytes (RFC 5293)
