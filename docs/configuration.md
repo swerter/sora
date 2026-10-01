@@ -108,7 +108,7 @@ All protocol servers support multi-layered timeout protection to defend against 
 
 *   `command_timeout`: Maximum idle time before closing an inactive connection (default: `"5m"`). This protects against clients that connect but never send commands.
 *   `absolute_session_timeout`: Maximum total session duration regardless of activity (default: `"30m"`). This ensures connections don't stay open indefinitely.
-*   `min_bytes_per_minute`: Minimum data throughput required (default: `512` bytes/min). This protects against slowloris attacks where clients send data extremely slowly to tie up connections. Set to `0` to use the default; set to `-1` to disable throughput checking.
+*   `min_bytes_per_minute`: Slowloris guard (default: `0`, disabled; `512` recommended). A session is closed after two consecutive one-minute windows in which the client sent fewer bytes than this **and no command completed** (the server produced no output). It starts two minutes after the handshake. A client that completes a small command every few seconds (a NOOP poll) is never affected however little it transfers, and a silent session is governed by `command_timeout` instead. IMAP IDLE suspends the check.
 
 Example:
 ```toml
@@ -137,7 +137,7 @@ Proxy servers also support the same multi-layered timeout protection as direct p
 
 *   `command_timeout`: Maximum idle time before closing an inactive connection (default: `"5m"`).
 *   `absolute_session_timeout`: Maximum total session duration (default: `"30m"`).
-*   `min_bytes_per_minute`: Minimum throughput to prevent slowloris attacks (default: `512` bytes/min).
+*   `min_bytes_per_minute`: Slowloris guard, same semantics as for backends (default: `0`, disabled).
 
 **Important:** When configuring timeout values for proxies, ensure the proxy's `command_timeout` is **longer** than any backend timeout values (including `proxy_protocol_timeout` if PROXY protocol is enabled on backends). This prevents the proxy from timing out while waiting for backend responses.
 

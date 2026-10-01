@@ -15,43 +15,27 @@ import (
 	"github.com/migadu/sora/integration_tests/common"
 )
 
-// TestSlowlorisProtection verifies the slowloris protection that uses
-// 3-minute rolling average and requires 2 consecutive slow minutes.
-//
-// BEHAVIOR:
-// - Measures throughput using 3-minute rolling average
-// - Requires 2 consecutive slow minutes before disconnecting
-// - Tolerates occasional slow periods (e.g., user thinking/reading)
-// - Still protects against actual slowloris attacks
-func TestSlowlorisProtection(t *testing.T) {
-	common.SkipIfDatabaseUnavailable(t)
+// The slowloris check (server/sora_conn.go) disconnects a session after two
+// consecutive one-minute windows in which the client sent bytes but the
+// server never produced a response, i.e. no command completed. It starts two
+// minutes after the handshake. It deliberately does NOT measure volume alone:
+// a client that completes a tiny command every few seconds (Alpine's NOOP
+// poll, any client without IDLE) is healthy however few bytes it moves, and
+// silence is the idle timeout's business.
 
-	// Skip in short mode - this test takes ~7 minutes to complete
-	if testing.Short() {
-		t.Skip("Skipping long-running slowloris test in short mode")
-	}
-
-	// Server with 2-minute idle timeout and 512 bytes/min slowloris protection
-	// (Idle timeout must be longer than command spacing to avoid disconnecting during slow periods)
-	server, account := common.SetupIMAPServerWithSlowloris(t, 2*time.Minute, 512)
-
-	t.Logf("=== SLOWLORIS PROTECTION TEST ===\n")
-	t.Logf("Configuration:")
-	t.Logf("  - Threshold: 512 bytes/minute")
-	t.Logf("  - Grace period: 2 minutes")
-	t.Logf("  - Measurement: 3-minute rolling average")
-	t.Logf("  - Requirement: 2 consecutive slow minutes")
-	t.Logf("  - Check interval: Every 1 minute\n")
+// loginAndPassGrace connects, logs in, and keeps the session busy until the
+// post-handshake grace period is over. It returns the connection, its reader,
+// the session start time and the next free command number.
+func loginAndPassGrace(t *testing.T, server *common.TestServer, account common.TestAccount, selectInbox bool) (net.Conn, *bufio.Reader, time.Time, int) {
+	t.Helper()
 
 	conn, err := net.DialTimeout("tcp", server.Address, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
-	defer conn.Close()
-
+	t.Cleanup(func() { conn.Close() })
 	reader := bufio.NewReader(conn)
 
-	// Read greeting
 	greeting, err := reader.ReadString('\n')
 	if err != nil {
 		t.Fatalf("Failed to read greeting: %v", err)
@@ -59,11 +43,8 @@ func TestSlowlorisProtection(t *testing.T) {
 	if !strings.HasPrefix(greeting, "* OK") {
 		t.Fatalf("Invalid greeting: %s", greeting)
 	}
-
 	sessionStart := time.Now()
-	t.Logf("Connected at T+0.0s")
 
-	// Authenticate
 	fmt.Fprintf(conn, "a001 LOGIN %s %s\r\n", account.Email, account.Password)
 	loginResp, err := reader.ReadString('\n')
 	if err != nil {
@@ -72,283 +53,164 @@ func TestSlowlorisProtection(t *testing.T) {
 	if !strings.HasPrefix(loginResp, "a001 OK") {
 		t.Fatalf("LOGIN failed: %s", loginResp)
 	}
-	t.Logf("✓ Authenticated at T+%.1fs\n", time.Since(sessionStart).Seconds())
-
 	commandNum := 2
 
-	// ============================================================================
-	// PHASE 1: Pass grace period with steady activity
-	// ============================================================================
-	t.Logf("--- PHASE 1: Grace period (2 minutes) ---")
-	t.Logf("Sending steady 600 bytes/minute during grace period...")
-
-	gracePeriodEnd := sessionStart.Add(2*time.Minute + 5*time.Second)
-	ticker := time.NewTicker(1200 * time.Millisecond) // 600 bytes/min
-	defer ticker.Stop()
-
-	for time.Now().Before(gracePeriodEnd) {
-		<-ticker.C
-		tag := fmt.Sprintf("a%03d", commandNum)
-		fmt.Fprintf(conn, "%s NOOP\r\n", tag)
-		resp, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("Disconnected during grace period: %v", err)
-		}
-		if !strings.HasPrefix(resp, tag+" OK") {
-			t.Fatalf("NOOP failed: %s", resp)
-		}
-		commandNum++
-	}
-	t.Logf("✓ Grace period ended at T+%.1fs\n", time.Since(sessionStart).Seconds())
-
-	// ============================================================================
-	// PHASE 2: One slow minute (should NOT disconnect)
-	// OLD behavior: Would disconnect immediately
-	// NEW behavior: Tolerates one slow minute
-	// ============================================================================
-	t.Logf("--- PHASE 2: One slow minute (should survive) ---")
-	t.Logf("Sending only ~200 bytes/minute for 1 minute...")
-
-	// Send very few commands for 1 minute (~200 bytes/min)
-	slowMinuteEnd := time.Now().Add(60 * time.Second)
-	for time.Now().Before(slowMinuteEnd) {
-		time.Sleep(12 * time.Second) // ~5 commands per minute
-		tag := fmt.Sprintf("a%03d", commandNum)
-		fmt.Fprintf(conn, "%s NOOP\r\n", tag)
-		resp, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("❌ FAILED: Disconnected after ONE slow minute at T+%.1fs\n"+
-				"   This should NOT happen with improved protection!\n"+
-				"   Error: %v", time.Since(sessionStart).Seconds(), err)
-		}
-		if !strings.HasPrefix(resp, tag+" OK") {
-			t.Fatalf("NOOP failed: %s", resp)
-		}
-		commandNum++
-	}
-
-	t.Logf("✅ SUCCESS: Survived one slow minute at T+%.1fs", time.Since(sessionStart).Seconds())
-	t.Logf("   (Consecutive slow minutes: 1, threshold: 2)\n")
-
-	// ============================================================================
-	// PHASE 3: Resume normal speed (should reset counter)
-	// ============================================================================
-	t.Logf("--- PHASE 3: Resume normal speed (reset counter) ---")
-	t.Logf("Sending 600 bytes/minute for 1 minute...")
-
-	normalMinuteEnd := time.Now().Add(60 * time.Second)
-	ticker = time.NewTicker(1200 * time.Millisecond)
-	for time.Now().Before(normalMinuteEnd) {
-		<-ticker.C
-		tag := fmt.Sprintf("a%03d", commandNum)
-		fmt.Fprintf(conn, "%s NOOP\r\n", tag)
-		resp, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("Disconnected during normal speed: %v", err)
-		}
-		if !strings.HasPrefix(resp, tag+" OK") {
-			t.Fatalf("NOOP failed: %s", resp)
-		}
-		commandNum++
-	}
-	ticker.Stop()
-
-	t.Logf("✓ Normal speed minute completed at T+%.1fs", time.Since(sessionStart).Seconds())
-	t.Logf("   (Consecutive slow minutes should be reset to 0)\n")
-
-	// ============================================================================
-	// PHASE 4: Multiple consecutive slow minutes (should eventually disconnect)
-	// Due to the rolling average, the previous normal-speed minute is still in the buffer,
-	// so we need 3-4 slow minutes for the average to drop below threshold.
-	// This is actually GOOD - it provides even more tolerance for legitimate users!
-	//
-	// To ensure quick disconnection, we send VERY LOW throughput (true slowloris attack):
-	// - Only 3-4 commands per minute = ~36-48 bytes/min
-	// - This will quickly bring the rolling average below 512 bytes/min
-	// ============================================================================
-	t.Logf("\n--- PHASE 4: Multiple consecutive slow minutes (should disconnect) ---")
-	t.Logf("Due to rolling average, need 3-4 slow minutes to overcome previous normal minute")
-	t.Logf("Sending very low throughput (~36-48 bytes/min, true slowloris attack)...")
-
-	disconnected := false
-	slowMinuteCount := 0
-	maxSlowMinutes := 6 // Safety limit (test should complete in 8-9 minutes total)
-
-	for slowMinuteCount < maxSlowMinutes && !disconnected {
-		slowMinuteCount++
-		t.Logf("  Slow minute %d...", slowMinuteCount)
-
-		slowMinuteEnd := time.Now().Add(62 * time.Second)
-		commandsThisMinute := 0
-
-		for time.Now().Before(slowMinuteEnd) && !disconnected {
-			// Send only 3 commands per minute (true slowloris attack)
-			time.Sleep(20 * time.Second)
-			commandsThisMinute++
-			if commandsThisMinute > 3 {
-				// Wait until minute ends
-				time.Sleep(time.Until(slowMinuteEnd))
-				break
-			}
-
-			tag := fmt.Sprintf("a%03d", commandNum)
-			fmt.Fprintf(conn, "%s NOOP\r\n", tag)
+	if selectInbox {
+		fmt.Fprintf(conn, "a002 SELECT INBOX\r\n")
+		for {
 			resp, err := reader.ReadString('\n')
 			if err != nil {
-				// Connection closed by server - expected disconnection!
-				disconnected = true
-				elapsed := time.Since(sessionStart)
-				t.Logf("\n✅ DISCONNECTED after %d consecutive slow minutes at T+%.1fs",
-					slowMinuteCount, elapsed.Seconds())
-				t.Logf("   Rolling average finally dropped below 512 bytes/min")
-				t.Logf("   Protection works against sustained slowloris attacks!")
+				t.Fatalf("Failed to SELECT INBOX: %v", err)
+			}
+			if strings.HasPrefix(resp, "a002 OK") {
 				break
 			}
-			// Check for BYE message (server closing connection due to slowloris)
-			if strings.HasPrefix(resp, "* BYE") {
-				disconnected = true
-				elapsed := time.Since(sessionStart)
-				t.Logf("\n✅ DISCONNECTED after %d consecutive slow minutes at T+%.1fs",
-					slowMinuteCount, elapsed.Seconds())
-				t.Logf("   Server sent BYE: %s", strings.TrimSpace(resp))
-				t.Logf("   Rolling average finally dropped below 512 bytes/min")
-				t.Logf("   Protection works against sustained slowloris attacks!")
-				break
-			}
-			if !strings.HasPrefix(resp, tag+" OK") {
-				t.Fatalf("NOOP failed: %s", resp)
-			}
-			commandNum++
 		}
-
-		if !disconnected {
-			t.Logf("  ✓ Survived slow minute %d (sent %d cmds, rolling avg still >= 512 bytes/min)",
-				slowMinuteCount, commandsThisMinute)
-		}
+		commandNum = 3
 	}
 
-	if !disconnected {
-		t.Errorf("❌ FAILED: Should have disconnected after %d consecutive slow minutes", slowMinuteCount)
-	}
-
-	// ============================================================================
-	// TEST RESULTS SUMMARY
-	// ============================================================================
-	t.Logf("\n=== TEST RESULTS SUMMARY ===")
-	t.Logf("✅ Grace period: Worked correctly (2 minutes)")
-	t.Logf("✅ One slow minute: Survived (improved tolerance)")
-	t.Logf("✅ Normal speed: Reset counter correctly")
-	if disconnected {
-		t.Logf("✅ Multiple slow minutes: Eventually disconnected (protection works)")
-	}
-	t.Logf("\n✅ PROTECTION VERIFIED:")
-	t.Logf("   - Dramatically reduced false positives")
-	t.Logf("   - Requires sustained slowloris attack (3-4+ minutes) to disconnect")
-	t.Logf("   - Still effective against real attacks")
-}
-
-// TestSlowlorisIdleSuspension verifies that IDLE command suspends slowloris protection.
-// This is critical for Alpine and other email clients that maintain long IDLE connections
-// with minimal traffic (~270-280 bytes/min).
-func TestSlowlorisIdleSuspension(t *testing.T) {
-	common.SkipIfDatabaseUnavailable(t)
-
-	// Skip in short mode - this test takes ~7 minutes to complete
-	if testing.Short() {
-		t.Skip("Skipping long-running slowloris test in short mode")
-	}
-
-	// Server with 10-minute idle timeout and 512 bytes/min slowloris protection
-	server, account := common.SetupIMAPServerWithSlowloris(t, 10*time.Minute, 512)
-
-	t.Logf("=== SLOWLORIS IDLE SUSPENSION TEST ===")
-	t.Logf("Testing that IDLE suspends slowloris throughput checking")
-	t.Logf("Configuration:")
-	t.Logf("  - Threshold: 512 bytes/minute")
-	t.Logf("  - Grace period: 2 minutes")
-	t.Logf("  - IDLE timeout: 10 minutes (longer than test)")
-
-	conn, err := net.DialTimeout("tcp", server.Address, 5*time.Second)
-	if err != nil {
-		t.Fatalf("Failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-
-	// Read greeting
-	greeting, err := reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("Failed to read greeting: %v", err)
-	}
-	if !strings.HasPrefix(greeting, "* OK") {
-		t.Fatalf("Invalid greeting: %s", greeting)
-	}
-
-	sessionStart := time.Now()
-	t.Logf("\nConnected at T+0.0s")
-
-	// Authenticate
-	fmt.Fprintf(conn, "a001 LOGIN %s %s\r\n", account.Email, account.Password)
-	loginResp, err := reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("Failed to authenticate: %v", err)
-	}
-	if !strings.HasPrefix(loginResp, "a001 OK") {
-		t.Fatalf("LOGIN failed: %s", loginResp)
-	}
-	t.Logf("✓ Authenticated at T+%.1fs", time.Since(sessionStart).Seconds())
-
-	// Select INBOX (required for IDLE)
-	fmt.Fprintf(conn, "a002 SELECT INBOX\r\n")
-	for {
-		resp, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("Failed to SELECT INBOX: %v", err)
-		}
-		if strings.HasPrefix(resp, "a002 OK") {
-			break
-		}
-	}
-	t.Logf("✓ Selected INBOX at T+%.1fs", time.Since(sessionStart).Seconds())
-
-	// ============================================================================
-	// PHASE 1: Pass grace period with normal activity
-	// ============================================================================
-	t.Logf("\n--- PHASE 1: Grace period (2 minutes) ---")
-	t.Logf("Sending steady 600 bytes/minute during grace period...")
-
+	t.Logf("--- Grace period: steady NOOPs for 2 minutes ---")
 	gracePeriodEnd := sessionStart.Add(2*time.Minute + 5*time.Second)
 	ticker := time.NewTicker(1200 * time.Millisecond)
 	defer ticker.Stop()
-
-	commandNum := 3
 	for time.Now().Before(gracePeriodEnd) {
 		<-ticker.C
-		tag := fmt.Sprintf("a%03d", commandNum)
-		fmt.Fprintf(conn, "%s NOOP\r\n", tag)
-		resp, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("Disconnected during grace period: %v", err)
-		}
-		if !strings.HasPrefix(resp, tag+" OK") {
-			t.Fatalf("NOOP failed: %s", resp)
-		}
-		commandNum++
+		commandNum = noop(t, conn, reader, commandNum, "grace period")
 	}
-	ticker.Stop()
-	t.Logf("✓ Grace period ended at T+%.1fs", time.Since(sessionStart).Seconds())
+	t.Logf("✓ Grace period over at T+%.1fs", time.Since(sessionStart).Seconds())
+	return conn, reader, sessionStart, commandNum
+}
 
-	// ============================================================================
-	// PHASE 2: Enter IDLE and stay idle for 3+ minutes
-	// Without the fix: Would disconnect after 2 minutes of low throughput
-	// With the fix: Should stay connected indefinitely (throughput checking suspended)
-	// ============================================================================
-	t.Logf("\n--- PHASE 2: Enter IDLE for 3+ minutes ---")
-	t.Logf("This simulates Alpine client maintaining IDLE connection")
-	t.Logf("Expected behavior: NO disconnect (throughput checking suspended)")
+// noop completes one NOOP round trip and fails the test if the session is gone.
+func noop(t *testing.T, conn net.Conn, reader *bufio.Reader, commandNum int, phase string) int {
+	t.Helper()
+	tag := fmt.Sprintf("a%03d", commandNum)
+	fmt.Fprintf(conn, "%s NOOP\r\n", tag)
+	resp, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("❌ Disconnected during %s: %v", phase, err)
+	}
+	if strings.HasPrefix(resp, "* BYE") {
+		t.Fatalf("❌ Server sent BYE during %s: %s", phase, strings.TrimSpace(resp))
+	}
+	if !strings.HasPrefix(resp, tag+" OK") {
+		t.Fatalf("NOOP failed during %s: %s", phase, resp)
+	}
+	return commandNum + 1
+}
 
-	// Enter IDLE
+// pollLikeAlpine completes a NOOP every 15 seconds for the given duration:
+// four round trips a minute, roughly 170 bytes/min, far under the 512
+// bytes/min threshold. The session must survive every measurement window.
+func pollLikeAlpine(t *testing.T, conn net.Conn, reader *bufio.Reader, commandNum int, d time.Duration) int {
+	t.Helper()
+	t.Logf("--- Alpine-style poll: one NOOP every 15s for %.0fs (must survive) ---", d.Seconds())
+	end := time.Now().Add(d)
+	for time.Now().Before(end) {
+		time.Sleep(15 * time.Second)
+		commandNum = noop(t, conn, reader, commandNum, "Alpine-style NOOP poll")
+	}
+	t.Logf("✅ Survived %.0fs of low-volume polling with completed commands", d.Seconds())
+	return commandNum
+}
+
+// trickleUntilClosed feeds the server one byte of a command line every 20
+// seconds without ever sending the CRLF that would complete it: the actual
+// slowloris signature. It returns the BYE line the server sent (empty if the
+// connection was simply closed) and fails the test if the server has not
+// closed the session by the deadline.
+//
+// On IMAP the library's 30-second command read deadline (go-imap
+// imapserver cmdReadTimeout) cuts a trickled command before the throughput
+// guard's two one-minute windows elapse, so the close here normally arrives
+// as a plain EOF within a minute. The guard's own rule is pinned by the unit
+// tests in server/sora_conn_throughput_test.go; this phase proves the server
+// as a whole still refuses to hold a command that never completes.
+func trickleUntilClosed(t *testing.T, conn net.Conn, reader *bufio.Reader, sessionStart time.Time, limit time.Duration) string {
+	t.Helper()
+	t.Logf("--- Slowloris: trickling a command that never completes (must be disconnected within %.0fs) ---", limit.Seconds())
+
+	type line struct {
+		text string
+		err  error
+	}
+	lines := make(chan line, 16)
+	go func() {
+		for {
+			text, err := reader.ReadString('\n')
+			lines <- line{text, err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	deadline := time.After(limit)
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	fmt.Fprint(conn, "a") // first fragment, never completed
+	for {
+		select {
+		case l := <-lines:
+			if l.err != nil {
+				t.Logf("✅ Server closed the stalled session at T+%.1fs (%v)", time.Since(sessionStart).Seconds(), l.err)
+				return ""
+			}
+			if strings.HasPrefix(l.text, "* BYE") {
+				t.Logf("✅ Server sent BYE at T+%.1fs: %s", time.Since(sessionStart).Seconds(), strings.TrimSpace(l.text))
+				return l.text
+			}
+			t.Logf("   (ignoring untagged line while stalled: %s)", strings.TrimSpace(l.text))
+		case <-ticker.C:
+			if _, err := fmt.Fprint(conn, "a"); err != nil {
+				t.Logf("✅ Write failed, server closed the stalled session at T+%.1fs (%v)", time.Since(sessionStart).Seconds(), err)
+				return ""
+			}
+		case <-deadline:
+			t.Fatalf("❌ FAILED: stalled session still open after %.0fs; slowloris protection is not working", limit.Seconds())
+		}
+	}
+}
+
+// TestSlowlorisProtection: a low-volume poller that completes commands is
+// never cut, while a client that never completes a command is.
+func TestSlowlorisProtection(t *testing.T) {
+	common.SkipIfDatabaseUnavailable(t)
+	if testing.Short() {
+		t.Skip("Skipping long-running slowloris test in short mode")
+	}
+
+	// 2-minute idle timeout: the trickle sends a byte every 20s, so only the
+	// throughput check can end the session. 512 bytes/min threshold.
+	server, account := common.SetupIMAPServerWithSlowloris(t, 2*time.Minute, 512)
+
+	conn, reader, sessionStart, commandNum := loginAndPassGrace(t, server, account, false)
+
+	// Three full measurement windows: the old volume-only rule cut this
+	// session in the second one.
+	pollLikeAlpine(t, conn, reader, commandNum, 3*time.Minute+10*time.Second)
+
+	// Two stalled windows plus slack for window alignment.
+	bye := trickleUntilClosed(t, conn, reader, sessionStart, 3*time.Minute+30*time.Second)
+	if bye != "" && !strings.Contains(bye, "Connection too slow") {
+		t.Errorf("expected the slow-connection BYE, got: %s", strings.TrimSpace(bye))
+	}
+}
+
+// TestSlowlorisIdleSuspension verifies that IDLE suspends the check (client
+// silence is expected there) and that it resumes after DONE.
+func TestSlowlorisIdleSuspension(t *testing.T) {
+	common.SkipIfDatabaseUnavailable(t)
+	if testing.Short() {
+		t.Skip("Skipping long-running slowloris test in short mode")
+	}
+
+	// 10-minute idle timeout (longer than the test), 512 bytes/min threshold.
+	server, account := common.SetupIMAPServerWithSlowloris(t, 10*time.Minute, 512)
+
+	conn, reader, sessionStart, commandNum := loginAndPassGrace(t, server, account, true)
+
+	t.Logf("--- IDLE for 3+ minutes (must survive) ---")
 	tag := fmt.Sprintf("a%03d", commandNum)
 	fmt.Fprintf(conn, "%s IDLE\r\n", tag)
 	resp, err := reader.ReadString('\n')
@@ -360,16 +222,10 @@ func TestSlowlorisIdleSuspension(t *testing.T) {
 	}
 	t.Logf("✓ Entered IDLE at T+%.1fs", time.Since(sessionStart).Seconds())
 
-	// Stay in IDLE for 3 minutes and 10 seconds
-	// This is well past the 2-minute grace period + 2 consecutive slow minutes
-	// Without the fix, we'd be disconnected after ~4 minutes (2min grace + 2min slow)
-	// With the fix, we should stay connected for the full duration
-	idleDuration := 3*time.Minute + 10*time.Second
-	t.Logf("Staying in IDLE for %.0f seconds...", idleDuration.Seconds())
-
 	// Read until the deadline expires. The server sends periodic untagged
 	// "* OK Still here" keepalives during IDLE, so reaching the deadline is the
 	// success condition and any other read error means it closed the connection.
+	idleDuration := 3*time.Minute + 10*time.Second
 	conn.SetReadDeadline(time.Now().Add(idleDuration))
 	for {
 		if _, err := reader.ReadString('\n'); err != nil {
@@ -377,18 +233,11 @@ func TestSlowlorisIdleSuspension(t *testing.T) {
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				break
 			}
-			t.Fatalf("❌ FAILED: Disconnected during IDLE at T+%.1fs\n"+
-				"   Throughput checking was NOT suspended!\n"+
-				"   Error: %v\n"+
-				"   This means the fix is not working correctly.",
-				time.Since(sessionStart).Seconds(), err)
+			t.Fatalf("❌ FAILED: Disconnected during IDLE at T+%.1fs: %v", time.Since(sessionStart).Seconds(), err)
 		}
 	}
-	t.Logf("✅ SUCCESS: Stayed in IDLE for %.0f seconds at T+%.1fs",
-		idleDuration.Seconds(), time.Since(sessionStart).Seconds())
-	t.Logf("   Throughput checking was properly suspended!")
+	t.Logf("✅ Stayed in IDLE for %.0fs", idleDuration.Seconds())
 
-	// Exit IDLE
 	fmt.Fprintf(conn, "DONE\r\n")
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	// Drain any keepalives still queued ahead of the tagged completion.
@@ -404,73 +253,11 @@ func TestSlowlorisIdleSuspension(t *testing.T) {
 	if !strings.Contains(resp, "OK") || !strings.Contains(resp, "IDLE") {
 		t.Fatalf("IDLE exit failed: %s", resp)
 	}
+	conn.SetReadDeadline(time.Time{})
 	t.Logf("✓ Exited IDLE at T+%.1fs", time.Since(sessionStart).Seconds())
 
-	// ============================================================================
-	// PHASE 3: After IDLE, verify throughput checking resumes
-	// ============================================================================
-	t.Logf("\n--- PHASE 3: Verify throughput checking resumes after IDLE ---")
-	t.Logf("Sending very low throughput to verify protection is active again...")
-
-	// Now that we've exited IDLE, slowloris protection should be active again
-	// Send very low throughput for 2+ minutes to verify we DO get disconnected
-	disconnected := false
-	slowMinuteCount := 0
-	maxSlowMinutes := 4 // Should disconnect within 3-4 minutes
-
-	for slowMinuteCount < maxSlowMinutes && !disconnected {
-		slowMinuteCount++
-		t.Logf("  Slow minute %d (post-IDLE)...", slowMinuteCount)
-
-		slowMinuteEnd := time.Now().Add(62 * time.Second)
-		commandsThisMinute := 0
-
-		for time.Now().Before(slowMinuteEnd) && !disconnected {
-			// Send only 3 commands per minute (very low throughput)
-			time.Sleep(20 * time.Second)
-			commandsThisMinute++
-			if commandsThisMinute > 3 {
-				time.Sleep(time.Until(slowMinuteEnd))
-				break
-			}
-
-			commandNum++
-			tag := fmt.Sprintf("a%03d", commandNum)
-			fmt.Fprintf(conn, "%s NOOP\r\n", tag)
-			resp, err := reader.ReadString('\n')
-			if err != nil {
-				disconnected = true
-				t.Logf("✅ Disconnected after %d slow minutes (post-IDLE) at T+%.1fs",
-					slowMinuteCount, time.Since(sessionStart).Seconds())
-				t.Logf("   Throughput checking resumed correctly after IDLE!")
-				break
-			}
-			if strings.HasPrefix(resp, "* BYE") {
-				disconnected = true
-				t.Logf("✅ Server sent BYE after %d slow minutes (post-IDLE): %s",
-					slowMinuteCount, strings.TrimSpace(resp))
-				break
-			}
-			if !strings.HasPrefix(resp, tag+" OK") {
-				t.Fatalf("NOOP failed: %s", resp)
-			}
-		}
-	}
-
-	if !disconnected {
-		t.Logf("⚠️  WARNING: Did not disconnect after %d slow minutes post-IDLE", slowMinuteCount)
-		t.Logf("   This is acceptable due to rolling average, but worth noting")
-	}
-
-	// ============================================================================
-	// TEST RESULTS SUMMARY
-	// ============================================================================
-	t.Logf("\n=== TEST RESULTS SUMMARY ===")
-	t.Logf("✅ IDLE Suspension: Stayed connected for 3+ minutes in IDLE")
-	t.Logf("✅ Alpine Client Fix: Low-throughput IDLE connections no longer disconnect")
-	t.Logf("✅ Protection Resume: Throughput checking resumes after exiting IDLE")
-	t.Logf("\n✅ FIX VERIFIED:")
-	t.Logf("   - IDLE suspends slowloris throughput checking")
-	t.Logf("   - Legitimate low-traffic IDLE connections stay connected")
-	t.Logf("   - Protection resumes when exiting IDLE")
+	// The check is active again: a command that never completes must be cut.
+	// ResumeThroughputChecking opened a fresh window at DONE, so two stalled
+	// windows fit well inside the limit.
+	trickleUntilClosed(t, conn, reader, sessionStart, 3*time.Minute+30*time.Second)
 }

@@ -1125,7 +1125,7 @@ timeouts.command_timeout = "5m"             # Maximum idle time before disconnec
                                             # "* OK Still here" keepalives every 2 minutes (RFC 2177 allows 29
                                             # minutes of client silence during IDLE).
 timeouts.absolute_session_timeout = "24h"   # Maximum total session duration regardless of activity (e.g., "24h", default: 24 hours)
-timeouts.min_bytes_per_minute = 512         # Minimum throughput to prevent slowloris attacks (bytes/min, 0 = disabled, 512 recommended)
+timeouts.min_bytes_per_minute = 512         # Slowloris guard (bytes/min, 0 = disabled, 512 recommended). Counts only windows where the client sent bytes but no command completed; idle pollers (NOOP every N seconds) and silent sessions are unaffected.
 
 # Per-command hard execution timeouts (IMAP only). These are safety nets that
 # abort runaway commands — normal operations complete far below these limits.
@@ -1297,7 +1297,7 @@ proxy_protocol_timeout = "5s"
 timeouts.command_timeout = "10m"            # Maximum idle time before disconnection (default: 10m per RFC 1939 §3).
                                             # RFC 1939 requires auto-logout timer of at least 10 minutes.
 timeouts.absolute_session_timeout = "24h"   # Maximum total session duration (default: 24 hours)
-timeouts.min_bytes_per_minute = 512         # Minimum throughput to prevent slowloris attacks (bytes/min, 0 = disabled, 512 recommended)
+timeouts.min_bytes_per_minute = 512         # Slowloris guard (bytes/min, 0 = disabled, 512 recommended). Counts only windows where the client sent bytes but no command completed; idle pollers (NOOP every N seconds) and silent sessions are unaffected.
 
 # --- PER-COMMAND EXECUTION TIMEOUTS (optional) ---
 # Hard caps on a single command's server-side execution (maildrop load, body
@@ -1349,7 +1349,7 @@ proxy_protocol_timeout = "5s"
 # --- TIMEOUT CONFIGURATION ---
 timeouts.command_timeout = "3m"             # Maximum idle time before disconnection (default: 3 minutes for ManageSieve)
 timeouts.absolute_session_timeout = "24h"   # Maximum total session duration (default: 24 hours)
-timeouts.min_bytes_per_minute = 512         # Minimum throughput to prevent slowloris attacks (bytes/min, 0 = disabled, 512 recommended)
+timeouts.min_bytes_per_minute = 512         # Slowloris guard (bytes/min, 0 = disabled, 512 recommended). Counts only windows where the client sent bytes but no command completed; idle pollers (NOOP every N seconds) and silent sessions are unaffected.
 
 # --- PER-COMMAND EXECUTION TIMEOUTS (optional) ---
 # Hard caps on a single command's execution (lock acquisition, go-sieve
@@ -1482,7 +1482,7 @@ enable_affinity = true        # Enable user-to-backend affinity (requires [clust
 #
 timeouts.command_timeout = "0"              # Idle timeout. Set to "0" to disable (REQUIRED for IMAP proxy, default: 0).
 timeouts.absolute_session_timeout = "24h"   # Maximum total session duration from connect to disconnect (default: 24h).
-timeouts.min_bytes_per_minute = 0           # Minimum throughput (bytes/min, 0 = disabled, default: 0, can set to 512 for slowloris protection)
+timeouts.min_bytes_per_minute = 0           # Slowloris guard (bytes/min, 0 = disabled, default: 0, 512 recommended). Counts only windows where the client sent bytes but no command completed; idle pollers and silent sessions are unaffected.
 
 # --- HTTP-BASED USER ROUTING (REMOTE_LOOKUP) ---
 # Advanced feature for routing users to specific backend servers via HTTP API.
@@ -1868,7 +1868,7 @@ enable_affinity = true        # Enable user-to-backend affinity (requires [clust
 # --- TIMEOUT CONFIGURATION ---
 timeouts.command_timeout = "0"              # Maximum idle time (default: 0 = disabled for proxies)
 timeouts.absolute_session_timeout = "24h"   # Maximum total session duration (default: 24h)
-timeouts.min_bytes_per_minute = 0           # Minimum throughput (bytes/min, 0 = disabled, default: 0, can set to 512 for slowloris protection)
+timeouts.min_bytes_per_minute = 0           # Slowloris guard (bytes/min, 0 = disabled, default: 0, 512 recommended). Counts only windows where the client sent bytes but no command completed; idle pollers and silent sessions are unaffected.
 
 # --- DEBUG LOGGING ---
 debug = false                         # Enable debug logging (logs backend greetings/responses)
@@ -1924,7 +1924,7 @@ enable_affinity = true        # Enable user-to-backend affinity (requires [clust
 # --- TIMEOUT CONFIGURATION ---
 timeouts.command_timeout = "0"              # Maximum idle time (default: 0 = disabled for proxies)
 timeouts.absolute_session_timeout = "24h"   # Maximum total session duration (default: 24h)
-timeouts.min_bytes_per_minute = 0           # Minimum throughput (bytes/min, 0 = disabled, default: 0, can set to 512 for slowloris protection)
+timeouts.min_bytes_per_minute = 0           # Slowloris guard (bytes/min, 0 = disabled, default: 0, 512 recommended). Counts only windows where the client sent bytes but no command completed; idle pollers and silent sessions are unaffected.
 
 # NOTE: SIEVE extensions are configured globally in the [sieve] section.
 # The proxy should match capabilities from backend servers.
@@ -1985,7 +1985,7 @@ timeouts.command_timeout = "0"              # Maximum idle time (default: 0 = di
 timeouts.absolute_session_timeout = "5m"    # Maximum total session duration (default: 5m for LMTP)
                                             # LMTP is a delivery protocol - connections should complete in seconds/minutes
                                             # 5 minutes is generous for large messages while detecting hung backends quickly
-timeouts.min_bytes_per_minute = 0           # Minimum throughput (bytes/min, 0 = disabled, default: 0, can set to 512 for slowloris protection)
+timeouts.min_bytes_per_minute = 0           # Slowloris guard (bytes/min, 0 = disabled, default: 0, 512 recommended). Counts only windows where the client sent bytes but no command completed; idle pollers and silent sessions are unaffected.
 
 # --- DEBUG LOGGING ---
 debug = false                         # Enable debug logging (logs backend greetings/responses)
