@@ -70,7 +70,7 @@ stop;
 					"From":    {"sender@example.com"},
 					"To":      {"recipient@example.com"},
 				},
-				Body: "Test message body",
+				Message: bodyOnly("Test message body"),
 			}
 
 			result, err := executor.Evaluate(context.Background(), ctx)
@@ -112,7 +112,7 @@ redirect "another@email.com";
 			"From":    {"sender@example.com"},
 			"To":      {"recipient@example.com"},
 		},
-		Body: "Test message body",
+		Message: bodyOnly("Test message body"),
 	}
 
 	result, err := executor.Evaluate(context.Background(), ctx)
@@ -154,7 +154,7 @@ redirect :copy "another@email.com";
 			"From":    {"sender@example.com"},
 			"To":      {"recipient@example.com"},
 		},
-		Body: "Test message body",
+		Message: bodyOnly("Test message body"),
 	}
 
 	result, err := executor.Evaluate(context.Background(), ctx)
@@ -197,7 +197,7 @@ keep;
 			"From":    {"sender@example.com"},
 			"To":      {"recipient@example.com"},
 		},
-		Body: "Test message body",
+		Message: bodyOnly("Test message body"),
 	}
 
 	result, err := executor.Evaluate(context.Background(), ctx)
@@ -239,7 +239,7 @@ fileinto "Spam";
 			"From":    {"sender@example.com"},
 			"To":      {"recipient@example.com"},
 		},
-		Body: "Test message body",
+		Message: bodyOnly("Test message body"),
 	}
 
 	result, err := executor.Evaluate(context.Background(), ctx)
@@ -324,7 +324,7 @@ if not header :contains "precedence" ["list", "bulk", "junk"] {
 			"From":    {"sender@example.com"},
 			"To":      {"recipient@example.com"},
 		},
-		Body: "Test message body",
+		Message: bodyOnly("Test message body"),
 	}
 
 	result, err := executor.Evaluate(context.Background(), ctx)
@@ -369,7 +369,7 @@ keep;
 			"Subject": {"Test"},
 			"From":    {"sender@example.com"},
 		},
-		Body: "Test body",
+		Message: bodyOnly("Test body"),
 	}
 
 	result, err := executor.Evaluate(context.Background(), ctx)
@@ -406,7 +406,7 @@ discard;
 			"Subject": {"Test"},
 			"From":    {"sender@example.com"},
 		},
-		Body: "Test body",
+		Message: bodyOnly("Test body"),
 	}
 
 	result, err := executor.Evaluate(context.Background(), ctx)
@@ -441,7 +441,7 @@ fileinto "Archive";
 			"Subject": {"Test"},
 			"From":    {"sender@example.com"},
 		},
-		Body: "Test body",
+		Message: bodyOnly("Test body"),
 	}
 
 	result, err := executor.Evaluate(context.Background(), ctx)
@@ -482,7 +482,7 @@ vacation :days 7 :subject "Away" "I'm away";
 			"Subject": {"Test"},
 			"From":    {"sender@example.com"},
 		},
-		Body: "Test body",
+		Message: bodyOnly("Test body"),
 	}
 
 	// First evaluation - should trigger vacation
@@ -537,7 +537,7 @@ vacation :days 7 :subject "Away" "I'm away";
 		EnvelopeFrom: "sender@example.com",
 		EnvelopeTo:   "recipient@example.com",
 		Header:       map[string][]string{"From": {"sender@example.com"}},
-		Body:         "Test body",
+		Message:      bodyOnly("Test body"),
 	}
 
 	for i := 1; i <= 2; i++ {
@@ -618,7 +618,7 @@ if not header :contains "precedence" ["list", "bulk", "junk"] {
 				EnvelopeFrom: "sender@example.com",
 				EnvelopeTo:   "recipient@example.com",
 				Header:       headers,
-				Body:         "Test body",
+				Message:      bodyOnly("Test body"),
 			}
 
 			result, err := executor.Evaluate(context.Background(), ctx)
@@ -690,7 +690,7 @@ if header :contains "From" "@gmail.com" {
 				EnvelopeFrom: "sender@gmail.com",
 				EnvelopeTo:   "recipient@example.com",
 				Header:       headers,
-				Body:         "Test body",
+				Message:      bodyOnly("Test body"),
 			}
 
 			result, err := executor.Evaluate(context.Background(), ctx)
@@ -761,7 +761,7 @@ if body :contains "URGENT" {
 					"From":         {"sender@example.com"},
 					"Content-Type": {"text/plain"},
 				},
-				Body: tt.body,
+				Message: bodyOnly(tt.body),
 			}
 
 			result, err := executor.Evaluate(context.Background(), ctx)
@@ -795,7 +795,7 @@ keep;
 		Header: map[string][]string{
 			"Subject": {"Test"},
 		},
-		Body: "Test body",
+		Message: bodyOnly("Test body"),
 	}
 
 	// Create an already cancelled context
@@ -806,4 +806,10 @@ keep;
 	if err == nil {
 		t.Error("Expected error when evaluating with cancelled context, got nil")
 	}
+}
+
+// bodyOnly builds Context.Message for tests that supply their headers through
+// Context.Header: an empty header block, then body.
+func bodyOnly(body string) []byte {
+	return []byte("\r\n" + body)
 }

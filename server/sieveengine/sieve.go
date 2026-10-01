@@ -95,8 +95,15 @@ type Result struct {
 type Context struct {
 	EnvelopeFrom string
 	EnvelopeTo   string
-	Header       map[string][]string
-	Body         string
+	// Header is the parsed header block of Message. The body test reads the top-level
+	// Content-Type and Content-Transfer-Encoding from here and the body from Message,
+	// so the two must describe the same bytes.
+	Header map[string][]string
+	// Message is the complete raw message as it will be stored: header block, blank
+	// line, and the body still MIME-structured and transfer-encoded. The body test
+	// (RFC 5173) walks the MIME parts itself and the size test (RFC 5228 §5.9) measures
+	// the whole message, so this must not be the extracted search text.
+	Message []byte
 }
 
 // VacationOracle defines the methods SievePolicy needs to interact with
@@ -219,8 +226,8 @@ func (e *SieveExecutor) Evaluate(evalCtx context.Context, ctx Context) (Result, 
 
 	message := &SieveMessage{
 		Headers: normalizedHeaders,
-		Body:    []byte(ctx.Body),
-		Size:    len(ctx.Body),
+		Body:    messageBody(ctx.Message),
+		Size:    len(ctx.Message),
 	}
 
 	// Create a per-execution policy to ensure thread safety and isolation.
@@ -507,6 +514,24 @@ func (m *SieveMessage) MessageSize() int {
 
 func (m *SieveMessage) BodyRaw() ([]byte, bool, error) {
 	return m.Body, m.Body != nil, nil
+}
+
+// messageBody returns the octets after the blank line that ends msg's header block,
+// or nil when there is no blank line (a headers-only message has no body). Lines may
+// end in CRLF or bare LF, and the two may be mixed.
+func messageBody(msg []byte) []byte {
+	for i := 0; i < len(msg); {
+		n := bytes.IndexByte(msg[i:], '\n')
+		if n < 0 {
+			return nil
+		}
+		line := msg[i : i+n]
+		i += n + 1
+		if len(line) == 0 || (len(line) == 1 && line[0] == '\r') {
+			return msg[i:]
+		}
+	}
+	return nil
 }
 
 // ApplyHeaderEdits applies header modifications to raw message bytes (RFC 5293)

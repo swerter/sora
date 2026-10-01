@@ -548,7 +548,7 @@ func (s *LMTPSession) Data(ctx context.Context, r io.Reader) error {
 		EnvelopeFrom: s.sender.FullAddress(),
 		EnvelopeTo:   envelopeTo,
 		Header:       messageContent.Header.Map(),
-		Body:         *plaintextBody,
+		Message:      fullMessageBytes,
 	}
 
 	// Always run the default script first as a "before script"
