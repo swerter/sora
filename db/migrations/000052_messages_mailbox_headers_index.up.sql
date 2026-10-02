@@ -38,6 +38,15 @@
 --        INCLUDE (id, uid, content_hash, created_modseq, expunged_modseq, internal_date, sent_date, size,
 --                 subject, subject_sort, from_email_sort, from_name_sort, to_email_sort, to_name_sort, cc_email_sort)
 --        WHERE expunged_at IS NULL;
+--      The build sorts every index tuple: with the default temp_file_limit (5 GB on the
+--      production primary) it fails with "temporary file size exceeds temp_file_limit" after
+--      a long time and leaves an INVALID index behind that must be dropped before retrying
+--      (SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_messages_mailbox_headers'::regclass;
+--      DROP INDEX CONCURRENTLY idx_messages_mailbox_headers;). In the building session:
+--        SET temp_file_limit = -1;              -- needs ~1.5x the index size free in temp_tablespaces
+--        SET maintenance_work_mem = '8GB';      -- as much as RAM allows; fewer spill passes
+--        SET max_parallel_maintenance_workers = 4;
+--        SET statement_timeout = 0;
 --      Expected size ~45-65 GB on 210M rows (local fixture: ~210 bytes per row). It replaces
 --      the six *_trgm GINs (70 GB, maintained on every insert with fastupdate off), which a
 --      later migration drops once pg_stat_user_indexes shows their scans have stopped.
