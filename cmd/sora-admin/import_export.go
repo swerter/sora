@@ -235,6 +235,7 @@ Examples:
 		Dovecot:              *dovecot,
 		ImportDelay:          *delay,
 		SievePath:            *sievePath,
+		SieveExtensions:      globalConfig.Sieve.EnabledExtensions,
 		PreserveUIDs:         *preserveUIDs || *dovecot,
 		TestMode:             s3 == nil,
 		BatchSize:            *batchSize,

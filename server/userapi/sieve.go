@@ -1,14 +1,14 @@
 package userapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 
-	"github.com/migadu/sora/logger"
-
 	"github.com/migadu/sora/consts"
+	"github.com/migadu/sora/logger"
 	"github.com/migadu/sora/server/sieveengine"
 )
 
@@ -160,6 +160,12 @@ func (s *Server) handlePutFilter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refuse what delivery could not run, as ManageSieve PUTSCRIPT does.
+	if err := sieveengine.ValidateScript(req.Script, s.sieveExtensions); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Script validation failed: "+err.Error())
+		return
+	}
+
 	// Create or update script
 	script, err := s.rdb.CreateOrUpdateScriptWithRetry(ctx, accountID, name, req.Script)
 	if err != nil {
@@ -241,8 +247,29 @@ func (s *Server) handleActivateFilter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Activate script
-	if err := s.rdb.ActivateScriptWithRetry(ctx, name, accountID); err != nil {
+	// A stored script may predate a change to the enabled extensions; activating
+	// one delivery cannot run would silently lose every rule in it (ManageSieve
+	// SETACTIVE checks too).
+	// Read from the master: the script was most likely just PUT, and a replica
+	// may still hold the content being replaced.
+	script, err := s.rdb.GetScriptByNameWithRetry(context.WithValue(ctx, consts.UseMasterDBKey, true), name, accountID)
+	if err != nil {
+		if errors.Is(err, consts.ErrDBNotFound) {
+			s.writeError(w, http.StatusNotFound, "Script not found")
+			return
+		}
+		logger.Warn("HTTP Mail API: Error retrieving Sieve script", "name", s.name, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to activate script")
+		return
+	}
+	if err := sieveengine.ValidateScript(script.Script, s.sieveExtensions); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Script validation failed: "+err.Error())
+		return
+	}
+
+	// Activate the row that was validated (by id, on the master), not a
+	// by-name lookup that may hit a lagging replica.
+	if err := s.rdb.SetScriptActiveWithRetry(ctx, script.ID, accountID, true); err != nil {
 		if errors.Is(err, consts.ErrDBNotFound) {
 			s.writeError(w, http.StatusNotFound, "Script not found")
 			return

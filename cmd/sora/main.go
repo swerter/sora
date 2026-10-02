@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -399,10 +400,13 @@ func handleConfigReload(configPath string, currentCfg *config.Config, errorHandl
 		currentCfg.SharedMailboxes = newCfg.SharedMailboxes
 	}
 
-	// 4. Reload sieve settings
-	if len(newCfg.Sieve.EnabledExtensions) > 0 {
-		reloaded = append(reloaded, "sieve.enabled_extensions")
-		currentCfg.Sieve = newCfg.Sieve
+	// 4. The [sieve] section is read once at startup by every consumer (LMTP, the
+	// Admin and User APIs, ManageSieve; max_execution_time at process start), so a
+	// change takes effect on restart. It used to be reported as reloaded, and
+	// whenever the list was non-empty, not only when it changed.
+	if !reflect.DeepEqual(newCfg.Sieve, currentCfg.Sieve) {
+		logger.Info("Config reload: [sieve] changed but requires restart to take effect",
+			"current", currentCfg.Sieve, "new", newCfg.Sieve)
 	}
 
 	// 5. Reload metadata limits

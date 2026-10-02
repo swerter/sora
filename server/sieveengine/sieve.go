@@ -92,6 +92,15 @@ func MaxRedirects() int {
 	return sieve.DefaultOptions().Interp.MaxRedirects
 }
 
+// ValidateScript compiles content against the configured [sieve]
+// enabled_extensions, as delivery will. Every path that stores a script must
+// call it first: a stored script that does not compile is skipped whole at
+// delivery, so every rule in it is silently lost, not just the bad one.
+func ValidateScript(content string, configured []string) error {
+	_, err := CompileScript(content, EffectiveExtensions(configured))
+	return err
+}
+
 // HeaderEdit represents a header modification from editheader extension
 type HeaderEdit struct {
 	Action    string // "add" or "delete"

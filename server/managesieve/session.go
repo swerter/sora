@@ -6,18 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
 	msieve "github.com/migadu/go-managesieve/managesieve"
 	"github.com/migadu/go-managesieve/managesieveserver"
-	"github.com/migadu/go-sieve"
 	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/db"
 	"github.com/migadu/sora/logger"
 	"github.com/migadu/sora/pkg/metrics"
 	"github.com/migadu/sora/server"
+	"github.com/migadu/sora/server/sieveengine"
 )
 
 const ManageSieveMaxLineLength = 8192 // ManageSieve commands can be longer than POP3
@@ -616,15 +615,11 @@ func (s *ManageSieveSession) pinToMasterDB(command string) {
 	release()
 }
 
-// validateSieveScript validates content with go-sieve against the server's
-// enabled extensions, rendering failures as a quoted error string (safe
-// against response splitting even though the error echoes script tokens).
+// validateSieveScript compiles content as delivery will, rendering failures as
+// a quoted error string (safe against response splitting even though the error
+// echoes script tokens).
 func (s *ManageSieveSession) validateSieveScript(content string) error {
-	options := sieve.DefaultOptions()
-	// Configure extensions based on server configuration.
-	// If no extensions are configured, none are supported.
-	options.EnabledExtensions = s.server.supportedExtensions
-	if _, err := sieve.Load(strings.NewReader(content), options); err != nil {
+	if err := sieveengine.ValidateScript(content, s.server.supportedExtensions); err != nil {
 		return &managesieveserver.Error{Message: msieve.Quote("Script validation failed: " + msieve.SanitizeText(err.Error()))}
 	}
 	return nil
