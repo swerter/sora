@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/mail"
+	"slices"
 	"strings"
 	"time"
 
@@ -69,7 +70,9 @@ var DefaultSieveExtensions = msieve.DefaultEnabledExtensions
 func EffectiveExtensions(configured []string) []string {
 	valid, _ := msieve.FilterExtensions(configured)
 	if len(valid) == 0 {
-		return DefaultSieveExtensions
+		// A copy: every server keeps the result as its own, and one sorting or
+		// appending to it in place must not change what the others compile.
+		return slices.Clone(DefaultSieveExtensions)
 	}
 	return valid
 }
@@ -81,9 +84,10 @@ func InvalidExtensions(configured []string) []string {
 }
 
 // MaxRedirects is how many redirect actions one script may execute for one
-// message, the limit CompileScript's options enforce (ManageSieve's
-// MAXREDIRECTS). It is distinct from max_redirect_hops, which bounds how many
-// times a message may be redirected on its way through several servers.
+// message, the limit CompileScript's options enforce (what RFC 5804 §1.7's
+// MAXREDIRECTS capability describes; this ManageSieve does not advertise it).
+// It is distinct from max_redirect_hops, which bounds how many times a message
+// may be redirected on its way through several servers.
 func MaxRedirects() int {
 	return sieve.DefaultOptions().Interp.MaxRedirects
 }
@@ -176,7 +180,8 @@ func NewSieveExecutor(scriptContent string) (Executor, error) {
 }
 
 // NewSieveExecutorWithExtensions creates a new SieveExecutor with the given script content and enabled extensions.
-// If enabledExtensions is nil, all extensions are allowed
+// enabledExtensions is the set a require may name; nil enables none (go-sieve), so
+// callers pass EffectiveExtensions.
 func NewSieveExecutorWithExtensions(scriptContent string, enabledExtensions []string) (Executor, error) {
 	compiled, err := CompileScript(scriptContent, enabledExtensions)
 	if err != nil {

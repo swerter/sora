@@ -2,7 +2,10 @@ package sieveengine
 
 import (
 	"slices"
+	"strings"
 	"testing"
+
+	msieve "github.com/migadu/go-managesieve/managesieve"
 )
 
 // TestEffectiveExtensions pins the one resolution every ingress path and
@@ -30,5 +33,22 @@ func TestEffectiveExtensions(t *testing.T) {
 	}
 	if got := InvalidExtensions([]string{"fileinto", "enotify", "x"}); !slices.Equal(got, []string{"enotify", "x"}) {
 		t.Fatalf("InvalidExtensions = %v", got)
+	}
+}
+
+// TestEveryAdvertisedExtensionCompiles holds go-managesieve's vocabulary (what
+// EffectiveExtensions keeps and the servers advertise) to what go-sieve's
+// require accepts. The two modules are versioned separately; a name added to
+// one before the other would be advertised and then refused.
+func TestEveryAdvertisedExtensionCompiles(t *testing.T) {
+	for _, ext := range msieve.SupportedExtensions {
+		enabled := []string{ext}
+		if ext == "extracttext" {
+			enabled = append(enabled, "variables", "foreverypart") // its require dependencies
+		}
+		script := "require [\"" + strings.Join(enabled, "\", \"") + "\"]; keep;"
+		if _, err := CompileScript(script, enabled); err != nil {
+			t.Errorf("%q is advertised but `require` rejects it: %v", ext, err)
+		}
 	}
 }

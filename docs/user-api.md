@@ -799,8 +799,8 @@ curl -X POST http://localhost:8081/user/filters/spam-filter/activate \
 
 Get the Sieve extensions and limits scripts are compiled against. `extensions` is the
 configured `[sieve] enabled_extensions` set (names the engine does not support are
-dropped), or the default set when none is configured; it is the same list ManageSieve
-advertises. `max_redirects` is how many `redirect` actions one script may execute for a
+dropped), or the default set when none is configured; it is the same list the ManageSieve
+backend advertises (a ManageSieve proxy advertises its own `supported_extensions`). `max_redirects` is how many `redirect` actions one script may execute for a
 message.
 
 **Response:** `200 OK`

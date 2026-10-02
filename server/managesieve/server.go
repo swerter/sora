@@ -31,7 +31,7 @@ import (
 
 // Re-exports of the SIEVE extension vocabulary, which moved to the
 // go-managesieve library with the protocol extraction. Kept as package-level
-// names because sieveengine and configuration validation reference them.
+// names for the ManageSieve proxy and the tests that reference them.
 var (
 	SupportedExtensions      = msieve.SupportedExtensions
 	DefaultEnabledExtensions = msieve.DefaultEnabledExtensions
@@ -177,10 +177,8 @@ func New(appCtx context.Context, name, hostname, addr string, rdb *resilient.Res
 
 	// Resolve the SIEVE extensions exactly as delivery does (the configured names
 	// the engine supports, or the default set), so ManageSieve never accepts a
-	// script that delivery then cannot compile.
-	if invalid := sieveengine.InvalidExtensions(options.SupportedExtensions); len(invalid) > 0 {
-		logger.Warn("ManageSieve: ignoring invalid SIEVE extensions", "name", name, "invalid", invalid, "supported", SupportedExtensions)
-	}
+	// script that delivery then cannot compile. Names that are dropped are
+	// warned about once, at startup, by cmd/sora.
 	options.SupportedExtensions = sieveengine.EffectiveExtensions(options.SupportedExtensions)
 
 	// Validate TLS configuration: tls_use_starttls only makes sense when tls = true

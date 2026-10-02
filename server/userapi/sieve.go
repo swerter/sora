@@ -296,7 +296,7 @@ func (s *Server) handleGetCapabilities(w http.ResponseWriter, _ *http.Request) {
 	capabilities := map[string]any{
 		"implementation":  "Sora Mail Server",
 		"version":         "1.0",
-		"extensions":      sieveengine.EffectiveExtensions(s.sieveExtensions),
+		"extensions":      s.sieveExtensions,
 		"notify_methods":  []string{},
 		"max_redirects":   sieveengine.MaxRedirects(),
 		"max_script_size": maxSieveScriptSize,

@@ -20,6 +20,7 @@ import (
 	"github.com/migadu/sora/pkg/lookupcache"
 	"github.com/migadu/sora/pkg/resilient"
 	"github.com/migadu/sora/server"
+	"github.com/migadu/sora/server/sieveengine"
 	"github.com/migadu/sora/server/uploader"
 	"github.com/migadu/sora/storage"
 )
@@ -195,7 +196,7 @@ func New(rdb *resilient.ResilientDatabase, options ServerOptions) (*Server, erro
 	s := &Server{
 		name:                       options.Name,
 		addr:                       options.Addr,
-		sieveExtensions:            options.SieveExtensions,
+		sieveExtensions:            sieveengine.EffectiveExtensions(options.SieveExtensions),
 		jwtSecret:                  options.JWTSecret,
 		maxConnections:             options.MaxConnections,
 		tokenDuration:              options.TokenDuration,
