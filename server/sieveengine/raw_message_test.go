@@ -4,13 +4,15 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/emersion/go-message"
 )
 
 func TestMessageBody(t *testing.T) {
 	tests := []struct {
 		name string
 		msg  string
-		want *string
+		want *string // nil: no body
 	}{
 		{"CRLF", "Subject: a\r\nFrom: b\r\n\r\nbody\r\n", ptr("body\r\n")},
 		{"bare LF", "Subject: a\nFrom: b\n\nbody\n", ptr("body\n")},
@@ -19,9 +21,9 @@ func TestMessageBody(t *testing.T) {
 		{"blank line inside body is not the separator", "Subject: a\r\n\r\none\r\n\r\ntwo", ptr("one\r\n\r\ntwo")},
 		{"empty body", "Subject: a\r\n\r\n", ptr("")},
 		{"no header block", "\r\nbody", ptr("body")},
-		{"headers only", "Subject: a\r\nFrom: b\r\n", ptr("")},
-		{"no line ending", "Subject: a", ptr("")},
-		{"empty", "", ptr("")},
+		{"headers only", "Subject: a\r\nFrom: b\r\n", nil},
+		{"no line ending", "Subject: a", nil},
+		{"empty", "", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -39,6 +41,79 @@ func TestMessageBody(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// TestHeadersOnlyMessageMatchesNoBodyTest pins RFC 5173 §4: a message that is a
+// header only, with no empty line after it, has no body set at all, and every body
+// test is false, "including those that test for an empty string".
+func TestHeadersOnlyMessageMatchesNoBodyTest(t *testing.T) {
+	ctx := Context{
+		EnvelopeFrom: "sender@example.com",
+		EnvelopeTo:   "recipient@example.com",
+		Header:       map[string][]string{"Subject": {"x"}, "From": {"sender@example.com"}},
+		Message:      []byte("Subject: x\r\nFrom: sender@example.com\r\n"),
+	}
+	for _, script := range []string{
+		`require ["body", "fileinto"]; if body :contains "" { fileinto "Hit"; }`,
+		`require ["body", "fileinto"]; if body :is "" { fileinto "Hit"; }`,
+		`require ["body", "fileinto"]; if body :raw :matches "*" { fileinto "Hit"; }`,
+	} {
+		executor, err := NewSieveExecutorWithExtensions(script, DefaultSieveExtensions)
+		if err != nil {
+			t.Fatalf("compile %q: %v", script, err)
+		}
+		res, err := executor.Evaluate(context.Background(), ctx)
+		if err != nil {
+			t.Fatalf("evaluate %q: %v", script, err)
+		}
+		if res.Action != ActionKeep {
+			t.Errorf("%q matched a headers-only message: got %s", script, res.Action)
+		}
+	}
+}
+
+// rawContext builds a Context exactly as delivery does: both the header map and the
+// raw message come from one parse of the same bytes.
+func rawContext(t *testing.T, raw string) Context {
+	t.Helper()
+	entity, err := message.Read(strings.NewReader(raw))
+	if err != nil && !message.IsUnknownCharset(err) {
+		t.Fatal(err)
+	}
+	return Context{
+		EnvelopeFrom: "sender@example.com",
+		EnvelopeTo:   "recipient@example.com",
+		Header:       entity.Header.Map(),
+		Message:      []byte(raw),
+	}
+}
+
+// TestEvaluateContextParsedLikeDelivery covers the Header/Message coupling the body
+// test relies on (the top-level Content-Type from the map, the parts from the bytes)
+// with a header map derived from the message as LMTP and the Admin API derive it,
+// for the shapes that only a real parse gets right: a folded Content-Type and a
+// bare-LF multipart.
+func TestEvaluateContextParsedLikeDelivery(t *testing.T) {
+	folded := "From: sender@example.com\r\nSubject: s\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed;\r\n\tboundary=\"b\"\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain\r\n\r\ninvoice 4711\r\n--b--\r\n"
+	bareLF := "From: sender@example.com\nSubject: s\nMIME-Version: 1.0\n" +
+		"Content-Type: multipart/mixed; boundary=\"b\"\n\n" +
+		"--b\nContent-Type: text/plain\n\ninvoice 4711\n--b--\n"
+	script := `require ["body", "fileinto"]; if body :contains "invoice 4711" { fileinto "Hit"; }`
+	executor, err := NewSieveExecutorWithExtensions(script, DefaultSieveExtensions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string]string{"folded Content-Type": folded, "bare LF": bareLF} {
+		res, err := executor.Evaluate(context.Background(), rawContext(t, raw))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if res.Action != ActionFileInto {
+			t.Errorf("%s: body text of the part not matched (got %s)", name, res.Action)
+		}
+	}
+}
 
 // TestEvaluateSeesRawMessage checks that the body test walks the MIME structure of
 // Context.Message and that the size test measures all of it.

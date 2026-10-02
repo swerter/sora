@@ -99,10 +99,12 @@ type Context struct {
 	// Content-Type and Content-Transfer-Encoding from here and the body from Message,
 	// so the two must describe the same bytes.
 	Header map[string][]string
-	// Message is the complete raw message as it will be stored: header block, blank
-	// line, and the body still MIME-structured and transfer-encoded. The body test
-	// (RFC 5173) walks the MIME parts itself and the size test (RFC 5228 §5.9) measures
-	// the whole message, so this must not be the extracted search text.
+	// Message is the complete raw message as received, after the Received and
+	// Delivered-To headers delivery stamps and before any header edits this evaluation
+	// makes: header block, blank line, and the body still MIME-structured and
+	// transfer-encoded. The body test (RFC 5173) walks the MIME parts itself and the
+	// size test (RFC 5228 §5.9) measures the whole message, so this must not be the
+	// extracted search text.
 	Message []byte
 }
 
@@ -516,16 +518,17 @@ func (m *SieveMessage) BodyRaw() ([]byte, bool, error) {
 	return m.Body, m.Body != nil, nil
 }
 
-// messageBody returns the octets after the blank line that ends msg's header block.
-// A message with no blank line has no body; it is reported as an empty one, so body
-// tests see "" rather than no body at all (LMTP accepts such a message with a
-// warning, and an empty body is what delivery saw for it before). Lines may end in
-// CRLF or bare LF, and the two may be mixed.
+// messageBody returns the octets after the blank line that ends msg's header block,
+// or nil when there is no blank line. RFC 5173 §4: "If a message consists of a header
+// only, not followed by an empty line, then that set is empty and all "body" tests
+// return false, including those that test for an empty string." The engine reports
+// nil as no body, which is what makes every body test false. Lines may end in CRLF
+// or bare LF, and the two may be mixed.
 func messageBody(msg []byte) []byte {
 	for i := 0; i < len(msg); {
 		n := bytes.IndexByte(msg[i:], '\n')
 		if n < 0 {
-			break
+			return nil
 		}
 		line := msg[i : i+n]
 		i += n + 1
@@ -533,7 +536,7 @@ func messageBody(msg []byte) []byte {
 			return msg[i:]
 		}
 	}
-	return []byte{}
+	return nil
 }
 
 // ApplyHeaderEdits applies header modifications to raw message bytes (RFC 5293)
