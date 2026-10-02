@@ -501,12 +501,15 @@ func (i *Importer) Run() error {
 
 	if i.options.DryRun {
 		logger.Info("DRY RUN: Analyzing what would be imported...")
-		return i.performDryRun()
+		err := i.performDryRun()
+		i.printSieveOutcome()
+		return err
 	}
 
 	// Only proceed with import if we have messages
 	if totalCount == 0 {
 		logger.Info("No messages to import")
+		i.printSieveOutcome()
 		return nil
 	}
 
@@ -651,8 +654,10 @@ func (i *Importer) importSieveScript() error {
 
 	if i.options.DryRun {
 		if compileErr != nil {
+			i.sieveOutcome = fmt.Sprintf("would be stored but left INACTIVE: it does not compile: %v", compileErr)
 			logger.Warn("DRY RUN: Sieve script does not compile; it would be stored but left inactive", "path", i.options.SievePath, "error", compileErr)
 		} else {
+			i.sieveOutcome = "would be imported and activated"
 			logger.Info("DRY RUN: Would import and activate Sieve script", "path", i.options.SievePath)
 		}
 		return nil
@@ -672,23 +677,40 @@ func (i *Importer) importSieveScript() error {
 	}
 	user := server.NewUser(address, accountID)
 
-	// Check if user already has an active script
-	existingScript, err := i.rdb.GetActiveScriptWithRetry(i.ctx, user.AccountID())
-	if err != nil && err != consts.ErrDBNotFound {
-		return fmt.Errorf("failed to check for existing active script: %w", err)
-	}
-
 	scriptName := "imported"
 	if compileErr != nil {
 		scriptName = "imported-invalid"
-	} else if existingScript != nil {
-		logger.Info("User already has an active Sieve script - it will be replaced", "name", existingScript.Name)
-		scriptName = existingScript.Name
+	} else {
+		// A script that compiles replaces the active one, if any, by name.
+		existingScript, err := i.rdb.GetActiveScriptWithRetry(i.ctx, user.AccountID())
+		if err != nil && err != consts.ErrDBNotFound {
+			return fmt.Errorf("failed to check for existing active script: %w", err)
+		}
+		if existingScript != nil {
+			logger.Info("User already has an active Sieve script - it will be replaced", "name", existingScript.Name)
+			scriptName = existingScript.Name
+		}
 	}
 
 	// Create or update the script
 	var script *db.SieveScript
 	existingByName, err := i.rdb.GetScriptByNameWithRetry(i.ctx, scriptName, user.AccountID())
+	if compileErr != nil && err == nil {
+		// An earlier run stored this name. If it compiles now, the user fixed it
+		// since; it is theirs and is kept. If it is still broken, it is
+		// deactivated before its content is replaced, so nothing between the
+		// two steps can leave broken content active.
+		if sieveengine.ValidateScript(existingByName.Script, i.options.SieveExtensions) == nil {
+			i.sieveOutcome = fmt.Sprintf("not stored: %q from an earlier import was fixed by the user and is kept; the file still does not compile: %v", scriptName, compileErr)
+			logger.Warn("Sieve script does not compile; an earlier import's script of that name was fixed by the user and is kept", "name", scriptName, "user", i.email, "error", compileErr)
+			return nil
+		}
+		if existingByName.Active {
+			if err := i.rdb.SetScriptActiveWithRetry(i.ctx, existingByName.ID, user.AccountID(), false); err != nil {
+				return fmt.Errorf("failed to deactivate Sieve script: %w", err)
+			}
+		}
+	}
 	switch err {
 	case nil:
 		// Script with this name exists, update it
@@ -709,10 +731,7 @@ func (i *Importer) importSieveScript() error {
 	}
 
 	if compileErr != nil {
-		// Never active, whatever a previous run or operator did with the name.
-		if err := i.rdb.SetScriptActiveWithRetry(i.ctx, script.ID, user.AccountID(), false); err != nil {
-			return fmt.Errorf("failed to deactivate Sieve script: %w", err)
-		}
+		// A new row is inactive; an existing one was deactivated above.
 		i.sieveOutcome = fmt.Sprintf("stored as %q but left INACTIVE: it does not compile: %v", scriptName, compileErr)
 		logger.Warn("Sieve script does not compile; stored but left inactive", "name", scriptName, "user", i.email, "error", compileErr)
 		return nil
@@ -950,6 +969,14 @@ func formatImportSize(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
+// printSieveOutcome says what became of --sieve-path, on every path that
+// ends an import, not only the one that prints the full summary.
+func (i *Importer) printSieveOutcome() {
+	if i.sieveOutcome != "" {
+		fmt.Printf("  Sieve script:      %s\n", i.sieveOutcome)
+	}
+}
+
 // printSummary prints a summary of the import process.
 func (i *Importer) printSummary() error {
 	duration := time.Since(i.startTime)
@@ -958,9 +985,7 @@ func (i *Importer) printSummary() error {
 	fmt.Printf("  Imported:          %d\n", i.importedMessages)
 	fmt.Printf("  Skipped:           %d\n", i.skippedMessages)
 	fmt.Printf("  Failed:            %d\n", i.failedMessages)
-	if i.sieveOutcome != "" {
-		fmt.Printf("  Sieve script:      %s\n", i.sieveOutcome)
-	}
+	i.printSieveOutcome()
 	fmt.Printf("  Duration:          %s\n", duration.Round(time.Second))
 	if i.importedMessages > 0 {
 		rate := float64(i.importedMessages) / duration.Seconds()
@@ -2472,6 +2497,7 @@ func (i *Importer) processPathsFile(cleanPath string, filesToProcess chan<- file
 func (i *Importer) importMessages() error {
 	if i.totalMessages == 0 {
 		logger.Info("No messages to import")
+		i.printSieveOutcome()
 		return nil
 	}
 

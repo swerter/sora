@@ -73,6 +73,7 @@ func TestImportSieveScript_LeavesBrokenScriptInactive(t *testing.T) {
 	})
 
 	t.Run("broken script is stored inactive and the working one stays active", func(t *testing.T) {
+		runImport(t, good, nil) // the state this subtest needs, so it stands alone
 		runImport(t, broken, nil)
 		active, err := rdb.GetActiveScriptWithRetry(ctx, accountID)
 		if err != nil {
@@ -87,6 +88,31 @@ func TestImportSieveScript_LeavesBrokenScriptInactive(t *testing.T) {
 		}
 		if stored.Active || stored.Script != broken {
 			t.Fatalf("stored active=%v content=%q, want inactive with the imported content", stored.Active, stored.Script)
+		}
+	})
+
+	t.Run("a re-run never overwrites a script the user has fixed", func(t *testing.T) {
+		runImport(t, broken, nil)
+		stored, err := rdb.GetScriptByNameWithRetry(ctx, "imported-invalid", accountID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The user fixes it in place and makes it their active script.
+		fixed := "require [\"fileinto\"];\nif header :contains \"subject\" \"fixed\" { fileinto \"Fixed\"; }\n"
+		if _, err := rdb.UpdateScriptWithRetry(ctx, stored.ID, accountID, "imported-invalid", fixed); err != nil {
+			t.Fatal(err)
+		}
+		if err := rdb.SetScriptActiveWithRetry(ctx, stored.ID, accountID, true); err != nil {
+			t.Fatal(err)
+		}
+		// The migration is re-run with the unchanged broken file.
+		runImport(t, broken, nil)
+		active, err := rdb.GetActiveScriptWithRetry(ctx, accountID)
+		if err != nil {
+			t.Fatalf("the user's fixed script lost its active state: %v", err)
+		}
+		if active.Name != "imported-invalid" || active.Script != fixed {
+			t.Fatalf("the user's fixed script was overwritten: active=%q content=%q", active.Name, active.Script)
 		}
 	})
 

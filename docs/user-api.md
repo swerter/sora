@@ -795,7 +795,7 @@ Set a filter script as the active script. Only one script can be active at a tim
 
 **Errors:**
 - `400 Bad Request` - The stored script no longer compiles against the current
-  extensions (it may predate a configuration change); it is left inactive
+  extensions (it may predate a configuration change); its active state is not changed
 - `404 Not Found` - No script of that name
 
 **Example:**

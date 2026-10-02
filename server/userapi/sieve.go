@@ -1,15 +1,14 @@
 package userapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 
-	"github.com/migadu/sora/logger"
-
-	"context"
 	"github.com/migadu/sora/consts"
+	"github.com/migadu/sora/logger"
 	"github.com/migadu/sora/server/sieveengine"
 )
 
@@ -268,8 +267,9 @@ func (s *Server) handleActivateFilter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Activate script
-	if err := s.rdb.ActivateScriptWithRetry(ctx, name, accountID); err != nil {
+	// Activate the row that was validated (by id, on the master), not a
+	// by-name lookup that may hit a lagging replica.
+	if err := s.rdb.SetScriptActiveWithRetry(ctx, script.ID, accountID, true); err != nil {
 		if errors.Is(err, consts.ErrDBNotFound) {
 			s.writeError(w, http.StatusNotFound, "Script not found")
 			return

@@ -9,7 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -400,13 +400,13 @@ func handleConfigReload(configPath string, currentCfg *config.Config, errorHandl
 		currentCfg.SharedMailboxes = newCfg.SharedMailboxes
 	}
 
-	// 4. sieve.enabled_extensions is read once at startup by every consumer (LMTP,
-	// the Admin and User APIs, ManageSieve), so a change takes effect on restart.
-	// It used to be reported as reloaded, and whenever the list was non-empty, not
-	// only when it changed.
-	if !slices.Equal(newCfg.Sieve.EnabledExtensions, currentCfg.Sieve.EnabledExtensions) {
-		logger.Info("Config reload: sieve.enabled_extensions changed but requires restart to take effect",
-			"current", currentCfg.Sieve.EnabledExtensions, "new", newCfg.Sieve.EnabledExtensions)
+	// 4. The [sieve] section is read once at startup by every consumer (LMTP, the
+	// Admin and User APIs, ManageSieve; max_execution_time at process start), so a
+	// change takes effect on restart. It used to be reported as reloaded, and
+	// whenever the list was non-empty, not only when it changed.
+	if !reflect.DeepEqual(newCfg.Sieve, currentCfg.Sieve) {
+		logger.Info("Config reload: [sieve] changed but requires restart to take effect",
+			"current", currentCfg.Sieve, "new", newCfg.Sieve)
 	}
 
 	// 5. Reload metadata limits
