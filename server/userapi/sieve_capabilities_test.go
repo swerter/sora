@@ -50,6 +50,13 @@ func TestGetCapabilitiesReportsTheCompiledSet(t *testing.T) {
 		}
 	})
 
+	t.Run("all names unknown falls back to the default set, as ManageSieve does", func(t *testing.T) {
+		got := capabilities(t, []string{"Fileinto", "vacation "})
+		if !slices.Equal(got, sieveengine.DefaultSieveExtensions) {
+			t.Fatalf("got %v, want the default set", got)
+		}
+	})
+
 	t.Run("configured set", func(t *testing.T) {
 		// A name the engine does not know is dropped, as ManageSieve drops it.
 		configured := []string{"fileinto", "vacation", "editheader", "enotify"}

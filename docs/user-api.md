@@ -798,9 +798,10 @@ curl -X POST http://localhost:8081/user/filters/spam-filter/activate \
 **Endpoint:** `GET /user/filters/capabilities`
 
 Get the Sieve extensions and limits scripts are compiled against. `extensions` is the
-configured `[sieve] enabled_extensions` set, or the default set when none is configured;
-it is the same list ManageSieve advertises. `max_redirects` is `[servers.limits]
-max_redirect_hops` (`0` means unlimited).
+configured `[sieve] enabled_extensions` set (names the engine does not support are
+dropped), or the default set when none is configured; it is the same list ManageSieve
+advertises. `max_redirects` is how many `redirect` actions one script may execute for a
+message.
 
 **Response:** `200 OK`
 ```json
@@ -831,7 +832,7 @@ max_redirect_hops` (`0` means unlimited).
     "extracttext"
   ],
   "notify_methods": [],
-  "max_redirects": 2,
+  "max_redirects": 5,
   "max_script_size": 65536
 }
 ```

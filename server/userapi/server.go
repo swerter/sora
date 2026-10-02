@@ -50,7 +50,6 @@ type Server struct {
 	tlsVerify                  bool
 	proxyReader                *server.ProxyProtocolReader
 	sieveExtensions            []string
-	maxRedirectHops            int
 }
 
 // ServerOptions holds configuration options for the HTTP Mail API server
@@ -84,9 +83,6 @@ type ServerOptions struct {
 	// default set), the one delivery compiles a user's script with. The capabilities
 	// endpoint reports it, so a client offers only rules that will run.
 	SieveExtensions []string
-	// MaxRedirectHops is [servers.limits] max_redirect_hops, the redirect limit
-	// delivery enforces; reported by the capabilities endpoint. 0 is unlimited.
-	MaxRedirectHops int
 }
 
 // minJWTSecretLength is the minimum accepted JWT signing secret length. RFC 7518
@@ -200,7 +196,6 @@ func New(rdb *resilient.ResilientDatabase, options ServerOptions) (*Server, erro
 		name:                       options.Name,
 		addr:                       options.Addr,
 		sieveExtensions:            options.SieveExtensions,
-		maxRedirectHops:            options.MaxRedirectHops,
 		jwtSecret:                  options.JWTSecret,
 		maxConnections:             options.MaxConnections,
 		tokenDuration:              options.TokenDuration,

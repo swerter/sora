@@ -451,6 +451,10 @@ func loadAndValidateConfig(configPath string, cfg *config.Config, errorHandler *
 	} else {
 		logger.Info("Loaded configuration", "path", configPath)
 	}
+	if invalid := sieveengine.InvalidExtensions(cfg.Sieve.EnabledExtensions); len(invalid) > 0 {
+		logger.Warn("[sieve] enabled_extensions names extensions the engine does not support; they are ignored, and the default set is used if none remain",
+			"invalid", invalid, "effective", sieveengine.EffectiveExtensions(cfg.Sieve.EnabledExtensions))
+	}
 
 	// Get all configured servers
 	allServers := cfg.GetAllServers()
@@ -2416,7 +2420,6 @@ func startDynamicHTTPUserAPIServer(ctx context.Context, deps *serverDependencies
 		ProxyProtocolTrustedProxies: deps.config.Servers.TrustedNetworks,
 		TrustedNetworks:             deps.config.Servers.TrustedNetworks,
 		SieveExtensions:             deps.config.Sieve.EnabledExtensions,
-		MaxRedirectHops:             serverConfig.GetMaxRedirectHops(),
 	}
 
 	srv := mailapi.Start(ctx, deps.resilientDB, options, errChan)

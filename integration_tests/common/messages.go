@@ -64,6 +64,9 @@ type SieveRawMessageCase struct {
 // SieveRawMessageCases is shared by every ingress path, so LMTP and Admin API delivery
 // are held to the same outcome for the same script and message. The PDF is ~150 KB, so
 // the message is over 100K and well under 1M.
+//
+// Case names become test account local parts: no colons or other characters an
+// email address cannot carry.
 func SieveRawMessageCases() []SieveRawMessageCase {
 	invoice := func(to, subject string) string {
 		return MultipartWithPDF(to, subject, "invoice 4711 attached", 150*1024)
@@ -122,6 +125,20 @@ func SieveRawMessageCases() []SieveRawMessageCase {
 		{
 			Name:    "attachment filename via foreverypart",
 			Script:  `require ["mime", "foreverypart", "fileinto"]; foreverypart { if header :mime :param "filename" :matches "Content-Disposition" "*.pdf" { fileinto "Archive"; break; } }`,
+			Message: invoice,
+			Mailbox: "Archive",
+		},
+		{
+			Name:    "attachment presence via exists mime anychild",
+			Script:  `require ["mime", "fileinto"]; if exists :mime :anychild "Content-Disposition" { fileinto "Archive"; }`,
+			Message: invoice,
+			Mailbox: "Archive",
+		},
+		{
+			// extracttext is the one extension with a require dependency (variables
+			// and foreverypart), and the body of the first leaf is what it extracts.
+			Name:    "body text via extracttext in foreverypart",
+			Script:  `require ["foreverypart", "extracttext", "variables", "fileinto"]; foreverypart { extracttext :first 100 "t"; if string :contains "${t}" "invoice 4711" { fileinto "Archive"; break; } }`,
 			Message: invoice,
 			Mailbox: "Archive",
 		},

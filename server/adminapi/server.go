@@ -27,6 +27,7 @@ import (
 	"github.com/migadu/sora/server"
 	"github.com/migadu/sora/server/delivery"
 	"github.com/migadu/sora/server/proxy"
+	"github.com/migadu/sora/server/sieveengine"
 	"github.com/migadu/sora/server/uploader"
 	"github.com/migadu/sora/storage"
 )
@@ -227,7 +228,7 @@ func New(rdb *resilient.ResilientDatabase, options ServerOptions) (*Server, erro
 		redirectRateLimit:  options.RedirectRateLimit,
 		redirectRateWindow: options.RedirectRateWindow,
 		maxRedirectHops:    options.MaxRedirectHops,
-		sieveExtensions:    options.SieveExtensions,
+		sieveExtensions:    sieveengine.EffectiveExtensions(options.SieveExtensions),
 	}
 
 	return s, nil

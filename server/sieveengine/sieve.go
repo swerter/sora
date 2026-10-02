@@ -13,7 +13,6 @@ import (
 	"github.com/migadu/go-sieve"
 	"github.com/migadu/go-sieve/interp"
 	"github.com/migadu/sora/helpers"
-	"github.com/migadu/sora/server/managesieve"
 )
 
 type Action string
@@ -58,20 +57,35 @@ func SetScriptExecutionTimeout(d time.Duration) {
 
 // DefaultSieveExtensions is the safe subset of SIEVE extensions enabled by default.
 // Excludes security-sensitive extensions like editheader.
-// The canonical list is maintained in server/managesieve/capabilities.go
-var DefaultSieveExtensions = managesieve.DefaultEnabledExtensions
+// The canonical list is go-managesieve's (managesieve/extensions.go).
+var DefaultSieveExtensions = msieve.DefaultEnabledExtensions
 
 // EffectiveExtensions resolves a configured [sieve] enabled_extensions list to
-// the set scripts are compiled with and advertised as: the default set when
-// nothing is configured, otherwise the configured names the engine supports,
-// as ManageSieve already filters them. Every ingress path and every
-// capability report must go through here, or one of them drifts.
+// the set scripts are compiled with and advertised as: the configured names
+// the engine supports, or the default set when nothing is configured or
+// nothing configured is supported. Every ingress path, ManageSieve included,
+// and every capability report go through here, so they cannot drift. The
+// dropped names are reported by InvalidExtensions, for a warning at startup.
 func EffectiveExtensions(configured []string) []string {
-	if len(configured) == 0 {
+	valid, _ := msieve.FilterExtensions(configured)
+	if len(valid) == 0 {
 		return DefaultSieveExtensions
 	}
-	valid, _ := msieve.FilterExtensions(configured)
 	return valid
+}
+
+// InvalidExtensions returns the configured names the engine does not support.
+func InvalidExtensions(configured []string) []string {
+	_, invalid := msieve.FilterExtensions(configured)
+	return invalid
+}
+
+// MaxRedirects is how many redirect actions one script may execute for one
+// message, the limit CompileScript's options enforce (ManageSieve's
+// MAXREDIRECTS). It is distinct from max_redirect_hops, which bounds how many
+// times a message may be redirected on its way through several servers.
+func MaxRedirects() int {
+	return sieve.DefaultOptions().Interp.MaxRedirects
 }
 
 // HeaderEdit represents a header modification from editheader extension
@@ -194,7 +208,8 @@ type CompiledScript struct {
 }
 
 // CompileScript parses and compiles script content with the given extensions enabled.
-// If enabledExtensions is nil, all extensions are allowed.
+// enabledExtensions is the set a require may name; nil enables none (go-sieve), so
+// callers pass EffectiveExtensions.
 func CompileScript(scriptContent string, enabledExtensions []string) (*CompiledScript, error) {
 	options := sieve.DefaultOptions()
 	options.EnabledExtensions = enabledExtensions
