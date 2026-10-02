@@ -405,10 +405,12 @@ func (s *LMTPSession) Data(ctx context.Context, r io.Reader) error {
 	metrics.BytesThroughput.WithLabelValues("lmtp", "in").Add(float64(len(fullMessageBytes)))
 	metrics.MessageThroughput.WithLabelValues("lmtp", "received", "success").Inc()
 
-	// Warn if headers are not clearly separated from the body. This might
-	// indicate a malformed email or an email with only headers and no separator.
-	if !bytes.Contains(fullMessageBytes, []byte("\r\n\r\n")) {
-		s.WarnLog("could not find standard header/body separator in message")
+	// Warn if headers are not separated from the body. This might indicate a
+	// malformed email or an email with only headers and no separator; the Sieve
+	// engine then sees no body at all (RFC 5173 §4). Bare-LF messages are accepted
+	// as they are, so a bare-LF blank line counts.
+	if !bytes.Contains(fullMessageBytes, []byte("\r\n\r\n")) && !bytes.Contains(fullMessageBytes, []byte("\n\n")) {
+		s.WarnLog("could not find header/body separator in message")
 	}
 
 	messageContent, err := server.ParseMessage(bytes.NewReader(fullMessageBytes))
@@ -548,7 +550,7 @@ func (s *LMTPSession) Data(ctx context.Context, r io.Reader) error {
 		EnvelopeFrom: s.sender.FullAddress(),
 		EnvelopeTo:   envelopeTo,
 		Header:       messageContent.Header.Map(),
-		Body:         *plaintextBody,
+		Message:      fullMessageBytes,
 	}
 
 	// Always run the default script first as a "before script"

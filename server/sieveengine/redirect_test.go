@@ -39,7 +39,7 @@ func cleanRedirectCtx() Context {
 			"From":    {"sender@example.com"},
 			"To":      {"recipient@example.com"},
 		},
-		Body: "Test message body",
+		Message: bodyOnly("Test message body"),
 	}
 }
 

@@ -17,6 +17,16 @@ import (
 // it through /admin/mail/deliver, and returns the mailbox the message ended up in.
 func deliverWithScript(t *testing.T, server *HTTPAPITestServer, script, marker string) string {
 	t.Helper()
+	return deliverMessageWithScript(t, server, script, marker, func(email string) string {
+		return "From: sender@example.com\r\nTo: " + email + "\r\nSubject: " + marker +
+			"\r\nMessage-ID: <" + marker + "@example.com>\r\n\r\nbody\r\n"
+	})
+}
+
+// deliverMessageWithScript is deliverWithScript delivering the message msg builds for the
+// recipient address.
+func deliverMessageWithScript(t *testing.T, server *HTTPAPITestServer, script, marker string, msg func(email string) string) string {
+	t.Helper()
 	ctx := context.Background()
 
 	email := fmt.Sprintf("apiext-%s@example.com", marker)
@@ -34,11 +44,9 @@ func deliverWithScript(t *testing.T, server *HTTPAPITestServer, script, marker s
 		t.Fatalf("activate sieve script: %v", err)
 	}
 
-	msg := "From: sender@example.com\r\nTo: " + email + "\r\nSubject: " + marker +
-		"\r\nMessage-ID: <" + marker + "@example.com>\r\n\r\nbody\r\n"
 	resp, body := server.makeRequest(t, "POST", "/admin/mail/deliver", map[string]any{
 		"recipients": []string{email},
-		"message":    msg,
+		"message":    msg(email),
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("deliver: %d %s", resp.StatusCode, string(body))
@@ -51,7 +59,7 @@ func deliverWithScript(t *testing.T, server *HTTPAPITestServer, script, marker s
 		SELECT mb.name
 		FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id
 		WHERE m.account_id = $1 AND m.expunged_at IS NULL
-		ORDER BY m.uid DESC LIMIT 1
+		ORDER BY m.id DESC LIMIT 1
 	`, accountID).Scan(&mailboxName)
 	if err != nil {
 		t.Fatalf("delivered message row: %v", err)

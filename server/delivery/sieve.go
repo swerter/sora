@@ -38,7 +38,7 @@ type SieveOutcome struct {
 
 // SieveExecutor interface defines the contract for Sieve script execution.
 type SieveExecutor interface {
-	ExecuteSieve(ctx context.Context, recipient RecipientInfo, messageEntity *message.Entity, plaintextBody *string, fullMessageBytes []byte) (*SieveOutcome, error)
+	ExecuteSieve(ctx context.Context, recipient RecipientInfo, messageEntity *message.Entity, fullMessageBytes []byte) (*SieveOutcome, error)
 }
 
 // VacationOracle implements the sieveengine.VacationOracle interface using the database.
@@ -104,7 +104,7 @@ func (s *StandardSieveExecutor) sieveExtensions() []string {
 // performs the script's non-storage side effects (redirect, vacation) itself; storing
 // the message — including any `fileinto :copy` target — is left to the caller, which
 // must do it from SieveOutcome.MessageBytes.
-func (s *StandardSieveExecutor) ExecuteSieve(ctx context.Context, recipient RecipientInfo, messageEntity *message.Entity, plaintextBody *string, fullMessageBytes []byte) (*SieveOutcome, error) {
+func (s *StandardSieveExecutor) ExecuteSieve(ctx context.Context, recipient RecipientInfo, messageEntity *message.Entity, fullMessageBytes []byte) (*SieveOutcome, error) {
 	// Default to INBOX with the message unmodified
 	outcome := &SieveOutcome{
 		MailboxName:   consts.MailboxInbox,
@@ -122,7 +122,7 @@ func (s *StandardSieveExecutor) ExecuteSieve(ctx context.Context, recipient Reci
 		EnvelopeFrom: envelopeFrom,
 		EnvelopeTo:   recipient.ToAddress.FullAddress(),
 		Header:       messageEntity.Header.Map(),
-		Body:         *plaintextBody,
+		Message:      fullMessageBytes,
 	}
 
 	// Get user's active script

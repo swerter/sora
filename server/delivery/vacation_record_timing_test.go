@@ -71,7 +71,7 @@ func evaluateVacation(t *testing.T, oracle *fakeVacationOracle, sender string) s
 		EnvelopeFrom: sender,
 		EnvelopeTo:   "jane@example.com",
 		Header:       map[string][]string{"From": {sender}, "To": {"jane@example.com"}},
-		Body:         "hello",
+		Message:      []byte("From: " + sender + "\r\nTo: jane@example.com\r\n\r\nhello"),
 	})
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
@@ -159,7 +159,7 @@ func TestVacationSuppressionRecordedOnlyOnSend(t *testing.T) {
 			EnvelopeFrom: "bob@external.com",
 			EnvelopeTo:   owner,
 			Header:       map[string][]string{"From": {"bob@external.com"}, "To": {owner}},
-			Body:         "hello again",
+			Message:      []byte("From: bob@external.com\r\nTo: " + owner + "\r\n\r\nhello again"),
 		})
 		if err != nil {
 			t.Fatalf("evaluate (second): %v", err)

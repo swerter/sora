@@ -95,8 +95,17 @@ type Result struct {
 type Context struct {
 	EnvelopeFrom string
 	EnvelopeTo   string
-	Header       map[string][]string
-	Body         string
+	// Header is the parsed header block of Message. The body test reads the top-level
+	// Content-Type and Content-Transfer-Encoding from here and the body from Message,
+	// so the two must describe the same bytes.
+	Header map[string][]string
+	// Message is the complete raw message as received, after any Received and
+	// Delivered-To headers delivery stamps and before any header edits this evaluation
+	// makes: header block, blank line, and the body still MIME-structured and
+	// transfer-encoded. The body test (RFC 5173) walks the MIME parts itself and the
+	// size test (RFC 5228 §5.9) measures the whole message, so this must not be the
+	// extracted search text. It is never empty: a delivery has at least a header.
+	Message []byte
 }
 
 // VacationOracle defines the methods SievePolicy needs to interact with
@@ -204,6 +213,12 @@ func (c *CompiledScript) NewExecutor(AccountID int64, vacOracle VacationOracle, 
 
 // Evaluate evaluates the Sieve script with the given context
 func (e *SieveExecutor) Evaluate(evalCtx context.Context, ctx Context) (Result, error) {
+	// An empty Message is a caller that did not set it, not a message: it would
+	// make every body test false and every `size :under` true without a word.
+	if len(ctx.Message) == 0 {
+		return Result{}, fmt.Errorf("sieve: Context.Message is empty")
+	}
+
 	// Create envelope and message implementations
 	envelope := &SieveEnvelope{
 		From: ctx.EnvelopeFrom,
@@ -219,8 +234,8 @@ func (e *SieveExecutor) Evaluate(evalCtx context.Context, ctx Context) (Result, 
 
 	message := &SieveMessage{
 		Headers: normalizedHeaders,
-		Body:    []byte(ctx.Body),
-		Size:    len(ctx.Body),
+		Body:    messageBody(ctx.Message),
+		Size:    len(ctx.Message),
 	}
 
 	// Create a per-execution policy to ensure thread safety and isolation.
@@ -507,6 +522,27 @@ func (m *SieveMessage) MessageSize() int {
 
 func (m *SieveMessage) BodyRaw() ([]byte, bool, error) {
 	return m.Body, m.Body != nil, nil
+}
+
+// messageBody returns the octets after the blank line that ends msg's header block,
+// or nil when there is no blank line. RFC 5173 §4: "If a message consists of a header
+// only, not followed by an empty line, then that set is empty and all "body" tests
+// return false, including those that test for an empty string." The engine reports
+// nil as no body, which is what makes every body test false. Lines may end in CRLF
+// or bare LF, and the two may be mixed.
+func messageBody(msg []byte) []byte {
+	for i := 0; i < len(msg); {
+		n := bytes.IndexByte(msg[i:], '\n')
+		if n < 0 {
+			return nil
+		}
+		line := msg[i : i+n]
+		i += n + 1
+		if len(line) == 0 || (len(line) == 1 && line[0] == '\r') {
+			return msg[i:]
+		}
+	}
+	return nil
 }
 
 // ApplyHeaderEdits applies header modifications to raw message bytes (RFC 5293)

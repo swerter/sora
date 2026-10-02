@@ -164,7 +164,7 @@ func TestScriptCacheSharedEntryIsNotBoundToAnAccount(t *testing.T) {
 			EnvelopeFrom: "sender@example.com",
 			EnvelopeTo:   "recipient@example.com",
 			Header:       map[string][]string{"From": {"sender@example.com"}},
-			Body:         "body",
+			Message:      bodyOnly("body"),
 		}); err != nil {
 			t.Fatalf("%s: evaluate: %v", tc.name, err)
 		}
@@ -229,7 +229,7 @@ func evaluateFileintoTarget(compiled *CompiledScript) (string, error) {
 		EnvelopeFrom: "sender@example.com",
 		EnvelopeTo:   "recipient@example.com",
 		Header:       map[string][]string{"From": {"sender@example.com"}},
-		Body:         "body",
+		Message:      bodyOnly("body"),
 	})
 	if err != nil {
 		return "", err

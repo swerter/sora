@@ -45,7 +45,7 @@ if body :raw :matches "*NEEDLE*" {
 			EnvelopeFrom: "sender@example.com",
 			EnvelopeTo:   "recipient@example.com",
 			Header:       map[string][]string{"Subject": {"hi"}},
-			Body:         body,
+			Message:      bodyOnly(body),
 		})
 		if err != nil {
 			t.Fatalf("evaluate: %v", err)
@@ -86,7 +86,7 @@ if header :matches "Subject" "ticket-*" {
 		EnvelopeFrom: "sender@example.com",
 		EnvelopeTo:   "recipient@example.com",
 		Header:       map[string][]string{"Subject": {"ticket-42"}},
-		Body:         "body",
+		Message:      bodyOnly("body"),
 	})
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
