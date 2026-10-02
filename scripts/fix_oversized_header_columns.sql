@@ -37,9 +37,12 @@ BEGIN
 END
 $$;
 
--- 2. List every live row over a bound (the index is partial on expunged_at IS NULL, so
---    expunged rows cannot fail the build). Keep the list in a table: the UPDATE and the
---    verification below reuse it instead of scanning again.
+-- 2. List every row over a bound, expunged ones included. The index is partial on
+--    expunged_at IS NULL, so only live rows can fail the BUILD, but `sora-admin messages
+--    restore` sets expunged_at back to NULL in place (db/restore.go), which would pull an
+--    oversized expunged row into the index later and fail the restore. The scan is a full
+--    heap pass either way. Keep the list in a table: the UPDATE and the verification below
+--    reuse it instead of scanning again.
 SET statement_timeout = 0;
 DROP TABLE IF EXISTS sora_oversized_header_rows;
 CREATE TABLE sora_oversized_header_rows AS
@@ -52,11 +55,10 @@ SELECT id,
        octet_length(to_name_sort)    AS to_name_bytes,
        octet_length(cc_email_sort)   AS cc_email_bytes
 FROM messages
-WHERE expunged_at IS NULL
-  AND (octet_length(subject) > 600 OR octet_length(subject_sort) > 600
-       OR octet_length(from_email_sort) > 200 OR octet_length(from_name_sort) > 200
-       OR octet_length(to_email_sort) > 200 OR octet_length(to_name_sort) > 200
-       OR octet_length(cc_email_sort) > 200);
+WHERE octet_length(subject) > 600 OR octet_length(subject_sort) > 600
+   OR octet_length(from_email_sort) > 200 OR octet_length(from_name_sort) > 200
+   OR octet_length(to_email_sort) > 200 OR octet_length(to_name_sort) > 200
+   OR octet_length(cc_email_sort) > 200;
 SELECT count(*) AS rows_to_fix,
        count(*) FILTER (WHERE subject_bytes > 600 OR subject_sort_bytes > 600) AS long_subject,
        count(*) FILTER (WHERE from_email_bytes > 200 OR from_name_bytes > 200 OR to_email_bytes > 200
