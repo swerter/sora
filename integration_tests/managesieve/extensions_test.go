@@ -6,20 +6,33 @@ import (
 	"bufio"
 	"context"
 	"net"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/migadu/sora/integration_tests/common"
 	"github.com/migadu/sora/server/managesieve"
+	"github.com/migadu/sora/server/sieveengine"
 )
 
 func TestManageSieveConfigurableExtensions(t *testing.T) {
 	common.SkipIfDatabaseUnavailable(t)
 
-	// Test 1: No extensions configured - should advertise nothing
+	// Test 1: No extensions configured - advertises the default set, the one
+	// delivery compiles scripts with (sieveengine.EffectiveExtensions).
 	t.Run("NoExtensions", func(t *testing.T) {
-		testExtensions(t, []string{}, []string{})
+		testExtensions(t, []string{}, sieveengine.DefaultSieveExtensions)
+	})
+
+	// Names the engine does not support are dropped; a list with nothing
+	// supported advertises the default set rather than nothing.
+	t.Run("UnsupportedNamesDropped", func(t *testing.T) {
+		testExtensions(t, []string{"fileinto", "enotify", "vacation"}, []string{"fileinto", "vacation"})
+	})
+	t.Run("NothingSupportedFallsBack", func(t *testing.T) {
+		testExtensions(t, []string{"Fileinto", "vacation "}, sieveengine.DefaultSieveExtensions)
 	})
 
 	// Test 2: Single extension
@@ -119,19 +132,27 @@ func testExtensions(t *testing.T, configuredExtensions []string, expectedExtensi
 
 	t.Logf("SIEVE capability line: %s", sieveLine)
 
-	// Verify each expected extension is listed
-	for _, ext := range expectedExtensions {
-		if !strings.Contains(sieveLine, ext) {
-			t.Errorf("Extension '%s' should be listed in SIEVE capabilities, but was not found in: %s", ext, sieveLine)
-		}
+	// The advertised list must be exactly the expected set: nothing missing,
+	// nothing extra (a client builds rules from it, and the backend refuses
+	// what is not in it).
+	// The capability response is one line; the extensions are the quoted
+	// string after "SIEVE".
+	const key = `"SIEVE" "`
+	start := strings.Index(sieveLine, key)
+	if start < 0 {
+		t.Fatalf("no SIEVE value in: %s", sieveLine)
 	}
-
-	// Verify no unexpected extensions are present (if we expect empty, check that SIEVE line is empty)
-	if len(expectedExtensions) == 0 {
-		// Should be something like: "SIEVE" ""
-		if !strings.Contains(sieveLine, `"SIEVE" ""`) && !strings.Contains(sieveLine, `"SIEVE"  ""`) {
-			t.Logf("Note: Empty extensions should result in empty SIEVE capability, got: %s", sieveLine)
-		}
+	rest := sieveLine[start+len(key):]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		t.Fatalf("unterminated SIEVE value in: %s", sieveLine)
+	}
+	advertised := strings.Fields(rest[:end])
+	want := append([]string(nil), expectedExtensions...)
+	sort.Strings(advertised)
+	sort.Strings(want)
+	if !slices.Equal(advertised, want) {
+		t.Fatalf("SIEVE capability advertises %v, want %v (line: %s)", advertised, want, strings.TrimSpace(sieveLine))
 	}
 
 	t.Logf("Successfully verified %d extensions: %v", len(expectedExtensions), expectedExtensions)

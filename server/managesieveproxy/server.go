@@ -22,6 +22,7 @@ import (
 	"github.com/migadu/sora/server"
 	"github.com/migadu/sora/server/idgen"
 	"github.com/migadu/sora/server/proxy"
+	"github.com/migadu/sora/server/sieveengine"
 )
 
 // Server represents a ManageSieve proxy server.
@@ -212,12 +213,13 @@ func New(appCtx context.Context, rdb *resilient.ResilientDatabase, hostname stri
 		logger.Debug("ManageSieve Proxy: Failed to resolve addresses", "name", opts.Name, "error", err)
 	}
 
-	// Filter SIEVE extensions
-	validExts, invalidExts := managesieve.FilterExtensions(opts.SupportedExtensions)
-	if len(invalidExts) > 0 {
-		logger.Warn("ManageSieveProxy: ignoring invalid SIEVE extensions", "name", opts.Name, "invalid", invalidExts, "supported", managesieve.SupportedExtensions)
+	// Resolve the SIEVE extensions as the backend and delivery do (the
+	// configured names the engine supports, or the default set), so the proxy
+	// never advertises what the backend will refuse.
+	if invalid := sieveengine.InvalidExtensions(opts.SupportedExtensions); len(invalid) > 0 {
+		logger.Warn("ManageSieveProxy: ignoring invalid SIEVE extensions", "name", opts.Name, "invalid", invalid, "supported", managesieve.SupportedExtensions)
 	}
-	opts.SupportedExtensions = validExts
+	opts.SupportedExtensions = sieveengine.EffectiveExtensions(opts.SupportedExtensions)
 
 	// Initialize authentication rate limiter with trusted networks
 	authLimiter := server.NewAuthRateLimiterWithTrustedNetworks("SIEVE-PROXY", opts.Name, hostname, opts.AuthRateLimit, opts.TrustedProxies)
@@ -343,13 +345,6 @@ func New(appCtx context.Context, rdb *resilient.ResilientDatabase, hostname stri
 		supportedExtensions:        opts.SupportedExtensions,
 		activeSessions:             make(map[*Session]struct{}),
 		proxyReader:                proxyReader,
-	}
-
-	// Unconfigured, advertise the default set, which is what an unconfigured backend
-	// accepts, not extensions it will refuse.
-	if len(s.supportedExtensions) == 0 {
-		s.supportedExtensions = managesieve.DefaultEnabledExtensions
-		logger.Debug("ManageSieve Proxy: No supported_extensions configured - using the default set", "name", opts.Name, "extensions", managesieve.DefaultEnabledExtensions)
 	}
 
 	// Setup TLS config: Support both implicit TLS and STARTTLS

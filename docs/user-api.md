@@ -797,19 +797,42 @@ curl -X POST http://localhost:8081/user/filters/spam-filter/activate \
 
 **Endpoint:** `GET /user/filters/capabilities`
 
-Get supported Sieve extensions and capabilities.
+Get the Sieve extensions and limits scripts are compiled against. `extensions` is the
+configured `[sieve] enabled_extensions` set (names the engine does not support are
+dropped), or the default set when none is configured; it is the same list the ManageSieve
+backend advertises (a ManageSieve proxy advertises its own `supported_extensions`). `max_redirects` is how many `redirect` actions one script may execute for a
+message.
 
 **Response:** `200 OK`
 ```json
 {
+  "implementation": "Sora Mail Server",
+  "version": "1.0",
   "extensions": [
     "fileinto",
-    "vacation",
-    "regex",
     "envelope",
+    "encoded-character",
+    "comparator-i;octet",
+    "comparator-i;ascii-casemap",
+    "comparator-i;ascii-numeric",
+    "comparator-i;unicode-casemap",
+    "imap4flags",
+    "variables",
+    "relational",
+    "vacation",
+    "copy",
+    "regex",
+    "date",
+    "index",
+    "mailbox",
+    "subaddress",
     "body",
-    "imap4flags"
+    "mime",
+    "foreverypart",
+    "extracttext"
   ],
+  "notify_methods": [],
+  "max_redirects": 5,
   "max_script_size": 65536
 }
 ```

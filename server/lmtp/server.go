@@ -282,10 +282,7 @@ func New(appCtx context.Context, name, hostname, addr string, s3 *storage.S3Stor
 
 	// Sieve extensions for both the default script and the users' scripts (or the
 	// default set if not configured)
-	backend.sieveExtensions = options.SieveExtensions
-	if len(backend.sieveExtensions) == 0 {
-		backend.sieveExtensions = sieveengine.DefaultSieveExtensions
-	}
+	backend.sieveExtensions = sieveengine.EffectiveExtensions(options.SieveExtensions)
 
 	// Parse and cache the default Sieve script at startup
 	defaultExecutor, err := sieveengine.NewSieveExecutorWithExtensions(defaultSieveScript, backend.sieveExtensions)

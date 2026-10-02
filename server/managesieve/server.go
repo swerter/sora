@@ -25,12 +25,13 @@ import (
 	"github.com/migadu/sora/pkg/resilient"
 	serverPkg "github.com/migadu/sora/server"
 	"github.com/migadu/sora/server/idgen"
+	"github.com/migadu/sora/server/sieveengine"
 	"golang.org/x/crypto/bcrypt"
 )
 
 // Re-exports of the SIEVE extension vocabulary, which moved to the
 // go-managesieve library with the protocol extraction. Kept as package-level
-// names because sieveengine and configuration validation reference them.
+// names for the ManageSieve proxy and the tests that reference them.
 var (
 	SupportedExtensions      = msieve.SupportedExtensions
 	DefaultEnabledExtensions = msieve.DefaultEnabledExtensions
@@ -174,12 +175,11 @@ func New(appCtx context.Context, name, hostname, addr string, rdb *resilient.Res
 		}
 	}
 
-	// Filter SIEVE extensions
-	validExts, invalidExts := FilterExtensions(options.SupportedExtensions)
-	if len(invalidExts) > 0 {
-		logger.Warn("ManageSieve: ignoring invalid SIEVE extensions", "name", name, "invalid", invalidExts, "supported", SupportedExtensions)
-	}
-	options.SupportedExtensions = validExts
+	// Resolve the SIEVE extensions exactly as delivery does (the configured names
+	// the engine supports, or the default set), so ManageSieve never accepts a
+	// script that delivery then cannot compile. Names that are dropped are
+	// warned about once, at startup, by cmd/sora.
+	options.SupportedExtensions = sieveengine.EffectiveExtensions(options.SupportedExtensions)
 
 	// Validate TLS configuration: tls_use_starttls only makes sense when tls = true
 	if !options.TLS && options.TLSUseStartTLS {
@@ -299,14 +299,6 @@ func New(appCtx context.Context, name, hostname, addr string, rdb *resilient.Res
 	// Apply operator overrides for per-command execution timeouts
 	if len(options.CommandTimeoutOverrides) > 0 {
 		serverInstance.commandTimeouts.ApplyOverrides(options.CommandTimeoutOverrides)
-	}
-
-	// Unconfigured, offer the default set: the one delivery compiles scripts with
-	// (sieveengine.DefaultSieveExtensions). Offering more would let a user activate
-	// a script that delivery cannot compile, and then skips without a word.
-	if len(serverInstance.supportedExtensions) == 0 {
-		serverInstance.supportedExtensions = DefaultEnabledExtensions
-		logger.Debug("ManageSieve: No supported_extensions configured - using the default set", "name", name, "extensions", DefaultEnabledExtensions)
 	}
 
 	// Create connection limiter with trusted networks from server configuration

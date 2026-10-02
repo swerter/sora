@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/migadu/sora/pkg/resilient"
+	"github.com/migadu/sora/server/sieveengine"
 )
 
 // TestDefaultExtensions verifies that when no supported_extensions are configured,
@@ -62,6 +63,9 @@ func TestDefaultExtensions(t *testing.T) {
 		"comparator-i;ascii-numeric",
 		"comparator-i;unicode-casemap",
 		"body",
+		"mime",
+		"foreverypart",
+		"extracttext",
 	}
 
 	for _, expectedExt := range configExampleExtensions {
@@ -132,5 +136,28 @@ func TestEmptyExtensionsArray(t *testing.T) {
 
 	if !slices.Equal(server.supportedExtensions, DefaultEnabledExtensions) {
 		t.Errorf("default extensions for empty array = %v, want %v", server.supportedExtensions, DefaultEnabledExtensions)
+	}
+}
+
+// TestManageSieveResolvesExtensionsLikeDelivery holds ManageSieve to the same
+// resolution delivery and the User API use (sieveengine.EffectiveExtensions),
+// for the three shapes a configuration can take.
+func TestManageSieveResolvesExtensionsLikeDelivery(t *testing.T) {
+	for name, configured := range map[string][]string{
+		"nothing configured": nil,
+		"partly supported":   {"fileinto", "enotify", "vacation"},
+		"nothing supported":  {"Fileinto", "vacation "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server, err := New(context.Background(), "test-server", "localhost", ":0",
+				&resilient.ResilientDatabase{}, ManageSieveServerOptions{SupportedExtensions: configured, MaxScriptSize: DefaultMaxScriptSize})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			defer server.Close()
+			if want := sieveengine.EffectiveExtensions(configured); !slices.Equal(server.supportedExtensions, want) {
+				t.Fatalf("ManageSieve advertises %v, delivery compiles with %v", server.supportedExtensions, want)
+			}
+		})
 	}
 }

@@ -85,14 +85,15 @@ type StandardSieveExecutor struct {
 	RedirectRateLimit  int
 	RedirectRateWindow time.Duration
 	MaxRedirectHops    int
-	// SieveExtensions is the configured [sieve] enabled_extensions set. Empty means
-	// the default set, matching how server/lmtp resolves it. Both ingress paths must
-	// compile with the same set or one user script behaves differently per path.
+	// SieveExtensions is the effective extension set, resolved once by the server
+	// that builds the executor (sieveengine.EffectiveExtensions); empty means the
+	// default set. Both ingress paths must compile with the same set or one user
+	// script behaves differently per path.
 	SieveExtensions []string
 }
 
-// sieveExtensions resolves the extension set to compile with, falling back to the
-// default set exactly as server/lmtp does when nothing is configured.
+// sieveExtensions is the set to compile with; the resolution happened once,
+// where the executor was built.
 func (s *StandardSieveExecutor) sieveExtensions() []string {
 	if len(s.SieveExtensions) == 0 {
 		return sieveengine.DefaultSieveExtensions
