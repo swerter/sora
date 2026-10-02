@@ -243,6 +243,13 @@ Examples:
 		os.Exit(1)
 	}
 
+	// A script delivery cannot compile is skipped whole, so refuse it here as
+	// ManageSieve would; this needs no database.
+	if err := sieveengine.ValidateScript(string(scriptContent), globalConfig.Sieve.EnabledExtensions); err != nil {
+		fmt.Printf("Script validation failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	rdb, err := newAdminDatabase(ctx, &globalConfig.Database)
 	if err != nil {
 		fmt.Printf("Failed to connect to database: %v\n", err)
@@ -253,13 +260,6 @@ Examples:
 	accountID, err := rdb.GetAccountIDByEmailWithRetry(ctx, *email)
 	if err != nil {
 		fmt.Printf("Failed to find account: %v\n", err)
-		os.Exit(1)
-	}
-
-	// A script delivery cannot compile is skipped whole, so refuse it here as
-	// ManageSieve would.
-	if err := sieveengine.ValidateScript(string(scriptContent), globalConfig.Sieve.EnabledExtensions); err != nil {
-		fmt.Printf("Script validation failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -378,6 +378,23 @@ Examples:
 	accountID, err := rdb.GetAccountIDByEmailWithRetry(ctx, *email)
 	if err != nil {
 		fmt.Printf("Failed to find account: %v\n", err)
+		os.Exit(1)
+	}
+
+	// A stored script may predate a change to the enabled extensions; one that
+	// delivery cannot compile must not become the active script (ManageSieve
+	// SETACTIVE and the User API check too).
+	script, err := rdb.GetScriptByNameWithRetry(ctx, *name, accountID)
+	if err != nil {
+		if errors.Is(err, consts.ErrDBNotFound) {
+			fmt.Printf("Script '%s' not found for account %s\n", *name, *email)
+		} else {
+			fmt.Printf("Failed to retrieve Sieve script: %v\n", err)
+		}
+		os.Exit(1)
+	}
+	if err := sieveengine.ValidateScript(script.Script, globalConfig.Sieve.EnabledExtensions); err != nil {
+		fmt.Printf("Script '%s' does not compile and was not activated: %v\n", *name, err)
 		os.Exit(1)
 	}
 

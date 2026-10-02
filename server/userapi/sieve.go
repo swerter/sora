@@ -8,6 +8,7 @@ import (
 
 	"github.com/migadu/sora/logger"
 
+	"context"
 	"github.com/migadu/sora/consts"
 	"github.com/migadu/sora/server/sieveengine"
 )
@@ -250,7 +251,9 @@ func (s *Server) handleActivateFilter(w http.ResponseWriter, r *http.Request) {
 	// A stored script may predate a change to the enabled extensions; activating
 	// one delivery cannot run would silently lose every rule in it (ManageSieve
 	// SETACTIVE checks too).
-	script, err := s.rdb.GetScriptByNameWithRetry(ctx, name, accountID)
+	// Read from the master: the script was most likely just PUT, and a replica
+	// may still hold the content being replaced.
+	script, err := s.rdb.GetScriptByNameWithRetry(context.WithValue(ctx, consts.UseMasterDBKey, true), name, accountID)
 	if err != nil {
 		if errors.Is(err, consts.ErrDBNotFound) {
 			s.writeError(w, http.StatusNotFound, "Script not found")

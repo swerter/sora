@@ -132,6 +132,7 @@ func loadAdminConfig(configPath string, cfg *AdminConfig) error {
 	cfg.HTTPAPIAddr = fullCfg.AdminCLI.Addr
 	cfg.HTTPAPIKey = fullCfg.AdminCLI.APIKey
 	cfg.Relay = fullCfg.Relay
+	cfg.Sieve = fullCfg.Sieve
 	// Needed for node_id: it resolves the instance identity this host writes into
 	// pending_uploads.instance_id, and an import must use the same one the server does.
 	cfg.Cluster = fullCfg.Cluster

@@ -141,6 +141,9 @@ type Importer struct {
 	failedPathsMutex sync.Mutex
 	failedPaths      []failedImport
 
+	// sieveOutcome is what became of --sieve-path, for the summary.
+	sieveOutcome string
+
 	// Dovecot keyword mapping: ID -> keyword name
 	dovecotKeywords map[int]string
 	// folderKeywords caches each folder's own dovecot-keywords map by folder directory
@@ -634,13 +637,6 @@ func (i *Importer) importSieveScript() error {
 		return nil
 	}
 
-	if i.options.DryRun {
-		logger.Info("DRY RUN: Would import Sieve script", "path", i.options.SievePath)
-		return nil
-	}
-
-	logger.Info("Importing Sieve script", "path", i.options.SievePath)
-
 	// Read the script content
 	scriptContent, err := os.ReadFile(i.options.SievePath)
 	if err != nil {
@@ -648,9 +644,21 @@ func (i *Importer) importSieveScript() error {
 	}
 
 	// A script delivery cannot compile is skipped whole, so it must not become
-	// the active script. It is still stored, so the user can see and fix it
-	// through ManageSieve, and the mail import goes on.
+	// the active script. It is still stored, under its own name so no working
+	// script is overwritten, for the user to see and fix through ManageSieve,
+	// and the mail import goes on.
 	compileErr := sieveengine.ValidateScript(string(scriptContent), i.options.SieveExtensions)
+
+	if i.options.DryRun {
+		if compileErr != nil {
+			logger.Warn("DRY RUN: Sieve script does not compile; it would be stored but left inactive", "path", i.options.SievePath, "error", compileErr)
+		} else {
+			logger.Info("DRY RUN: Would import and activate Sieve script", "path", i.options.SievePath)
+		}
+		return nil
+	}
+
+	logger.Info("Importing Sieve script", "path", i.options.SievePath)
 
 	// Get user context for database operations
 	address, err := server.NewAddress(i.email)
@@ -671,7 +679,9 @@ func (i *Importer) importSieveScript() error {
 	}
 
 	scriptName := "imported"
-	if existingScript != nil {
+	if compileErr != nil {
+		scriptName = "imported-invalid"
+	} else if existingScript != nil {
 		logger.Info("User already has an active Sieve script - it will be replaced", "name", existingScript.Name)
 		scriptName = existingScript.Name
 	}
@@ -699,12 +709,12 @@ func (i *Importer) importSieveScript() error {
 	}
 
 	if compileErr != nil {
-		// The name may be the previously active script's: deactivate so the
-		// broken content never runs.
+		// Never active, whatever a previous run or operator did with the name.
 		if err := i.rdb.SetScriptActiveWithRetry(i.ctx, script.ID, user.AccountID(), false); err != nil {
 			return fmt.Errorf("failed to deactivate Sieve script: %w", err)
 		}
-		logger.Warn("Sieve script does not compile; imported but left inactive", "name", scriptName, "user", i.email, "error", compileErr)
+		i.sieveOutcome = fmt.Sprintf("stored as %q but left INACTIVE: it does not compile: %v", scriptName, compileErr)
+		logger.Warn("Sieve script does not compile; stored but left inactive", "name", scriptName, "user", i.email, "error", compileErr)
 		return nil
 	}
 
@@ -713,6 +723,7 @@ func (i *Importer) importSieveScript() error {
 		return fmt.Errorf("failed to activate Sieve script: %w", err)
 	}
 
+	i.sieveOutcome = fmt.Sprintf("imported and activated as %q", scriptName)
 	logger.Info("Successfully imported and activated Sieve script", "name", scriptName, "user", i.email)
 	return nil
 }
@@ -947,6 +958,9 @@ func (i *Importer) printSummary() error {
 	fmt.Printf("  Imported:          %d\n", i.importedMessages)
 	fmt.Printf("  Skipped:           %d\n", i.skippedMessages)
 	fmt.Printf("  Failed:            %d\n", i.failedMessages)
+	if i.sieveOutcome != "" {
+		fmt.Printf("  Sieve script:      %s\n", i.sieveOutcome)
+	}
 	fmt.Printf("  Duration:          %s\n", duration.Round(time.Second))
 	if i.importedMessages > 0 {
 		rate := float64(i.importedMessages) / duration.Seconds()
