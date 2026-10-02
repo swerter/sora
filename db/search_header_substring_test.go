@@ -123,6 +123,19 @@ func TestSortColumnsAreBounded(t *testing.T) {
 	assert.Equal(t, "bob@example.org", toEmail)
 	assert.Equal(t, strings.ToLower(longAddr)[:helpers.MaxSortColumnBytes], fromEmail, "truncation keeps the prefix")
 
+	// scripts/fix_oversized_header_columns.sql bounds EXISTING rows before the index is built;
+	// it must apply the same numbers, or the build fails on a row the application would
+	// have bounded.
+	script, err := os.ReadFile("../scripts/fix_oversized_header_columns.sql")
+	require.NoError(t, err)
+	want := map[string]int{"subject": helpers.MaxSubjectBytes, "subject_sort": helpers.MaxSubjectBytes,
+		"from_email_sort": helpers.MaxSortColumnBytes, "from_name_sort": helpers.MaxSortColumnBytes,
+		"to_email_sort": helpers.MaxSortColumnBytes, "to_name_sort": helpers.MaxSortColumnBytes, "cc_email_sort": helpers.MaxSortColumnBytes}
+	for col, n := range want {
+		assert.Contains(t, string(script), fmt.Sprintf("sora_trunc_utf8(m.%s, %d)", col, n), "the fix script must truncate %s to %d bytes like the application", col, n)
+		assert.Contains(t, string(script), fmt.Sprintf("octet_length(%s) > %d", col, n), "the fix script must select %s rows over %d bytes", col, n)
+	}
+
 	// The sum the index relies on: worst-case text in one tuple stays under the btree limit
 	// with room for the fixed columns and headers.
 	const btreeTupleLimit, fixedColumnsAndHeaders = 2704, 130

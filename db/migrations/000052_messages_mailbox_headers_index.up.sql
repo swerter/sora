@@ -30,10 +30,10 @@
 --                                OR octet_length(to_email_sort) > 200 OR octet_length(to_name_sort) > 200
 --                                OR octet_length(cc_email_sort) > 200) AS long_sort
 --        FROM messages WHERE expunged_at IS NULL;
---      and for each offending row UPDATE the column to its UTF-8-safe prefix (left() on a
---      text value is character-based: use substring(convert_from(substring(convert_to(col,
---      'UTF8') from 1 for N), 'UTF8') ...) or fix from the application). CREATE INDEX fails
---      on the first oversized row, so this must be complete first.
+--      then truncate those rows with scripts/fix_oversized_header_columns.sql (one full scan
+--      into a work table, UTF-8-safe byte truncation of exactly those rows, verification).
+--      CREATE INDEX fails on the first oversized row, after doing all the sort work, so this
+--      must be complete first; production had such rows (3360-byte tuple, 2026-10-02).
 --   2. CREATE INDEX CONCURRENTLY idx_messages_mailbox_headers ON messages (mailbox_id)
 --        INCLUDE (id, uid, content_hash, created_modseq, expunged_modseq, internal_date, sent_date, size,
 --                 subject, subject_sort, from_email_sort, from_name_sort, to_email_sort, to_name_sort, cc_email_sort)
