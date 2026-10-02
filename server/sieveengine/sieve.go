@@ -99,12 +99,12 @@ type Context struct {
 	// Content-Type and Content-Transfer-Encoding from here and the body from Message,
 	// so the two must describe the same bytes.
 	Header map[string][]string
-	// Message is the complete raw message as received, after the Received and
+	// Message is the complete raw message as received, after any Received and
 	// Delivered-To headers delivery stamps and before any header edits this evaluation
 	// makes: header block, blank line, and the body still MIME-structured and
 	// transfer-encoded. The body test (RFC 5173) walks the MIME parts itself and the
 	// size test (RFC 5228 §5.9) measures the whole message, so this must not be the
-	// extracted search text.
+	// extracted search text. It is never empty: a delivery has at least a header.
 	Message []byte
 }
 
@@ -213,6 +213,12 @@ func (c *CompiledScript) NewExecutor(AccountID int64, vacOracle VacationOracle, 
 
 // Evaluate evaluates the Sieve script with the given context
 func (e *SieveExecutor) Evaluate(evalCtx context.Context, ctx Context) (Result, error) {
+	// An empty Message is a caller that did not set it, not a message: it would
+	// make every body test false and every `size :under` true without a word.
+	if len(ctx.Message) == 0 {
+		return Result{}, fmt.Errorf("sieve: Context.Message is empty")
+	}
+
 	// Create envelope and message implementations
 	envelope := &SieveEnvelope{
 		From: ctx.EnvelopeFrom,

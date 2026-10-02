@@ -59,7 +59,7 @@ func deliverMessageWithScript(t *testing.T, server *HTTPAPITestServer, script, m
 		SELECT mb.name
 		FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id
 		WHERE m.account_id = $1 AND m.expunged_at IS NULL
-		ORDER BY m.uid DESC LIMIT 1
+		ORDER BY m.id DESC LIMIT 1
 	`, accountID).Scan(&mailboxName)
 	if err != nil {
 		t.Fatalf("delivered message row: %v", err)

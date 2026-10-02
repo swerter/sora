@@ -157,3 +157,16 @@ func TestEvaluateSeesRawMessage(t *testing.T) {
 		}
 	}
 }
+
+// TestEvaluateRejectsEmptyMessage: a Context without Message is a programming
+// error and must not evaluate as "no body, size 0".
+func TestEvaluateRejectsEmptyMessage(t *testing.T) {
+	executor, err := NewSieveExecutorWithExtensions(`require ["fileinto"]; if size :under 1K { fileinto "Small"; }`, DefaultSieveExtensions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = executor.Evaluate(context.Background(), Context{Header: map[string][]string{"Subject": {"x"}}})
+	if err == nil {
+		t.Fatal("evaluated a Context with no Message")
+	}
+}
