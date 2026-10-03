@@ -161,7 +161,7 @@ func TestBuildFTSPrefilterQuerySQL(t *testing.T) {
 	criteria := &imap.SearchCriteria{Body: []string{"Invoice"}}
 
 	query, args, err := db.buildFTSPrefilterQuery(criteria, 42, 7,
-		ftsLightBranchSelect+", "+textUnionSortColumnsLight, ftsLightOuterSelect, "", MaxSearchResults, headerMatchScan, &paramCounter)
+		ftsLightBranchSelect+", "+textUnionSortColumnsLight, ftsLightOuterSelect, "", MaxSearchResults, &paramCounter)
 	require.NoError(t, err)
 
 	assert.Contains(t, query, "AS MATERIALIZED",
@@ -196,7 +196,7 @@ func TestBuildFTSPrefilterQueryRefusesIneligibleCriteria(t *testing.T) {
 	var db *Database
 	paramCounter := 0
 	_, _, err := db.buildFTSPrefilterQuery(&imap.SearchCriteria{Flag: []imap.Flag{imap.FlagSeen}}, 42, 7,
-		ftsLightBranchSelect, ftsLightOuterSelect, "", 100, headerMatchScan, &paramCounter)
+		ftsLightBranchSelect, ftsLightOuterSelect, "", 100, &paramCounter)
 	require.Error(t, err)
 }
 
@@ -218,7 +218,7 @@ func TestBuildFTSPrefilterQueryNestedTerms(t *testing.T) {
 	}
 
 	query, args, err := db.buildFTSPrefilterQuery(criteria, 42, 7,
-		ftsLightBranchSelect+", "+textUnionSortColumnsLight, ftsLightOuterSelect, "", MaxSearchResults, headerMatchScan, &paramCounter)
+		ftsLightBranchSelect+", "+textUnionSortColumnsLight, ftsLightOuterSelect, "", MaxSearchResults, &paramCounter)
 	require.NoError(t, err)
 
 	// The required terms: one combined set, inner-joined.

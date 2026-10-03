@@ -19,6 +19,38 @@ import (
 )
 
 // truncateHash safely truncates a hash string for logging purposes
+// sortColumnsFor derives the denormalized header columns stored on messages for SORT and
+// header SEARCH: the RFC 5256 subject sort key and the lowercased first From/To/Cc name and
+// address. Every value is bounded in bytes (helpers.MaxSubjectBytes, helpers.MaxSortColumnBytes)
+// because idx_messages_mailbox_headers carries these columns and a btree tuple over the limit
+// makes the INSERT fail. The bound is on the stored column only; the message itself is intact.
+func sortColumnsFor(subject string, recipients []helpers.Recipient) (subjectSort, fromNameSort, fromEmailSort, toNameSort, toEmailSort, ccEmailSort string) {
+	// SanitizeSubjectForSort calls SanitizeUTF8 internally.
+	subjectSort = helpers.TruncateUTF8Safe(helpers.SanitizeSubjectForSort(subject), helpers.MaxSubjectBytes)
+	bound := func(v string) string { return helpers.TruncateUTF8Safe(strings.ToLower(v), helpers.MaxSortColumnBytes) }
+	var fromFound, toFound, ccFound bool
+	for _, r := range recipients {
+		switch r.AddressType {
+		case "from":
+			if !fromFound {
+				fromNameSort, fromEmailSort, fromFound = bound(r.Name), bound(r.EmailAddress), true
+			}
+		case "to":
+			if !toFound {
+				toNameSort, toEmailSort, toFound = bound(r.Name), bound(r.EmailAddress), true
+			}
+		case "cc":
+			if !ccFound {
+				ccEmailSort, ccFound = bound(r.EmailAddress), true
+			}
+		}
+		if fromFound && toFound && ccFound {
+			break
+		}
+	}
+	return
+}
+
 func truncateHash(hash string) string {
 	if len(hash) > 12 {
 		return hash[:12]
@@ -564,37 +596,8 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 		return 0, 0, consts.ErrSerializationFailed
 	}
 
-	// Prepare denormalized sort fields for faster sorting.
-	var subjectSort, fromNameSort, fromEmailSort, toNameSort, toEmailSort, ccEmailSort string
-	// Use RFC 5256 subject normalization (strips Re:, Fwd:, etc. prefixes)
-	// SanitizeSubjectForSort calls SanitizeUTF8 internally.
-	subjectSort = helpers.SanitizeSubjectForSort(options.Subject)
-
-	var fromFound, toFound, ccFound bool
-	for _, r := range saneRecipients {
-		switch r.AddressType {
-		case "from":
-			if !fromFound {
-				fromNameSort = strings.ToLower(r.Name)
-				fromEmailSort = strings.ToLower(r.EmailAddress)
-				fromFound = true
-			}
-		case "to":
-			if !toFound {
-				toNameSort = strings.ToLower(r.Name)
-				toEmailSort = strings.ToLower(r.EmailAddress)
-				toFound = true
-			}
-		case "cc":
-			if !ccFound {
-				ccEmailSort = strings.ToLower(r.EmailAddress)
-				ccFound = true
-			}
-		}
-		if fromFound && toFound && ccFound {
-			break
-		}
-	}
+	// Prepare denormalized sort fields for faster sorting (bounded; see sortColumnsFor).
+	subjectSort, fromNameSort, fromEmailSort, toNameSort, toEmailSort, ccEmailSort := sortColumnsFor(options.Subject, saneRecipients)
 
 	inReplyToStr := strings.Join(options.InReplyTo, " ")
 
@@ -624,7 +627,7 @@ func (d *Database) InsertMessage(ctx context.Context, tx pgx.Tx, options *Insert
 	var messageRowId int64
 
 	// Sanitize inputs
-	saneSubject := helpers.SanitizeUTF8(options.Subject)
+	saneSubject := helpers.TruncateUTF8Safe(helpers.SanitizeUTF8(options.Subject), helpers.MaxSubjectBytes)
 	saneInReplyToStr := helpers.TruncateUTF8Safe(helpers.SanitizeUTF8(inReplyToStr), 2000)
 
 	referencesStr := strings.Join(options.References, " ")
@@ -968,37 +971,8 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 		return 0, 0, consts.ErrSerializationFailed
 	}
 
-	// Prepare denormalized sort fields for faster sorting.
-	var subjectSort, fromNameSort, fromEmailSort, toNameSort, toEmailSort, ccEmailSort string
-	// Use RFC 5256 subject normalization (strips Re:, Fwd:, etc. prefixes)
-	// SanitizeSubjectForSort calls SanitizeUTF8 internally.
-	subjectSort = helpers.SanitizeSubjectForSort(options.Subject)
-
-	var fromFound, toFound, ccFound bool
-	for _, r := range saneRecipients {
-		switch r.AddressType {
-		case "from":
-			if !fromFound {
-				fromNameSort = strings.ToLower(r.Name)
-				fromEmailSort = strings.ToLower(r.EmailAddress)
-				fromFound = true
-			}
-		case "to":
-			if !toFound {
-				toNameSort = strings.ToLower(r.Name)
-				toEmailSort = strings.ToLower(r.EmailAddress)
-				toFound = true
-			}
-		case "cc":
-			if !ccFound {
-				ccEmailSort = strings.ToLower(r.EmailAddress)
-				ccFound = true
-			}
-		}
-		if fromFound && toFound && ccFound {
-			break
-		}
-	}
+	// Prepare denormalized sort fields for faster sorting (bounded; see sortColumnsFor).
+	subjectSort, fromNameSort, fromEmailSort, toNameSort, toEmailSort, ccEmailSort := sortColumnsFor(options.Subject, saneRecipients)
 
 	inReplyToStr := strings.Join(options.InReplyTo, " ")
 
@@ -1028,7 +1002,7 @@ func (d *Database) InsertMessageFromImporter(ctx context.Context, tx pgx.Tx, opt
 	var messageRowId int64
 
 	// Sanitize inputs
-	saneSubject := helpers.SanitizeUTF8(options.Subject)
+	saneSubject := helpers.TruncateUTF8Safe(helpers.SanitizeUTF8(options.Subject), helpers.MaxSubjectBytes)
 	saneInReplyToStr := helpers.TruncateUTF8Safe(helpers.SanitizeUTF8(inReplyToStr), 2000)
 
 	referencesStr := strings.Join(options.References, " ")
@@ -1245,33 +1219,7 @@ func (d *Database) InsertMessagesBatch(
 			return nil, nil, nil, fmt.Errorf("failed to marshal recipients for message %s: %w", truncateHash(opt.ContentHash), err)
 		}
 
-		subjectSort := helpers.SanitizeSubjectForSort(opt.Subject)
-		var fromNameSort, fromEmailSort, toNameSort, toEmailSort, ccEmailSort string
-		var fromFound, toFound, ccFound bool
-		for _, r := range saneRecipients {
-			switch r.AddressType {
-			case "from":
-				if !fromFound {
-					fromNameSort = strings.ToLower(r.Name)
-					fromEmailSort = strings.ToLower(r.EmailAddress)
-					fromFound = true
-				}
-			case "to":
-				if !toFound {
-					toNameSort = strings.ToLower(r.Name)
-					toEmailSort = strings.ToLower(r.EmailAddress)
-					toFound = true
-				}
-			case "cc":
-				if !ccFound {
-					ccEmailSort = strings.ToLower(r.EmailAddress)
-					ccFound = true
-				}
-			}
-			if fromFound && toFound && ccFound {
-				break
-			}
-		}
+		subjectSort, fromNameSort, fromEmailSort, toNameSort, toEmailSort, ccEmailSort := sortColumnsFor(opt.Subject, saneRecipients)
 
 		inReplyToStr := strings.Join(opt.InReplyTo, " ")
 		systemFlagsToSet, customKeywordsToSet := SplitFlags(opt.Flags)
@@ -1303,7 +1251,7 @@ func (d *Database) InsertMessagesBatch(
 			Upload:             uploadPtr,
 			SaneMessageID:      saneMessageID,
 			SaneMailboxName:    saneMailboxName,
-			SaneSubject:        helpers.SanitizeUTF8(opt.Subject),
+			SaneSubject:        helpers.TruncateUTF8Safe(helpers.SanitizeUTF8(opt.Subject), helpers.MaxSubjectBytes),
 			SanePlaintextBody:  helpers.SanitizeUTF8(opt.PlaintextBody),
 			SaneInReplyToStr:   helpers.TruncateUTF8Safe(helpers.SanitizeUTF8(inReplyToStr), 2000),
 			SaneReferencesStr:  helpers.TruncateUTF8Safe(helpers.SanitizeUTF8(strings.Join(opt.References, " ")), 2000),
